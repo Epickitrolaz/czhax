@@ -89,7 +89,7 @@ func TestAllViewsAndSizes(t *testing.T) {
 			}
 		}
 
-		// Enter enters System content, arrows navigate options, Esc returns
+		// Enter enters System content, arrows navigate all options, Esc returns
 		m = sendKey(m, "enter")
 		if m.Focus != FocusContent {
 			t.Fatalf("expected FocusContent on enter")
@@ -101,6 +101,28 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "down")
 		if m.System.Cursor != int(SysOptBoot) {
 			t.Fatalf("expected cursor at SysOptBoot, got %d", m.System.Cursor)
+		}
+		m = sendKey(m, "down")
+		if m.System.Cursor != int(SysOptSleep) {
+			t.Fatalf("expected cursor at SysOptSleep, got %d", m.System.Cursor)
+		}
+		m = sendKey(m, "down")
+		if m.System.Cursor != int(SysOptReboot) {
+			t.Fatalf("expected cursor at SysOptReboot, got %d", m.System.Cursor)
+		}
+		m = sendKey(m, "down")
+		if m.System.Cursor != int(SysOptShutdown) {
+			t.Fatalf("expected cursor at SysOptShutdown, got %d", m.System.Cursor)
+		}
+		// Trigger shutdown confirm and cancel cleanly with 'n'
+		m = sendKey(m, "enter")
+		if m.System.Confirm != "shutdown" {
+			t.Fatalf("expected shutdown confirmation prompt, got %q", m.System.Confirm)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/ConfirmShutdown")
+		m = sendKey(m, "n")
+		if m.System.Confirm != "" {
+			t.Fatalf("expected confirmation cleared on 'n'")
 		}
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/Content")
 

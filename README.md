@@ -55,6 +55,8 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
   - **Terminal Shell**: Drop into your interactive shell and return to CZHax with `exit` or `Ctrl+D`
   - **Start on Boot**: Toggle automatic startup on `tty1` (`systemd` service on CM0/RPi OS, or `~/.bash_profile` fallback)
+  - **Sleep Mode**: Turns off LCD backlight, blanks framebuffer, sets USB autosuspend, blocks Wi-Fi/BT, sets CPU `powersave` governor, and dims LEDs; wakes cleanly when pressing the side boot button (or `Enter`/`Esc`)
+  - **Reboot & Shutdown**: Clean system restart / poweroff with inline confirmation
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/updater"
@@ -43,6 +44,15 @@ type sudoUpdateDoneMsg struct {
 type bootToggledMsg struct {
 	state boot.State
 	err   error
+}
+
+type sleepDoneMsg struct {
+	err error
+}
+
+type powerActionDoneMsg struct {
+	action string
+	err    error
 }
 
 type AppModel struct {
@@ -161,6 +171,22 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.System.Note = "Start on boot: OFF"
 		return m, m.setStatus("Boot: OFF")
 
+	case sleepDoneMsg:
+		m.Snap = sysinfo.Collect()
+		if msg.err != nil {
+			m.System.Note = msg.err.Error()
+			return m, m.setStatus("Sleep error")
+		}
+		m.System.Note = "Woke from sleep"
+		return m, m.setStatus("Awake")
+
+	case powerActionDoneMsg:
+		if msg.err != nil {
+			m.System.Note = msg.err.Error()
+			return m, m.setStatus(msg.action + " failed")
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -241,6 +267,30 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
+	if m.ActiveView == ViewSystem && m.System.Confirm != "" {
+		action := m.System.Confirm
+		switch k {
+		case "y", "Y", "enter":
+			m.System.Confirm = ""
+			if action == "shutdown" {
+				m.System.Note = "Shutting down..."
+				return m, func() tea.Msg {
+					return powerActionDoneMsg{action: "shutdown", err: power.Shutdown()}
+				}
+			}
+			m.System.Note = "Rebooting..."
+			return m, func() tea.Msg {
+				return powerActionDoneMsg{action: "reboot", err: power.Reboot()}
+			}
+		case "n", "N", "esc":
+			m.System.Confirm = ""
+			return m, nil
+		default:
+			m.System.Confirm = ""
+			return m, nil
+		}
+	}
+
 	if k == "esc" {
 		m.Focus = FocusTabs
 		return m, nil
@@ -327,6 +377,30 @@ func (m AppModel) activateSystemOption() (tea.Model, tea.Cmd) {
 			st, err := boot.Toggle(username, homeDir, exePath)
 			return bootToggledMsg{state: st, err: err}
 		}
+
+	case SysOptSleep:
+		exePath, err := updater.ExecutablePath()
+		if err != nil {
+			m.System.Note = err.Error()
+			return m, nil
+		}
+		var c *exec.Cmd
+		if power.NeedsSudo() {
+			c = exec.Command("sudo", exePath, "power", "sleep")
+		} else {
+			c = exec.Command(exePath, "power", "sleep")
+		}
+		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return sleepDoneMsg{err: err}
+		})
+
+	case SysOptReboot:
+		m.System.Confirm = "reboot"
+		return m, nil
+
+	case SysOptShutdown:
+		m.System.Confirm = "shutdown"
+		return m, nil
 	}
 	return m, nil
 }
@@ -428,6 +502,8 @@ func (m AppModel) View() string {
 		status := m.StatusMsg
 		if m.ConfirmExit {
 			status = "Quit CZHax? [y/Enter] Yes  [n/Esc] No"
+		} else if m.ActiveView == ViewSystem && m.System.Confirm != "" {
+			status = "Confirm " + m.System.Confirm + "? [y/Enter] Yes  [n/Esc] No"
 		}
 		parts = append(parts, RenderFooter(w, pal, m.Cfg, m.currentHints(), status))
 	}

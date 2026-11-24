@@ -26,6 +26,7 @@ cmd/czhax/main.go          # CLI entrypoint, flags (--cz, --cz45, --version, --u
 internal/
   boot/boot.go             # Start-on-boot toggle (systemd tty1 service or ~/.bash_profile hook)
   config/config.go         # Persistent JSON config (~/.config/czhax/config.json)
+  power/power.go           # Power management (Sleep mode + evdev/key wake, Reboot, Shutdown)
   sysinfo/sysinfo.go       # Linux /proc & /sys telemetry + battery time-to-empty estimation
   theme/theme.go           # High Contrast palette (4-role color hierarchy)
   updater/updater.go       # Self-updater (GitHub Releases API + SHA256 verification + atomic replace)

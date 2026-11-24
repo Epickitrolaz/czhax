@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
 )
@@ -70,6 +71,34 @@ func main() {
 		default:
 			st := boot.DetectState(homeDir)
 			fmt.Printf("enabled=%v method=%s\n", st.Enabled, st.Method)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "power" {
+		sub := ""
+		if len(os.Args) > 2 {
+			sub = os.Args[2]
+		}
+		switch sub {
+		case "sleep":
+			if err := power.RunSleepCommand(); err != nil {
+				fmt.Fprintf(os.Stderr, "sleep error: %v\n", err)
+				os.Exit(1)
+			}
+		case "shutdown":
+			if err := power.Shutdown(); err != nil {
+				fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
+				os.Exit(1)
+			}
+		case "reboot":
+			if err := power.Reboot(); err != nil {
+				fmt.Fprintf(os.Stderr, "reboot error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintln(os.Stderr, "usage: czhax power <sleep|reboot|shutdown>")
+			os.Exit(1)
 		}
 		return
 	}
