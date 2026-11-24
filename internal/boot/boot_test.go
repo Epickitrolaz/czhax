@@ -11,8 +11,11 @@ func TestRenderServiceUnit(t *testing.T) {
 	unit := RenderServiceUnit("pi", "/home/pi", "/usr/local/bin/czhax")
 	for _, want := range []string{
 		"User=pi",
+		"WorkingDirectory=/home/pi",
 		"Environment=HOME=/home/pi",
+		"Environment=SHELL=",
 		"ExecStart=/usr/local/bin/czhax",
+		"StandardError=tty",
 		"Conflicts=getty@tty1.service",
 		"TTYPath=/dev/tty1",
 	} {

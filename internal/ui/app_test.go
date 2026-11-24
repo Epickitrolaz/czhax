@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,5 +141,31 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "?")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Help")
 		m = sendKey(m, "esc")
+	}
+}
+
+func TestTTYExecRoutesNonTTYSysderrToStdout(t *testing.T) {
+	cmd := buildInteractiveShellCmd()
+	var outBuf bytes.Buffer
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rPipe.Close()
+	defer wPipe.Close()
+
+	cmd.SetStdout(&outBuf)
+	cmd.SetStderr(wPipe) // simulate non-TTY journald stderr
+	if cmd.Cmd.Stderr != &outBuf {
+		t.Fatalf("expected non-TTY stderr to route to tty stdout writer")
+	}
+	hasNested := false
+	for _, e := range cmd.Cmd.Env {
+		if e == "CZHAX_NESTED=1" {
+			hasNested = true
+		}
+	}
+	if !hasNested {
+		t.Fatalf("expected CZHAX_NESTED=1 in shell command env")
 	}
 }

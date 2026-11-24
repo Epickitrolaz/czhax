@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -361,9 +360,7 @@ func (m AppModel) activateSystemOption() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case SysOptTerminal:
-		c := exec.Command("sh", "-c", `printf "\n[CZHax] Terminal shell — type 'exit' or press Ctrl+D to return.\n\n"; exec "${SHELL:-/bin/sh}"`)
-		c.Env = append(os.Environ(), "CZHAX_NESTED=1")
-		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+		return m, tea.Exec(buildInteractiveShellCmd(), func(err error) tea.Msg {
 			return shellExitedMsg{err: err}
 		})
 

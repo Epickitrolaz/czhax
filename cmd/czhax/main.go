@@ -29,6 +29,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "update error: %v\n", err)
 			os.Exit(1)
 		}
+		if exePath, err := updater.ExecutablePath(); err == nil {
+			boot.SyncInstalledService(exePath)
+		}
 		return
 	}
 
@@ -131,6 +134,9 @@ func main() {
 		if err := updater.Run(version, *forceFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "update error: %v\n", err)
 			os.Exit(1)
+		}
+		if exePath, err := updater.ExecutablePath(); err == nil {
+			boot.SyncInstalledService(exePath)
 		}
 		return
 	}

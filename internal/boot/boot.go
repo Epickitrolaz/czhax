@@ -71,6 +71,7 @@ func RenderServiceUnit(username, homeDir, exePath string) string {
 	if homeDir == "" {
 		homeDir = "/root"
 	}
+	shellPath := detectUserShell(username)
 	return fmt.Sprintf(`[Unit]
 Description=CZHax TUI on tty1
 After=systemd-user-sessions.service
@@ -78,13 +79,17 @@ Conflicts=getty@tty1.service
 
 [Service]
 User=%s
+WorkingDirectory=%s
 Environment=TERM=linux
 Environment=HOME=%s
+Environment=USER=%s
+Environment=LOGNAME=%s
+Environment=SHELL=%s
 ExecStartPre=+/bin/sh -c 'dmesg -n 1 >/dev/null 2>&1 || true'
 ExecStart=%s
 StandardInput=tty
 StandardOutput=tty
-StandardError=journal
+StandardError=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
@@ -93,7 +98,62 @@ RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
-`, username, homeDir, exePath)
+`, username, homeDir, homeDir, username, username, shellPath, exePath)
+}
+
+func detectUserShell(username string) string {
+	if data, err := os.ReadFile("/etc/passwd"); err == nil && username != "" {
+		prefix := username + ":"
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				fields := strings.Split(line, ":")
+				if len(fields) >= 7 && strings.TrimSpace(fields[6]) != "" {
+					return strings.TrimSpace(fields[6])
+				}
+				break
+			}
+		}
+	}
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash"
+	}
+	return "/bin/sh"
+}
+
+// SyncInstalledService refreshes czhax.service if systemd boot is already enabled
+// (for example, during `sudo czhax update`).
+func SyncInstalledService(exePath string) {
+	if !HasSystemd() || os.Geteuid() != 0 {
+		return
+	}
+	existing, err := os.ReadFile(servicePath)
+	if err != nil {
+		return
+	}
+	username := os.Getenv("SUDO_USER")
+	homeDir := ""
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.HasPrefix(line, "User=") {
+			username = strings.TrimSpace(strings.TrimPrefix(line, "User="))
+		}
+		if strings.HasPrefix(line, "Environment=HOME=") {
+			homeDir = strings.TrimSpace(strings.TrimPrefix(line, "Environment=HOME="))
+		}
+	}
+	if homeDir == "" && username != "" {
+		if u, err := user.Lookup(username); err == nil {
+			homeDir = u.HomeDir
+		}
+	}
+	if exePath == "" {
+		exePath, _ = os.Executable()
+	}
+	updated := RenderServiceUnit(username, homeDir, exePath)
+	if string(existing) != updated {
+		if os.WriteFile(servicePath, []byte(updated), 0o644) == nil {
+			_ = exec.Command("systemctl", "daemon-reload").Run()
+		}
+	}
 }
 
 func Toggle(username, homeDir, exePath string) (State, error) {
