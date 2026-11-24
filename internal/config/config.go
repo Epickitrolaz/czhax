@@ -46,12 +46,9 @@ type Config struct {
 	Sidebar        SidebarMode  `json:"sidebar"`
 	Border         BorderMode   `json:"border"`
 	ShowKeyHints   bool         `json:"show_key_hints"`
-	ShowFnBar      bool         `json:"show_fn_bar"`
 	NavMode        NavKeyMode   `json:"nav_mode"`
 	RefreshSeconds int          `json:"refresh_seconds"`
-	StealthMode    bool         `json:"stealth_mode"`
 	ConfirmQuit    bool         `json:"confirm_quit"`
-	PinnedIDs      []string     `json:"pinned_ids"`
 }
 
 func Default() Config {
@@ -61,12 +58,9 @@ func Default() Config {
 		Sidebar:        SidebarAuto,
 		Border:         BorderCompact,
 		ShowKeyHints:   true,
-		ShowFnBar:      false,
 		NavMode:        NavArrowsVim,
 		RefreshSeconds: 2,
-		StealthMode:    false,
 		ConfirmQuit:    true,
-		PinnedIDs:      []string{"wifi-recon", "net-scan", "sys-mon", "net-if"},
 	}
 }
 
@@ -81,10 +75,6 @@ func DefaultPath() string {
 		}
 	}
 	return filepath.Join(base, "czhax", "config.json")
-}
-
-func NotesPath() string {
-	return filepath.Join(filepath.Dir(DefaultPath()), "notes.txt")
 }
 
 func Load(path string) (Config, error) {
@@ -148,8 +138,5 @@ func (c *Config) normalize() {
 	}
 	if c.RefreshSeconds > 60 {
 		c.RefreshSeconds = 60
-	}
-	if len(c.PinnedIDs) == 0 {
-		c.PinnedIDs = Default().PinnedIDs
 	}
 }

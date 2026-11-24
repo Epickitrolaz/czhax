@@ -9,13 +9,13 @@ UNINSTALL=0
 
 usage() {
   cat <<EOF
-CZHax binary installer for M5Stack Cardputer Zero & Linux
+CZHax binary installer & updater for M5Stack Cardputer Zero & Linux
 
 Usage:
   install.sh [options]
 
 Options:
-  --version <tag>   Install a specific release tag (e.g. v0.1.0). Default: latest
+  --version <tag>   Install a specific release tag (e.g. v0.2.0). Default: latest
   --user            Install to \$HOME/.local/bin instead of /usr/local/bin
   --uninstall       Remove installed czhax binary
   -h, --help        Show this help
@@ -96,23 +96,40 @@ case "$ARCH" in
     ;;
 esac
 
-if [[ "$VERSION" == "latest" ]]; then
+resolve_latest_tag() {
+  local api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  local tag=""
   if command -v curl >/dev/null 2>&1; then
-    RESOLVED_URL="$(curl -fsSL -H 'Cache-Control: no-cache' -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
-    VERSION="${RESOLVED_URL##*/}"
-  elif command -v wget >/dev/null 2>&1; then
-    RESOLVED_URL="$(wget -q --max-redirect=5 --server-response "https://github.com/${REPO}/releases/latest" -O /dev/null 2>&1 | awk '/^  Location: /{loc=$2} END{print loc}' | tr -d '\r')"
-    if [[ -n "$RESOLVED_URL" ]]; then
-      VERSION="${RESOLVED_URL##*/}"
+    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'Cache-Control: no-cache' "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    if [[ -z "$tag" ]]; then
+      local url
+      url="$(curl -fsSL -H 'Cache-Control: no-cache' -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+      tag="${url##*/}"
     fi
+  elif command -v wget >/dev/null 2>&1; then
+    tag="$(wget -qO- --header='Accept: application/vnd.github+json' --header='Cache-Control: no-cache' "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    if [[ -z "$tag" ]]; then
+      local url
+      url="$(wget -q --max-redirect=5 --server-response "https://github.com/${REPO}/releases/latest" -O /dev/null 2>&1 | awk '/^  Location: /{loc=$2} END{print loc}' | tr -d '\r')"
+      tag="${url##*/}"
+    fi
+  fi
+  printf '%s' "$tag"
+}
+
+if [[ "$VERSION" == "latest" ]]; then
+  RESOLVED="$(resolve_latest_tag)"
+  if [[ -n "$RESOLVED" && "$RESOLVED" != "latest" ]]; then
+    VERSION="$RESOLVED"
   fi
 fi
 
 if [[ "$VERSION" == "latest" || -z "$VERSION" ]]; then
-  BASE_URL="https://github.com/${REPO}/releases/latest/download"
-else
-  BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+  echo "error: could not resolve latest release tag from GitHub" >&2
+  exit 1
 fi
+
+BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -120,27 +137,29 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 echo "Downloading ${ASSET} (${VERSION})..."
 if command -v curl >/dev/null 2>&1; then
   curl -fL --progress-bar "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${BIN_NAME}"
-  curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt" 2>/dev/null || true
+  curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt"
 elif command -v wget >/dev/null 2>&1; then
   wget -q --show-progress "${BASE_URL}/${ASSET}" -O "${TMP_DIR}/${BIN_NAME}"
-  wget -q "${BASE_URL}/checksums.txt" -O "${TMP_DIR}/checksums.txt" 2>/dev/null || true
+  wget -q "${BASE_URL}/checksums.txt" -O "${TMP_DIR}/checksums.txt"
 else
   echo "error: curl or wget is required" >&2
   exit 1
 fi
 
-if [[ -s "${TMP_DIR}/checksums.txt" ]] && command -v sha256sum >/dev/null 2>&1; then
+if command -v sha256sum >/dev/null 2>&1; then
   EXPECTED="$(grep " ${ASSET}\$" "${TMP_DIR}/checksums.txt" | awk '{print $1}' || true)"
-  if [[ -n "$EXPECTED" ]]; then
-    ACTUAL="$(sha256sum "${TMP_DIR}/${BIN_NAME}" | awk '{print $1}')"
-    if [[ "$EXPECTED" != "$ACTUAL" ]]; then
-      echo "error: checksum mismatch for ${ASSET}" >&2
-      echo "  expected: ${EXPECTED}" >&2
-      echo "  actual:   ${ACTUAL}" >&2
-      exit 1
-    fi
-    echo "SHA256 verified."
+  if [[ -z "$EXPECTED" ]]; then
+    echo "error: checksum entry for ${ASSET} missing in checksums.txt" >&2
+    exit 1
   fi
+  ACTUAL="$(sha256sum "${TMP_DIR}/${BIN_NAME}" | awk '{print $1}')"
+  if [[ "$EXPECTED" != "$ACTUAL" ]]; then
+    echo "error: checksum mismatch for ${ASSET}" >&2
+    echo "  expected: ${EXPECTED}" >&2
+    echo "  actual:   ${ACTUAL}" >&2
+    exit 1
+  fi
+  echo "SHA256 verified."
 fi
 
 chmod +x "${TMP_DIR}/${BIN_NAME}"
@@ -159,4 +178,4 @@ fi
 echo ""
 echo "Installed ${BIN_NAME} to ${TARGET_PATH}"
 "${TARGET_PATH}" --version || true
-echo "Run 'czhax' on Cardputer Zero, or 'czhax --cz' on a desktop terminal."
+echo "Run 'czhax' to start, or 'sudo czhax update' anytime to update."

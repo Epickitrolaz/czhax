@@ -27,16 +27,13 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 	dangerStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 
 	brandTxt := "CZHAX"
-	if sideW >= 7 {
-		brandTxt = " CZHAX "
+	if sideW >= 8 {
+		brandTxt = " CZHAX  "
 	}
 	leftCell := brandStyle.Render(FitLine(brandTxt, sideW))
 
-	// Right status (battery + net + stealth)
+	// Right status (battery + net)
 	var stParts []string
-	if cfg.StealthMode {
-		stParts = append(stParts, warnStyle.Render("STL"))
-	}
 	if snap.HasBattery {
 		pfx := ""
 		if snap.Charging {
@@ -123,7 +120,7 @@ func RenderSidebarColumn(sideW, bodyH int, pal theme.Palette, cfg config.Config,
 	for i := start; i < end; i++ {
 		vd := TopViews[i]
 		lbl := vd.Name
-		if sideW < 7 {
+		if sideW < 8 {
 			lbl = vd.Short3
 		}
 		if ViewID(i) == active {

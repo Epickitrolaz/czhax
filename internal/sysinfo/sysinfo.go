@@ -22,26 +22,30 @@ type NetIface struct {
 }
 
 type Snapshot struct {
-	Hostname   string
-	Arch       string
-	Kernel     string
-	Uptime     time.Duration
-	Load1      string
-	MemUsedMB  uint64
-	MemTotalMB uint64
-	DiskFreeGB float64
-	DiskTotGB  float64
-	TempC      float64
-	HasTemp    bool
-	BatteryPct int
-	HasBattery bool
-	Charging   bool
-	PrimaryIP  string
-	NetUp      bool
-	WifiUp     bool
-	Interfaces []NetIface
-	IsCardZero bool
-	Collected  time.Time
+	Hostname      string
+	Arch          string
+	Kernel        string
+	Uptime        time.Duration
+	Load1         string
+	MemUsedMB     uint64
+	MemTotalMB    uint64
+	DiskFreeGB    float64
+	DiskTotGB     float64
+	TempC         float64
+	HasTemp       bool
+	BatteryPct    int
+	HasBattery    bool
+	Charging      bool
+	BatTimeLeft   time.Duration
+	HasBatTime    bool
+	BatTimeToFull time.Duration
+	HasFullTime   bool
+	PrimaryIP     string
+	NetUp         bool
+	WifiUp        bool
+	Interfaces    []NetIface
+	IsCardZero    bool
+	Collected     time.Time
 }
 
 func Collect() Snapshot {
@@ -86,9 +90,17 @@ func Collect() Snapshot {
 	s.MemUsedMB, s.MemTotalMB = readMemMB()
 	s.DiskFreeGB, s.DiskTotGB = readDiskGB("/")
 	s.TempC, s.HasTemp = readTempC()
-	s.BatteryPct, s.Charging, s.HasBattery = readBattery()
-	s.Interfaces = readInterfaces()
 
+	bat := readBatteryFromDir("/sys/class/power_supply")
+	s.BatteryPct = bat.Pct
+	s.Charging = bat.Charging
+	s.HasBattery = bat.Present
+	s.BatTimeLeft = bat.TimeLeft
+	s.HasBatTime = bat.HasTimeLeft
+	s.BatTimeToFull = bat.TimeToFull
+	s.HasFullTime = bat.HasTimeToFull
+
+	s.Interfaces = readInterfaces()
 	for _, iface := range s.Interfaces {
 		if iface.Name == "lo" || !iface.Up {
 			continue
@@ -105,6 +117,120 @@ func Collect() Snapshot {
 	}
 
 	return s
+}
+
+type BatteryInfo struct {
+	Present       bool
+	Pct           int
+	Charging      bool
+	TimeLeft      time.Duration
+	HasTimeLeft   bool
+	TimeToFull    time.Duration
+	HasTimeToFull bool
+}
+
+func readBatteryFromDir(sysPowerSupply string) BatteryInfo {
+	entries, err := os.ReadDir(sysPowerSupply)
+	if err != nil {
+		return BatteryInfo{}
+	}
+	for _, e := range entries {
+		base := filepath.Join(sysPowerSupply, e.Name())
+		// Skip mains/USB supply entries if type is known and not Battery
+		if typ, ok := readTrimmed(filepath.Join(base, "type")); ok {
+			if !strings.EqualFold(typ, "Battery") {
+				continue
+			}
+		}
+		capStr, ok := readTrimmed(filepath.Join(base, "capacity"))
+		if !ok {
+			continue
+		}
+		pct, err := strconv.Atoi(capStr)
+		if err != nil {
+			continue
+		}
+
+		info := BatteryInfo{
+			Present: true,
+			Pct:     pct,
+		}
+		if st, ok := readTrimmed(filepath.Join(base, "status")); ok {
+			low := strings.ToLower(st)
+			info.Charging = low == "charging" || low == "full"
+		}
+
+		// 1. Direct fuel-gauge time_to_empty_* (seconds, exposed by BQ27220 / bq27xxx)
+		if !info.Charging {
+			if secs, ok := readPositiveInt64(base, "time_to_empty_now", "time_to_empty_avg"); ok {
+				info.TimeLeft = time.Duration(secs) * time.Second
+				info.HasTimeLeft = true
+			} else if secs, ok := estimateEmptyFromRate(base); ok {
+				info.TimeLeft = time.Duration(secs) * time.Second
+				info.HasTimeLeft = true
+			}
+		} else {
+			if secs, ok := readPositiveInt64(base, "time_to_full_now", "time_to_full_avg"); ok {
+				info.TimeToFull = time.Duration(secs) * time.Second
+				info.HasTimeToFull = true
+			}
+		}
+		return info
+	}
+	return BatteryInfo{}
+}
+
+func estimateEmptyFromRate(base string) (int64, bool) {
+	if eNow, ok := readPositiveInt64(base, "energy_now"); ok {
+		if pNow, ok := readAbsInt64(base, "power_now"); ok && pNow > 0 {
+			return (eNow * 3600) / pNow, true
+		}
+	}
+	if cNow, ok := readPositiveInt64(base, "charge_now"); ok {
+		if iNow, ok := readAbsInt64(base, "current_now"); ok && iNow > 0 {
+			return (cNow * 3600) / iNow, true
+		}
+	}
+	return 0, false
+}
+
+func readTrimmed(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(b)), true
+}
+
+func readPositiveInt64(base string, names ...string) (int64, bool) {
+	for _, n := range names {
+		s, ok := readTrimmed(filepath.Join(base, n))
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err == nil && v > 0 && v < 100*24*3600 {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+func readAbsInt64(base string, names ...string) (int64, bool) {
+	for _, n := range names {
+		s, ok := readTrimmed(filepath.Join(base, n))
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err == nil && v != 0 {
+			if v < 0 {
+				v = -v
+			}
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 func readMemMB() (used uint64, total uint64) {
@@ -171,30 +297,6 @@ func readTempC() (float64, bool) {
 	return 0, false
 }
 
-func readBattery() (pct int, charging bool, ok bool) {
-	entries, err := os.ReadDir("/sys/class/power_supply")
-	if err != nil {
-		return 0, false, false
-	}
-	for _, e := range entries {
-		base := filepath.Join("/sys/class/power_supply", e.Name())
-		capBytes, err := os.ReadFile(filepath.Join(base, "capacity"))
-		if err != nil {
-			continue
-		}
-		v, err := strconv.Atoi(strings.TrimSpace(string(capBytes)))
-		if err != nil {
-			continue
-		}
-		if stBytes, err := os.ReadFile(filepath.Join(base, "status")); err == nil {
-			st := strings.ToLower(strings.TrimSpace(string(stBytes)))
-			charging = st == "charging" || st == "full"
-		}
-		return v, charging, true
-	}
-	return 0, false, false
-}
-
 func readInterfaces() []NetIface {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -219,7 +321,7 @@ func readInterfaces() []NetIface {
 	return out
 }
 
-func FormatUptime(d time.Duration) string {
+func FormatDuration(d time.Duration) string {
 	if d <= 0 {
 		return "0m"
 	}
@@ -229,7 +331,7 @@ func FormatUptime(d time.Duration) string {
 		return fmt.Sprintf("%dd%dh", h/24, h%24)
 	}
 	if h > 0 {
-		return fmt.Sprintf("%dh%dm", h, m)
+		return fmt.Sprintf("%dh%02dm", h, m)
 	}
-	return fmt.Sprintf("%dm", m)
+	return fmt.Sprintf("%dm", max(1, m))
 }

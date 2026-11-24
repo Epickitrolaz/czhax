@@ -36,22 +36,6 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 		return barStyle.Width(w).Render(FitLine(msgStyle.Render(statusMsg), w))
 	}
 
-	if cfg.ShowFnBar {
-		fnHints := []Hint{
-			{Key: "F4", Desc: "Dsh"},
-			{Key: "F5", Desc: "Rcn"},
-			{Key: "F6", Desc: "Net"},
-			{Key: "F7", Desc: "Sys"},
-			{Key: "F8", Desc: "Opt"},
-		}
-		var parts []string
-		for _, h := range fnHints {
-			parts = append(parts, keyStyle.Render(h.Key)+descStyle.Render(":"+h.Desc))
-		}
-		line := strings.Join(parts, barStyle.Render(" "))
-		return barStyle.Width(w).Render(FitLine(line, w))
-	}
-
 	var parts []string
 	used := 0
 	for i, h := range hints {

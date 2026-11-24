@@ -12,12 +12,7 @@ import (
 type ViewID int
 
 const (
-	ViewDash ViewID = iota
-	ViewRecon
-	ViewNet
-	ViewLab
-	ViewSys
-	ViewOpts
+	ViewStatus ViewID = iota
 	viewCount
 )
 
@@ -29,12 +24,7 @@ type ViewDef struct {
 }
 
 var TopViews = []ViewDef{
-	{ID: ViewDash, Name: "Dash", Short3: "Dsh", Tabs: []string{"Pulse", "Pinned", "System"}},
-	{ID: ViewRecon, Name: "Recon", Short3: "Rcn", Tabs: []string{"WiFi", "BLE", "IR"}},
-	{ID: ViewNet, Name: "Net", Short3: "Net", Tabs: []string{"IFs", "Scan", "Pkt"}},
-	{ID: ViewLab, Name: "Lab", Short3: "Lab", Tabs: []string{"Crypto", "HWBus"}},
-	{ID: ViewSys, Name: "Sys", Short3: "Sys", Tabs: []string{"Mon", "Notes", "Files"}},
-	{ID: ViewOpts, Name: "Opts", Short3: "Opt", Tabs: []string{"Display", "Ctrls", "Keys"}},
+	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device"}},
 }
 
 // ResolveViewport computes inner TUI width and height (and whether a desktop CZ bezel should be drawn).
@@ -77,12 +67,12 @@ func ResolveSidebarWidth(totalW int, mode config.SidebarMode) int {
 	case config.SidebarSlim:
 		return 5
 	case config.SidebarWide:
-		return 7
+		return 8
 	default:
 		if totalW < 50 {
 			return 5
 		}
-		return 7
+		return 8
 	}
 }
 
@@ -128,10 +118,6 @@ func SplitLinesPadded(lines []string, width, height int) []string {
 		}
 	}
 	return out
-}
-
-func PadLines(lines []string, width, height int, emptyLine string) string {
-	return strings.Join(SplitLinesPadded(lines, width, height), "\n")
 }
 
 func MiniBar(ratio float64, width int, ascii bool) string {

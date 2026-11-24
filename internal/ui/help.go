@@ -21,14 +21,13 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 
 	rows := []string{
-		" " + sec.Render("↑↓/Fn+F,X ") + txt.Render("Vertical views / list"),
-		" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Top tabs / adjust"),
+		" " + sec.Render("↑↓/Fn+F,X ") + txt.Render("Vertical tabs / scroll"),
+		" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Horizontal tabs"),
 		" " + sec.Render("Enter     ") + txt.Render("Enter tab content"),
-		" " + sec.Render("Esc       ") + txt.Render("Back to tab select"),
-		" " + sec.Render("F4 - F8   ") + txt.Render("Jump top views"),
-		" " + sec.Render("/  or  ?  ") + txt.Render("Quick find / Help"),
-		" " + sec.Render("p / s / r ") + txt.Render("Pin / Stealth / Ref"),
-		" " + sec.Render("q         ") + txt.Render("Quit CZHax"),
+		" " + sec.Render("Esc       ") + txt.Render("Return to tabs"),
+		" " + sec.Render("r         ") + txt.Render("Refresh device status"),
+		" " + sec.Render("?         ") + txt.Render("Toggle help"),
+		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
 	}
 
 	maxScroll := max(0, len(rows)-h)

@@ -11,8 +11,6 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 
 	cfg := Default()
 	cfg.Viewport = ViewportCZ5314
-	cfg.ShowFnBar = true
-	cfg.StealthMode = true
 	cfg.RefreshSeconds = 5
 
 	if err := Save(path, cfg); err != nil {
@@ -23,7 +21,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if got.Theme != "mono-hi" || got.Viewport != ViewportCZ5314 || !got.ShowFnBar || !got.StealthMode || got.RefreshSeconds != 5 {
+	if got.Theme != "mono-hi" || got.Viewport != ViewportCZ5314 || got.RefreshSeconds != 5 {
 		t.Fatalf("loaded config mismatch: %+v", got)
 	}
 }
@@ -34,7 +32,7 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Theme != Default().Theme {
-		t.Fatalf("expected default theme %q, got %q", Default().Theme, got.Theme)
+	if got.Theme != "mono-hi" {
+		t.Fatalf("expected default theme mono-hi, got %q", got.Theme)
 	}
 }
