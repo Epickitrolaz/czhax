@@ -44,13 +44,17 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status` / `Sts`) and top horizontal tab bar (`Device`).
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `System`/`Sys`) and top horizontal tab bar.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
   - RAM & Disk usage bars
   - Battery percentage & **estimated time remaining until battery runs out** (via Linux `power_supply` fuel-gauge `time_to_empty_*` or charge/energy rate)
   - CPU temperature, 1m load, and uptime
+- **System Tools (`System → Tools`)**:
+  - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
+  - **Terminal Shell**: Drop into your interactive shell and return to CZHax with `exit` or `Ctrl+D`
+  - **Start on Boot**: Toggle automatic startup on `tty1` (`systemd` service on CM0/RPi OS, or `~/.bash_profile` fallback)
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection

@@ -24,6 +24,7 @@ Never design for a desktop monitor first. Every screen must remain clean and leg
 ```text
 cmd/czhax/main.go          # CLI entrypoint, flags (--cz, --cz45, --version, --update) & `czhax update`
 internal/
+  boot/boot.go             # Start-on-boot toggle (systemd tty1 service or ~/.bash_profile hook)
   config/config.go         # Persistent JSON config (~/.config/czhax/config.json)
   sysinfo/sysinfo.go       # Linux /proc & /sys telemetry + battery time-to-empty estimation
   theme/theme.go           # High Contrast palette (4-role color hierarchy)
@@ -33,6 +34,7 @@ internal/
     shell.go               # Top horizontal tab bar, left vertical sidebar, pane divider
     footer.go              # Context-sensitive bottom keyhint bar
     status.go              # Status -> Device view
+    system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)
     help.go                # Help overlay
     app.go                 # Root Bubble Tea model (FocusTabs <-> FocusContent)
     app_test.go            # Mandatory bounds & navigation tests across 40x10, 45x10, 53x14, 100x30

@@ -20,6 +20,13 @@ type releaseInfo struct {
 	TagName string `json:"tag_name"`
 }
 
+type Result struct {
+	CurrentVersion string
+	LatestVersion  string
+	Updated        bool
+	ExePath        string
+}
+
 func AssetName(goos, goarch string) (string, error) {
 	if goos != "linux" {
 		return "", fmt.Errorf("self-update supports Linux binaries only (got %s)", goos)
@@ -46,61 +53,88 @@ func ParseChecksum(checksumsBody, asset string) (string, bool) {
 	return "", false
 }
 
-func Run(currentVersion string, force bool) error {
-	asset, err := AssetName(runtime.GOOS, runtime.GOARCH)
-	if err != nil {
-		return err
-	}
-
+func ExecutablePath() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate executable: %w", err)
+		return "", fmt.Errorf("locate executable: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
 		exePath = resolved
 	}
+	return exePath, nil
+}
+
+func NeedsSudo() bool {
+	if os.Geteuid() == 0 {
+		return false
+	}
+	exePath, err := ExecutablePath()
+	if err != nil {
+		return false
+	}
+	dir := filepath.Dir(exePath)
+	f, err := os.CreateTemp(dir, ".czhax-perm-*")
+	if err != nil {
+		return os.IsPermission(err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return false
+}
+
+func CheckAndUpdate(currentVersion string, force bool) (Result, error) {
+	res := Result{CurrentVersion: currentVersion}
+	asset, err := AssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return res, err
+	}
+
+	exePath, err := ExecutablePath()
+	if err != nil {
+		return res, err
+	}
+	res.ExePath = exePath
 
 	client := &http.Client{Timeout: 45 * time.Second}
 	latestTag, err := fetchLatestTag(client)
 	if err != nil {
-		return err
+		return res, err
 	}
+	res.LatestVersion = latestTag
 
 	if !force && currentVersion == latestTag {
-		fmt.Printf("czhax is already up to date (%s).\n", currentVersion)
-		return nil
+		return res, nil
 	}
-
-	fmt.Printf("Updating czhax (%s -> %s) [%s]...\n", currentVersion, latestTag, asset)
 
 	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/%s", repo, latestTag)
 	binBytes, err := fetchBytes(client, baseURL+"/"+asset)
 	if err != nil {
-		return fmt.Errorf("download %s: %w", asset, err)
+		return res, fmt.Errorf("download %s: %w", asset, err)
 	}
 
 	csBytes, err := fetchBytes(client, baseURL+"/checksums.txt")
 	if err != nil {
-		return fmt.Errorf("download checksums.txt: %w", err)
+		return res, fmt.Errorf("download checksums.txt: %w", err)
 	}
 	expected, ok := ParseChecksum(string(csBytes), asset)
 	if !ok {
-		return fmt.Errorf("checksum entry for %s not found", asset)
+		return res, fmt.Errorf("checksum entry for %s not found", asset)
 	}
 
 	sum := sha256.Sum256(binBytes)
 	actual := hex.EncodeToString(sum[:])
 	if actual != expected {
-		return fmt.Errorf("checksum mismatch for %s (expected %s, got %s)", asset, expected, actual)
+		return res, fmt.Errorf("checksum mismatch for %s (expected %s, got %s)", asset, expected, actual)
 	}
 
 	dir := filepath.Dir(exePath)
 	tmp, err := os.CreateTemp(dir, ".czhax-update-*")
 	if err != nil {
 		if os.IsPermission(err) {
-			return fmt.Errorf("permission denied writing to %s (run: sudo czhax update)", dir)
+			return res, fmt.Errorf("permission denied writing to %s (run: sudo czhax update)", dir)
 		}
-		return fmt.Errorf("create temp file in %s: %w", dir, err)
+		return res, fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
 	cleanup := true
@@ -112,24 +146,37 @@ func Run(currentVersion string, force bool) error {
 
 	if _, err := tmp.Write(binBytes); err != nil {
 		_ = tmp.Close()
-		return err
+		return res, err
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		_ = tmp.Close()
-		return err
+		return res, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return res, err
 	}
 
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		if os.IsPermission(err) {
-			return fmt.Errorf("permission denied replacing %s (run: sudo czhax update)", exePath)
+			return res, fmt.Errorf("permission denied replacing %s (run: sudo czhax update)", exePath)
 		}
-		return err
+		return res, err
 	}
 	cleanup = false
-	fmt.Printf("Updated %s to %s (SHA256 verified).\n", exePath, latestTag)
+	res.Updated = true
+	return res, nil
+}
+
+func Run(currentVersion string, force bool) error {
+	res, err := CheckAndUpdate(currentVersion, force)
+	if err != nil {
+		return err
+	}
+	if !res.Updated {
+		fmt.Printf("czhax is already up to date (%s).\n", res.CurrentVersion)
+		return nil
+	}
+	fmt.Printf("Updated %s (%s -> %s, SHA256 verified).\n", res.ExePath, res.CurrentVersion, res.LatestVersion)
 	return nil
 }
 
@@ -156,7 +203,6 @@ func fetchLatestTag(client *http.Client) (string, error) {
 		}
 	}
 
-	// Fallback to /releases/latest redirect
 	webURL := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
 	r2, err := client.Get(webURL)
 	if err != nil {

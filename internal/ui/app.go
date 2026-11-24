@@ -2,14 +2,19 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
+	"github.com/czhax/czhax/internal/updater"
 )
 
 type FocusZone int
@@ -22,9 +27,28 @@ const (
 type tickMsg time.Time
 type clearStatusMsg struct{}
 
+type updateDoneMsg struct {
+	res updater.Result
+	err error
+}
+
+type shellExitedMsg struct {
+	err error
+}
+
+type sudoUpdateDoneMsg struct {
+	err error
+}
+
+type bootToggledMsg struct {
+	state boot.State
+	err   error
+}
+
 type AppModel struct {
 	Cfg        config.Config
 	ConfigPath string
+	Version    string
 	Snap       sysinfo.Snapshot
 
 	TermW int
@@ -35,6 +59,7 @@ type AppModel struct {
 	Focus      FocusZone
 
 	Status StatusView
+	System SystemView
 	Help   HelpView
 
 	ShowHelp    bool
@@ -42,15 +67,20 @@ type AppModel struct {
 	StatusMsg   string
 }
 
-func NewAppModel(cfg config.Config, cfgPath string) AppModel {
+func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
+	if version == "" {
+		version = "dev"
+	}
 	return AppModel{
 		Cfg:        cfg,
 		ConfigPath: cfgPath,
+		Version:    version,
 		Snap:       sysinfo.Collect(),
 		TermW:      53,
 		TermH:      14,
 		ActiveView: ViewStatus,
 		Focus:      FocusTabs,
+		System:     NewSystemView(),
 	}
 }
 
@@ -70,7 +100,7 @@ func (m AppModel) scheduleTick() tea.Cmd {
 
 func (m *AppModel) setStatus(msg string) tea.Cmd {
 	m.StatusMsg = msg
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 		return clearStatusMsg{}
 	})
 }
@@ -89,6 +119,47 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearStatusMsg:
 		m.StatusMsg = ""
 		return m, nil
+
+	case updateDoneMsg:
+		m.System.Updating = false
+		if msg.err != nil {
+			m.System.Note = msg.err.Error()
+			return m, m.setStatus("Update failed")
+		}
+		if !msg.res.Updated {
+			m.System.Note = "Already up to date (" + msg.res.CurrentVersion + ")"
+			return m, m.setStatus("Up to date")
+		}
+		m.Version = msg.res.LatestVersion
+		m.System.Note = "Updated to " + msg.res.LatestVersion + " (restart czhax)"
+		return m, m.setStatus("Updated: " + msg.res.LatestVersion)
+
+	case sudoUpdateDoneMsg:
+		m.System.Updating = false
+		if msg.err != nil {
+			m.System.Note = "Update canceled or failed"
+			return m, m.setStatus("Update failed")
+		}
+		m.System.Note = "Update complete (restart czhax)"
+		return m, m.setStatus("Update finished")
+
+	case shellExitedMsg:
+		m.Snap = sysinfo.Collect()
+		m.System.RefreshBootState()
+		return m, m.setStatus("Returned from shell")
+
+	case bootToggledMsg:
+		m.System.BootState = msg.state
+		if msg.err != nil {
+			m.System.Note = msg.err.Error()
+			return m, m.setStatus("Boot toggle failed")
+		}
+		if msg.state.Enabled {
+			m.System.Note = "Start on boot: ON (" + string(msg.state.Method) + ")"
+			return m, m.setStatus("Boot: ON")
+		}
+		m.System.Note = "Start on boot: OFF"
+		return m, m.setStatus("Boot: OFF")
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -133,6 +204,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		m.Snap = sysinfo.Collect()
+		m.System.RefreshBootState()
 		return m, m.setStatus("Refreshed")
 	case "q":
 		if m.Cfg.ConfirmQuit {
@@ -154,6 +226,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cycleTab(1)
 		case k == "enter":
 			m.Focus = FocusContent
+			if m.ActiveView == ViewSystem {
+				m.System.RefreshBootState()
+			}
 		case k == "esc":
 			if m.Cfg.ConfirmQuit {
 				m.ConfirmExit = true
@@ -162,18 +237,96 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Inside tab content: arrows belong to content, Esc returns to tab selection
-	_, mainW, bodyH := m.dimensions()
-	pal := theme.Resolve(m.Cfg.Theme, false)
-	totalRows := len(m.Status.BuildRows(mainW, pal, m.Cfg, m.Snap))
+	return m.handleContentKey(k)
+}
 
-	switch {
-	case k == "esc":
+func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
+	if k == "esc" {
 		m.Focus = FocusTabs
-	case m.isUp(k):
-		m.Status.Move(-1, totalRows, bodyH)
-	case m.isDown(k):
-		m.Status.Move(1, totalRows, bodyH)
+		return m, nil
+	}
+
+	switch m.ActiveView {
+	case ViewStatus:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		totalRows := len(m.Status.BuildRows(mainW, pal, m.Cfg, m.Snap))
+		switch {
+		case m.isUp(k):
+			m.Status.Move(-1, totalRows, bodyH)
+		case m.isDown(k):
+			m.Status.Move(1, totalRows, bodyH)
+		}
+		return m, nil
+
+	case ViewSystem:
+		switch {
+		case m.isUp(k):
+			m.System.Move(-1)
+			m.System.Note = ""
+		case m.isDown(k):
+			m.System.Move(1)
+			m.System.Note = ""
+		case k == "enter" || k == " ":
+			return m.activateSystemOption()
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m AppModel) activateSystemOption() (tea.Model, tea.Cmd) {
+	switch SystemOption(m.System.Cursor) {
+	case SysOptUpdate:
+		if m.System.Updating {
+			return m, nil
+		}
+		m.System.Updating = true
+		m.System.Note = "Checking GitHub releases..."
+		if updater.NeedsSudo() {
+			exePath, err := updater.ExecutablePath()
+			if err != nil {
+				m.System.Updating = false
+				m.System.Note = err.Error()
+				return m, nil
+			}
+			c := exec.Command("sh", "-c", `sudo "$1" update; printf "\nPress Enter to return to CZHax..."; read -r _`, "_", exePath)
+			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+				return sudoUpdateDoneMsg{err: err}
+			})
+		}
+		ver := m.Version
+		return m, func() tea.Msg {
+			res, err := updater.CheckAndUpdate(ver, false)
+			return updateDoneMsg{res: res, err: err}
+		}
+
+	case SysOptTerminal:
+		c := exec.Command("sh", "-c", `printf "\n[CZHax] Terminal shell — type 'exit' or press Ctrl+D to return.\n\n"; exec "${SHELL:-/bin/sh}"`)
+		c.Env = append(os.Environ(), "CZHAX_NESTED=1")
+		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return shellExitedMsg{err: err}
+		})
+
+	case SysOptBoot:
+		exePath, _ := updater.ExecutablePath()
+		username := ""
+		homeDir := ""
+		if u, err := user.Current(); err == nil {
+			username = u.Username
+			homeDir = u.HomeDir
+		}
+		if boot.NeedsRootForToggle() {
+			c := exec.Command("sudo", exePath, "boot", "toggle", username, homeDir)
+			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+				return bootToggledMsg{state: boot.DetectState(homeDir), err: err}
+			})
+		}
+		return m, func() tea.Msg {
+			st, err := boot.Toggle(username, homeDir, exePath)
+			return bootToggledMsg{state: st, err: err}
+		}
 	}
 	return m, nil
 }
@@ -255,9 +408,12 @@ func (m AppModel) View() string {
 	sideLines := RenderSidebarColumn(sideW, bodyH, pal, m.Cfg, m.ActiveView, tabsFocused)
 
 	var mainLines []string
-	if m.ShowHelp {
+	switch {
+	case m.ShowHelp:
 		mainLines = m.Help.RenderLines(mainW, bodyH, pal)
-	} else {
+	case m.ActiveView == ViewSystem:
+		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
+	default:
 		mainLines = m.Status.RenderLines(mainW, bodyH, pal, m.Cfg, m.Snap, m.Focus == FocusContent)
 	}
 	bodyBlock := JoinPaneColumns(sideLines, mainLines, sideW, mainW, bodyH, pal, m.Cfg)
@@ -313,6 +469,14 @@ func (m AppModel) currentHints() []Hint {
 			{Key: "⏎", Desc: "enter"},
 			{Key: "r", Desc: "ref"},
 			{Key: "?", Desc: "help"},
+			{Key: "q", Desc: "quit"},
+		}
+	}
+	if m.ActiveView == ViewSystem {
+		return []Hint{
+			{Key: "↑↓", Desc: "sel"},
+			{Key: "⏎", Desc: "run"},
+			{Key: "Esc", Desc: "tabs"},
 			{Key: "q", Desc: "quit"},
 		}
 	}

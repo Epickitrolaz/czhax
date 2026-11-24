@@ -6,6 +6,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
@@ -24,6 +25,51 @@ func main() {
 		if err := updater.Run(version, force); err != nil {
 			fmt.Fprintf(os.Stderr, "update error: %v\n", err)
 			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "boot" {
+		sub := ""
+		if len(os.Args) > 2 {
+			sub = os.Args[2]
+		}
+		username := os.Getenv("SUDO_USER")
+		homeDir := ""
+		if len(os.Args) > 3 {
+			username = os.Args[3]
+		}
+		if len(os.Args) > 4 {
+			homeDir = os.Args[4]
+		}
+		exePath, _ := updater.ExecutablePath()
+		switch sub {
+		case "enable":
+			if err := boot.Enable(username, homeDir, exePath); err != nil {
+				fmt.Fprintf(os.Stderr, "boot enable error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Start on boot enabled.")
+		case "disable":
+			if err := boot.Disable(homeDir); err != nil {
+				fmt.Fprintf(os.Stderr, "boot disable error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Start on boot disabled.")
+		case "toggle":
+			st, err := boot.Toggle(username, homeDir, exePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "boot toggle error: %v\n", err)
+				os.Exit(1)
+			}
+			if st.Enabled {
+				fmt.Printf("Start on boot: ON (%s)\n", st.Method)
+			} else {
+				fmt.Printf("Start on boot: OFF (%s)\n", st.Method)
+			}
+		default:
+			st := boot.DetectState(homeDir)
+			fmt.Printf("enabled=%v method=%s\n", st.Enabled, st.Method)
 		}
 		return
 	}
@@ -66,7 +112,7 @@ func main() {
 		cfg.Viewport = config.ViewportCZ4510
 	}
 
-	model := ui.NewAppModel(cfg, cfgPath)
+	model := ui.NewAppModel(cfg, cfgPath, version)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "czhax error: %v\n", err)

@@ -13,6 +13,7 @@ type ViewID int
 
 const (
 	ViewStatus ViewID = iota
+	ViewSystem
 	viewCount
 )
 
@@ -25,6 +26,7 @@ type ViewDef struct {
 
 var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device"}},
+	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
 }
 
 // ResolveViewport computes inner TUI width and height (and whether a desktop CZ bezel should be drawn).

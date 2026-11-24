@@ -47,7 +47,7 @@ func assertFitsBounds(t *testing.T, view string, maxW, exactH int, label string)
 	}
 }
 
-func TestStatusViewAllSizes(t *testing.T) {
+func TestAllViewsAndSizes(t *testing.T) {
 	sizes := []struct {
 		name string
 		w, h int
@@ -60,7 +60,7 @@ func TestStatusViewAllSizes(t *testing.T) {
 
 	for _, sz := range sizes {
 		cfg := config.Default()
-		m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"))
+		m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"), "v0.2.0")
 		m.Snap.HasBattery = true
 		m.Snap.BatteryPct = 78
 		m.Snap.HasBatTime = true
@@ -69,22 +69,41 @@ func TestStatusViewAllSizes(t *testing.T) {
 		next, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
 		m = next.(AppModel)
 
+		// Status view
 		view := m.View()
-		assertFitsBounds(t, view, sz.w, sz.h, sz.name+"/Tabs")
-		if !strings.Contains(view, "Device") {
-			t.Fatalf("[%s] expected horizontal tab Device in:\n%s", sz.name, view)
-		}
-		if !strings.Contains(view, "2h15m left") {
-			t.Fatalf("[%s] expected battery time left in:\n%s", sz.name, view)
+		assertFitsBounds(t, view, sz.w, sz.h, sz.name+"/Status/Tabs")
+		if !strings.Contains(view, "Device") || !strings.Contains(view, "2h15m left") {
+			t.Fatalf("[%s] expected Device tab and 2h15m left in:\n%s", sz.name, view)
 		}
 
-		// Enter content, scroll down/up, return with Esc
+		// Down moves to System view
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewSystem {
+			t.Fatalf("expected ViewSystem on down, got %v", m.ActiveView)
+		}
+		sysView := m.View()
+		assertFitsBounds(t, sysView, sz.w, sz.h, sz.name+"/System/Tabs")
+		for _, want := range []string{"Update CZHax", "Terminal Shell", "Start on Boot"} {
+			if !strings.Contains(sysView, want) {
+				t.Fatalf("[%s] expected %q in System view:\n%s", sz.name, want, sysView)
+			}
+		}
+
+		// Enter enters System content, arrows navigate options, Esc returns
 		m = sendKey(m, "enter")
 		if m.Focus != FocusContent {
 			t.Fatalf("expected FocusContent on enter")
 		}
 		m = sendKey(m, "down")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/ContentScrolled")
+		if m.System.Cursor != int(SysOptTerminal) {
+			t.Fatalf("expected cursor at SysOptTerminal, got %d", m.System.Cursor)
+		}
+		m = sendKey(m, "down")
+		if m.System.Cursor != int(SysOptBoot) {
+			t.Fatalf("expected cursor at SysOptBoot, got %d", m.System.Cursor)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/Content")
+
 		m = sendKey(m, "esc")
 		if m.Focus != FocusTabs {
 			t.Fatalf("expected FocusTabs on esc")
@@ -94,14 +113,5 @@ func TestStatusViewAllSizes(t *testing.T) {
 		m = sendKey(m, "?")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Help")
 		m = sendKey(m, "esc")
-	}
-}
-
-func TestSingleStatusTabAndLabels(t *testing.T) {
-	if len(TopViews) != 1 || TopViews[0].Name != "Status" || TopViews[0].Short3 != "Sts" {
-		t.Fatalf("expected single Status vertical view, got %+v", TopViews)
-	}
-	if len(TopViews[0].Tabs) != 1 || TopViews[0].Tabs[0] != "Device" {
-		t.Fatalf("expected single Device horizontal tab, got %+v", TopViews[0].Tabs)
 	}
 }
