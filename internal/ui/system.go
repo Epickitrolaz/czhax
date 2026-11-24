@@ -160,7 +160,7 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 			case SysOptBoot:
 				hint = fmt.Sprintf("⏎ toggle boot (%s)", v.BootState.Method)
 			case SysOptSleep:
-				hint = "⏎ screen/wifi off; btn or Esc wakes"
+				hint = "⏎ screen/wifi off; boot btn wakes"
 			case SysOptReboot:
 				hint = "⏎ reboot unit (asks confirm)"
 			case SysOptShutdown:

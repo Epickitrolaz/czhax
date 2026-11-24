@@ -10,7 +10,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/wifi"
 )
 
 func sendKey(m AppModel, key string) AppModel {
@@ -137,10 +139,196 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc")
 		}
 
+		// Cycle to System -> WiFi tab (empty state)
+		m = sendKey(m, "right")
+		if m.ActiveTabs[ViewSystem] != SysTabWiFi {
+			t.Fatalf("expected SysTabWiFi on right, got %d", m.ActiveTabs[ViewSystem])
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/WiFi/Empty")
+
+		// Populate multiple WiFi interfaces and test FocusTabs + FocusContent navigation
+		m.Wifi.SetInterfaces([]wifi.Interface{
+			{
+				Name:           "wlan0",
+				Up:             true,
+				OperState:      "up",
+				MAC:            "b8:27:eb:aa:bb:cc",
+				MTU:            1500,
+				Addrs:          []string{"192.168.1.42/24"},
+				Phy:            "phy0",
+				Mode:           "managed",
+				HasMonCap:      true,
+				MonitorCapable: false,
+				Bands:          "2.4G",
+				Manufacturer:   "Broadcom",
+				Driver:         "brcmfmac",
+				Bus:            "sdio",
+				Channel:        "ch 6 (2437 MHz)",
+				SSID:           "LabNet",
+				TxPower:        "20.00 dBm",
+			},
+			{
+				Name:           "wlan1",
+				Up:             false,
+				OperState:      "down",
+				MAC:            "00:c0:ca:11:22:33",
+				MTU:            1500,
+				Phy:            "phy1",
+				Mode:           "monitor",
+				HasMonCap:      true,
+				MonitorCapable: true,
+				Bands:          "2.4G/5G",
+				Manufacturer:   "Realtek",
+				Product:        "802.11ac NIC",
+				Driver:         "rtl88XXau",
+				Bus:            "usb",
+				VendorID:       "0bda",
+				ProductID:      "8812",
+			},
+		})
+		wifiTabsView := m.View()
+		assertFitsBounds(t, wifiTabsView, sz.w, sz.h, sz.name+"/System/WiFi/Tabs")
+		for _, want := range []string{"wlan0", "wlan1", "Broadcom", "managed"} {
+			if !strings.Contains(wifiTabsView, want) {
+				t.Fatalf("[%s] expected %q in WiFi view:\n%s", sz.name, want, wifiTabsView)
+			}
+		}
+
+		// Enter WiFi content; right switches to wlan1, left returns to wlan0 (does not exit FocusContent)
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on WiFi enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/WiFi/Content0")
+		m = sendKey(m, "right")
+		if m.Wifi.Selected != 1 || m.Focus != FocusContent {
+			t.Fatalf("expected Selected=1 and FocusContent on right, got %d / %v", m.Wifi.Selected, m.Focus)
+		}
+		wifiContent1 := m.View()
+		assertFitsBounds(t, wifiContent1, sz.w, sz.h, sz.name+"/System/WiFi/Content1")
+		for _, want := range []string{"monitor", "Realtek"} {
+			if !strings.Contains(wifiContent1, want) {
+				t.Fatalf("[%s] expected %q in wlan1 view:\n%s", sz.name, want, wifiContent1)
+			}
+		}
+		m = sendKey(m, "down")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/WiFi/ScrollDown")
+		m = sendKey(m, "left")
+		if m.Wifi.Selected != 0 || m.Focus != FocusContent {
+			t.Fatalf("expected Selected=0 and FocusContent on left, got %d / %v", m.Wifi.Selected, m.Focus)
+		}
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from WiFi")
+		}
+
+		// Cycle to System -> BT tab (empty state)
+		m = sendKey(m, "right")
+		if m.ActiveTabs[ViewSystem] != SysTabBT {
+			t.Fatalf("expected SysTabBT on right, got %d", m.ActiveTabs[ViewSystem])
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/BT/Empty")
+
+		// Populate multiple Bluetooth adapters and test FocusTabs + FocusContent navigation
+		m.Bluetooth.SetAdapters([]bluetooth.Adapter{
+			{
+				Name:         "hci0",
+				Alias:        "cardzero",
+				Address:      "B8:27:EB:11:22:33",
+				Up:           true,
+				Powered:      true,
+				StateKnown:   true,
+				RFKill:       "unblocked",
+				Bus:          "UART",
+				Type:         "Primary",
+				Mode:         "BR/EDR + LE",
+				HCIVersion:   "5.0",
+				Manufacturer: "Broadcom",
+				Driver:       "hci_uart",
+				Pairable:     true,
+				FlagsKnown:   true,
+				ScanMode:     "PSCAN",
+			},
+			{
+				Name:         "hci1",
+				Address:      "00:E0:4C:AA:BB:CC",
+				Up:           false,
+				StateKnown:   true,
+				RFKill:       "soft-blocked",
+				Bus:          "USB",
+				Type:         "Primary",
+				Manufacturer: "Realtek",
+				Product:      "Bluetooth 5.0 Radio",
+				Driver:       "btusb",
+				VendorID:     "0bda",
+				ProductID:    "8771",
+			},
+		})
+		btTabsView := m.View()
+		assertFitsBounds(t, btTabsView, sz.w, sz.h, sz.name+"/System/BT/Tabs")
+		for _, want := range []string{"hci0", "hci1", "Broadcom", "B8:27:EB:11:22:33"} {
+			if !strings.Contains(btTabsView, want) {
+				t.Fatalf("[%s] expected %q in BT view:\n%s", sz.name, want, btTabsView)
+			}
+		}
+
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on BT enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/BT/Content0")
+		m = sendKey(m, "right")
+		if m.Bluetooth.Selected != 1 || m.Focus != FocusContent {
+			t.Fatalf("expected Selected=1 and FocusContent on BT right, got %d / %v", m.Bluetooth.Selected, m.Focus)
+		}
+		btContent1 := m.View()
+		assertFitsBounds(t, btContent1, sz.w, sz.h, sz.name+"/System/BT/Content1")
+		if !strings.Contains(btContent1, "BLOCKED") || !strings.Contains(btContent1, "Realtek") {
+			t.Fatalf("[%s] expected BLOCKED and Realtek in hci1 view:\n%s", sz.name, btContent1)
+		}
+		m = sendKey(m, "down")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/System/BT/ScrollDown")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from BT")
+		}
+
 		// Help overlay
 		m = sendKey(m, "?")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Help")
 		m = sendKey(m, "esc")
+	}
+}
+
+func TestManyInterfacesSelectorOverflowBounds(t *testing.T) {
+	cfg := config.Default()
+	m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"), "v0.2.0")
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	m = next.(AppModel)
+	m = sendKey(m, "down")  // ViewSystem
+	m = sendKey(m, "right") // SysTabWiFi
+	m = sendKey(m, "enter") // FocusContent
+
+	var ifaces []wifi.Interface
+	for i := 0; i < 6; i++ {
+		ifaces = append(ifaces, wifi.Interface{
+			Name:         "wlan" + string(rune('0'+i)),
+			Up:           true,
+			Mode:         "managed",
+			Manufacturer: "VeryLongManufacturerNameCorporation",
+			Product:      "Dual-Band Wireless Adapter Pro Max",
+			Driver:       "rtl88XXau",
+			Bus:          "usb",
+		})
+	}
+	m.Wifi.SetInterfaces(ifaces)
+	for i := 0; i < 6; i++ {
+		view := m.View()
+		assertFitsBounds(t, view, 40, 10, "40x10/ManyWifi/"+ifaces[m.Wifi.Selected].Name)
+		if !strings.Contains(view, ifaces[m.Wifi.Selected].Name) {
+			t.Fatalf("expected selected interface %s to remain visible in:\n%s", ifaces[m.Wifi.Selected].Name, view)
+		}
+		m = sendKey(m, "right")
 	}
 }
 

@@ -9,12 +9,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/updater"
+	"github.com/czhax/czhax/internal/wifi"
 )
 
 type FocusZone int
@@ -54,6 +56,14 @@ type powerActionDoneMsg struct {
 	err    error
 }
 
+type wifiRefreshedMsg struct {
+	ifaces []wifi.Interface
+}
+
+type bluetoothRefreshedMsg struct {
+	adapters []bluetooth.Adapter
+}
+
 type AppModel struct {
 	Cfg        config.Config
 	ConfigPath string
@@ -67,9 +77,11 @@ type AppModel struct {
 	ActiveTabs [viewCount]int
 	Focus      FocusZone
 
-	Status StatusView
-	System SystemView
-	Help   HelpView
+	Status    StatusView
+	System    SystemView
+	Wifi      WifiView
+	Bluetooth BluetoothView
+	Help      HelpView
 
 	ShowHelp      bool
 	ConfirmExit   bool
@@ -91,11 +103,25 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		ActiveView: ViewStatus,
 		Focus:      FocusTabs,
 		System:     NewSystemView(),
+		Wifi:       NewWifiView(),
+		Bluetooth:  NewBluetoothView(),
 	}
 }
 
 func (m AppModel) Init() tea.Cmd {
-	return m.scheduleTick()
+	return tea.Batch(m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd())
+}
+
+func collectWifiCmd() tea.Cmd {
+	return func() tea.Msg {
+		return wifiRefreshedMsg{ifaces: wifi.Collect()}
+	}
+}
+
+func collectBluetoothCmd() tea.Cmd {
+	return func() tea.Msg {
+		return bluetoothRefreshedMsg{adapters: bluetooth.Collect()}
+	}
 }
 
 func (m AppModel) scheduleTick() tea.Cmd {
@@ -124,7 +150,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.Snap = sysinfo.Collect()
-		return m, m.scheduleTick()
+		cmds := []tea.Cmd{m.scheduleTick()}
+		if m.ActiveView == ViewSystem {
+			switch m.ActiveTabs[ViewSystem] {
+			case SysTabWiFi:
+				cmds = append(cmds, collectWifiCmd())
+			case SysTabBT:
+				cmds = append(cmds, collectBluetoothCmd())
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case wifiRefreshedMsg:
+		m.Wifi.SetInterfaces(msg.ifaces)
+		return m, nil
+
+	case bluetoothRefreshedMsg:
+		m.Bluetooth.SetAdapters(msg.adapters)
+		return m, nil
 
 	case clearStatusMsg:
 		m.StatusMsg = ""
@@ -156,7 +199,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellExitedMsg:
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"))
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"), collectWifiCmd(), collectBluetoothCmd())
 
 	case bootToggledMsg:
 		m.System.BootState = msg.state
@@ -175,10 +218,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Snap = sysinfo.Collect()
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"))
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"), collectWifiCmd(), collectBluetoothCmd())
 		}
 		m.System.Note = "Woke from sleep"
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"))
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"), collectWifiCmd(), collectBluetoothCmd())
 
 	case powerActionDoneMsg:
 		if msg.err != nil {
@@ -234,7 +277,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
-		return m, m.setStatus("Refreshed")
+		if len(m.Wifi.Interfaces) == 0 {
+			m.Wifi.Scanning = true
+		}
+		if len(m.Bluetooth.Adapters) == 0 {
+			m.Bluetooth.Scanning = true
+		}
+		return m, tea.Batch(m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd())
 	case "q":
 		if m.Cfg.ConfirmQuit {
 			m.ConfirmExit = true
@@ -256,11 +305,32 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case k == "enter":
 			m.Focus = FocusContent
 			if m.ActiveView == ViewSystem {
-				m.System.RefreshBootState()
+				switch m.ActiveTabs[ViewSystem] {
+				case SysTabTools:
+					m.System.RefreshBootState()
+				case SysTabWiFi:
+					if len(m.Wifi.Interfaces) == 0 {
+						m.Wifi.Scanning = true
+					}
+					return m, collectWifiCmd()
+				case SysTabBT:
+					if len(m.Bluetooth.Adapters) == 0 {
+						m.Bluetooth.Scanning = true
+					}
+					return m, collectBluetoothCmd()
+				}
 			}
 		case k == "esc":
 			if m.Cfg.ConfirmQuit {
 				m.ConfirmExit = true
+			}
+		}
+		if m.ActiveView == ViewSystem {
+			switch m.ActiveTabs[ViewSystem] {
+			case SysTabWiFi:
+				return m, collectWifiCmd()
+			case SysTabBT:
+				return m, collectBluetoothCmd()
 			}
 		}
 		return m, nil
@@ -270,7 +340,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
-	if m.ActiveView == ViewSystem && m.System.Confirm != "" {
+	if m.ActiveView == ViewSystem && m.ActiveTabs[ViewSystem] == SysTabTools && m.System.Confirm != "" {
 		action := m.System.Confirm
 		switch k {
 		case "y", "Y", "enter":
@@ -313,17 +383,60 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ViewSystem:
-		switch {
-		case m.isUp(k):
-			m.System.Move(-1)
-			m.System.Note = ""
-		case m.isDown(k):
-			m.System.Move(1)
-			m.System.Note = ""
-		case k == "enter" || k == " ":
-			return m.activateSystemOption()
+		switch m.ActiveTabs[ViewSystem] {
+		case SysTabWiFi:
+			_, mainW, bodyH := m.dimensions()
+			pal := theme.Resolve(m.Cfg.Theme, false)
+			switch {
+			case m.isLeft(k):
+				m.Wifi.MoveInterface(-1)
+			case m.isRight(k):
+				m.Wifi.MoveInterface(1)
+			case m.isUp(k):
+				m.Wifi.MoveScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.Wifi.MoveScroll(1, mainW, bodyH, pal)
+			case k == "enter" || k == " ":
+				if len(m.Wifi.Interfaces) == 0 {
+					m.Wifi.Scanning = true
+				}
+				return m, tea.Batch(m.setStatus("Scanning WiFi..."), collectWifiCmd())
+			}
+			return m, nil
+
+		case SysTabBT:
+			_, mainW, bodyH := m.dimensions()
+			pal := theme.Resolve(m.Cfg.Theme, false)
+			switch {
+			case m.isLeft(k):
+				m.Bluetooth.MoveAdapter(-1)
+			case m.isRight(k):
+				m.Bluetooth.MoveAdapter(1)
+			case m.isUp(k):
+				m.Bluetooth.MoveScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.Bluetooth.MoveScroll(1, mainW, bodyH, pal)
+			case k == "enter" || k == " ":
+				if len(m.Bluetooth.Adapters) == 0 {
+					m.Bluetooth.Scanning = true
+				}
+				return m, tea.Batch(m.setStatus("Scanning BT..."), collectBluetoothCmd())
+			}
+			return m, nil
+
+		default:
+			switch {
+			case m.isUp(k):
+				m.System.Move(-1)
+				m.System.Note = ""
+			case m.isDown(k):
+				m.System.Move(1)
+				m.System.Note = ""
+			case k == "enter" || k == " ":
+				return m.activateSystemOption()
+			}
+			return m, nil
 		}
-		return m, nil
 	}
 
 	return m, nil
@@ -491,7 +604,14 @@ func (m AppModel) View() string {
 	case m.ShowHelp:
 		mainLines = m.Help.RenderLines(mainW, bodyH, pal)
 	case m.ActiveView == ViewSystem:
-		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
+		switch m.ActiveTabs[ViewSystem] {
+		case SysTabWiFi:
+			mainLines = m.Wifi.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		case SysTabBT:
+			mainLines = m.Bluetooth.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		default:
+			mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
+		}
 	default:
 		mainLines = m.Status.RenderLines(mainW, bodyH, pal, m.Cfg, m.Snap, m.Focus == FocusContent)
 	}
@@ -507,7 +627,7 @@ func (m AppModel) View() string {
 		status := m.StatusMsg
 		if m.ConfirmExit {
 			status = "Quit CZHax? [y/Enter] Yes  [n/Esc] No"
-		} else if m.ActiveView == ViewSystem && m.System.Confirm != "" {
+		} else if m.ActiveView == ViewSystem && m.ActiveTabs[ViewSystem] == SysTabTools && m.System.Confirm != "" {
 			status = "Confirm " + m.System.Confirm + "? [y/Enter] Yes  [n/Esc] No"
 		}
 		parts = append(parts, RenderFooter(w, pal, m.Cfg, m.currentHints(), status))
@@ -554,9 +674,18 @@ func (m AppModel) currentHints() []Hint {
 		}
 	}
 	if m.ActiveView == ViewSystem {
+		if m.ActiveTabs[ViewSystem] == SysTabTools {
+			return []Hint{
+				{Key: "↑↓", Desc: "sel"},
+				{Key: "⏎", Desc: "run"},
+				{Key: "Esc", Desc: "tabs"},
+				{Key: "q", Desc: "quit"},
+			}
+		}
 		return []Hint{
-			{Key: "↑↓", Desc: "sel"},
-			{Key: "⏎", Desc: "run"},
+			{Key: "←→", Desc: "if"},
+			{Key: "↑↓", Desc: "scr"},
+			{Key: "r", Desc: "ref"},
 			{Key: "Esc", Desc: "tabs"},
 			{Key: "q", Desc: "quit"},
 		}

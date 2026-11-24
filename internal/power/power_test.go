@@ -1,9 +1,13 @@
 package power
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
@@ -59,13 +63,56 @@ func TestWakeDetectionHelpers(t *testing.T) {
 	if !isWakeButtonDevice("gpio-keys") || !isWakeButtonDevice("pwr_button") || !isWakeButtonDevice("cardputer-btn") {
 		t.Fatalf("expected button/gpio devices to be detected as wake buttons")
 	}
-	if isWakeButtonDevice("tca8418-keypad") || isWakeButtonDevice("bmi270-imu") || isWakeButtonDevice("") {
-		t.Fatalf("did not expect keypad, imu, or empty name to be flagged as dedicated button")
+	for _, nonBtn := range []string{"tca8418-keypad", "tca8418c", "bmi270-imu", "ES8389-Audio Headphones", "gpio_ir_recv", ""} {
+		if isWakeButtonDevice(nonBtn) {
+			t.Fatalf("did not expect %q to be flagged as dedicated wake button", nonBtn)
+		}
 	}
-	if !isWakeKeyCode(keyPower) || !isWakeKeyCode(keyWakeup) || isWakeKeyCode(30) {
-		t.Fatalf("unexpected wake keycode classification")
+	if !isWakeKeyCode(keyPower) || !isWakeKeyCode(keyWakeup) || !isWakeKeyCode(keyProg1) {
+		t.Fatalf("expected power/wakeup/prog1 to be wake keycodes")
 	}
-	if !isWakeGPIOLine("BOOT_BTN", "") || !isWakeGPIOLine("", "power-button") || isWakeGPIOLine("LED1", "status") {
+	for _, regular := range []uint16{1, 28, 30, 57} {
+		if isWakeKeyCode(regular) {
+			t.Fatalf("did not expect regular keycode %d (Esc/Enter/A/Space) to wake", regular)
+		}
+	}
+	if !isWakeGPIOLine("BOOT_BTN", "") || !isWakeGPIOLine("", "power-button") || !isWakeGPIOLine("EMMC_REENABLE_N", "") || isWakeGPIOLine("LED1", "status") {
 		t.Fatalf("unexpected GPIO wake line classification")
+	}
+}
+
+func TestGPIOStructSizesMatchLinuxABI(t *testing.T) {
+	if got := unsafe.Sizeof(gpioChipInfo{}); got != 68 {
+		t.Fatalf("gpioChipInfo size = %d, want 68", got)
+	}
+	if got := unsafe.Sizeof(gpioLineInfo{}); got != 72 {
+		t.Fatalf("gpioLineInfo size = %d, want 72", got)
+	}
+	if got := unsafe.Sizeof(gpioHandleRequest{}); got != 364 {
+		t.Fatalf("gpioHandleRequest size = %d, want 364", got)
+	}
+	if got := unsafe.Sizeof(gpioHandleData{}); got != 64 {
+		t.Fatalf("gpioHandleData size = %d, want 64", got)
+	}
+	if got := unsafe.Sizeof(gpioV2LineInfo{}); got != 256 {
+		t.Fatalf("gpioV2LineInfo size = %d, want 256", got)
+	}
+	if got := unsafe.Sizeof(gpioV2LineRequest{}); got != 592 {
+		t.Fatalf("gpioV2LineRequest size = %d, want 592", got)
+	}
+	if got := unsafe.Sizeof(gpioV2LineValues{}); got != 16 {
+		t.Fatalf("gpioV2LineValues size = %d, want 16", got)
+	}
+}
+
+func TestWaitForWakeIgnoresEscStdin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	// Passing Esc/Enter/Space bytes on stdin must NOT wake sleep mode
+	stdin := bytes.NewBuffer([]byte{0x1b, '\r', '\n', ' '})
+	reason := WaitForWake(ctx, t.TempDir(), stdin)
+	if reason != "signal" {
+		t.Fatalf("expected WaitForWake to ignore Esc/stdin and wait until ctx timeout (\"signal\"), got %q", reason)
 	}
 }
