@@ -16,16 +16,21 @@ import (
 
 	"github.com/czhax/czhax/internal/console"
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 )
 
 const (
-	evKey     uint16 = 1
-	keyPower  uint16 = 116
-	keySleep  uint16 = 142
-	keyWakeup uint16 = 143
-	keyProg1  uint16 = 148
+	evKey      uint16 = 1
+	keyPower   uint16 = 116
+	keySleep   uint16 = 142
+	keyWakeup  uint16 = 143
+	keyProg1   uint16 = 148
+	keyProg2   uint16 = 149
+	keyProg3   uint16 = 202
+	keyProg4   uint16 = 203
+	keySuspend uint16 = 205
 	keyRestart uint16 = 408
+
+	eviocgname256 = 0x80ff4506
 )
 
 type SavedFile struct {
@@ -141,6 +146,12 @@ func ProbeInputDevices() []string {
 		base := filepath.Base(devPath)
 		nameBytes, _ := os.ReadFile(filepath.Join("/sys/class/input", base, "device/name"))
 		name := strings.TrimSpace(string(nameBytes))
+		if name == "" {
+			if fd, err := unix.Open(devPath, unix.O_RDONLY|unix.O_NONBLOCK, 0); err == nil {
+				name = readEvdevName(fd, "")
+				_ = unix.Close(fd)
+			}
+		}
 		role := "wake-keys-only"
 		if isWakeButtonDevice(name) {
 			role = "wake-button"
@@ -151,14 +162,14 @@ func ProbeInputDevices() []string {
 }
 
 // RunSleepCommand executes full power-save sleep from the CLI (`czhax power sleep`),
-// guarantees hardware restore on wake or signal, and blocks until the side boot button
-// (or fallback Enter/Esc key) wakes the unit.
+// guarantees hardware restore on wake or signal, and blocks until the hardware boot button
+// wakes the unit.
 func RunSleepCommand() error {
 	guard := console.SuppressKernelLogs()
 	defer guard.Restore()
 
 	fmt.Println("Entering CZHax Sleep Mode...")
-	fmt.Println("Press the side boot button (or Esc / Enter) to wake.")
+	fmt.Println("Press the boot button to wake.")
 	time.Sleep(600 * time.Millisecond)
 
 	saved := EnterSleep("")
@@ -167,30 +178,21 @@ func RunSleepCommand() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	reason := WaitForWake(ctx, "/dev/input", os.Stdin)
+	reason := WaitForWake(ctx, "/dev/input", nil)
 	ExitSleep(saved)
 	fmt.Printf("Woke up (%s).\n", reason)
 	return nil
 }
 
-// WaitForWake blocks until a hardware wake button event or fallback terminal key is received.
-func WaitForWake(ctx context.Context, inputDir string, stdin io.Reader) string {
+// WaitForWake blocks until a hardware wake button event (evdev or GPIO) is received.
+func WaitForWake(ctx context.Context, inputDir string, _ io.Reader) string {
 	wakeCh := make(chan string, 4)
 	doneCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Watch Linux evdev & unclaimed GPIO button devices for side boot / power button presses
+	// Watch Linux evdev & unclaimed GPIO button devices for boot / power button presses
 	watchEvdevButtons(doneCtx, inputDir, wakeCh)
 	watchGPIOButtons(doneCtx, wakeCh)
-
-	// Watch stdin for Enter/Esc/Space fallback if running interactively
-	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		oldState, err := term.MakeRaw(int(f.Fd()))
-		if err == nil {
-			defer func() { _ = term.Restore(int(f.Fd()), oldState) }()
-		}
-		go watchStdinWake(doneCtx, f, wakeCh)
-	}
 
 	select {
 	case reason := <-wakeCh:
@@ -200,50 +202,17 @@ func WaitForWake(ctx context.Context, inputDir string, stdin io.Reader) string {
 	}
 }
 
-func watchStdinWake(ctx context.Context, f *os.File, wakeCh chan<- string) {
-	fd := int(f.Fd())
-	buf := make([]byte, 16)
-	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		n, err := unix.Poll(pfd, 200)
-		if err != nil {
-			if err == unix.EINTR {
-				continue
-			}
-			return
-		}
-		if n <= 0 || (pfd[0].Revents&unix.POLLIN) == 0 {
-			continue
-		}
-		nr, err := unix.Read(fd, buf)
-		if err != nil || nr <= 0 {
-			return
-		}
-		for i := 0; i < nr; i++ {
-			b := buf[i]
-			if b == '\r' || b == '\n' || b == ' ' || b == 0x1b || b == 0x03 {
-				select {
-				case wakeCh <- "key":
-				default:
-				}
-				return
-			}
-		}
-	}
-}
-
 func isWakeButtonDevice(name string) bool {
 	low := strings.ToLower(name)
 	if low == "" {
 		return false
 	}
-	// Exclude known non-button peripherals (46-key QWERTY keypad, IMU, mice, HDMI CEC/audio)
-	for _, skip := range []string{"tca8418", "bmi270", "bmm150", "imu", "mouse", "touchpad", "vc4-hdmi", "hdmi"} {
+	// Exclude known non-button peripherals (46-key QWERTY keypad, IMU, mice, HDMI CEC/audio, jack/IR)
+	for _, skip := range []string{
+		"tca8418", "bmi270", "bmm150", "imu",
+		"mouse", "touchpad", "vc4-hdmi", "hdmi",
+		"headphones", "es8389", "es8390", "gpio_ir", "ir_recv",
+	} {
 		if strings.Contains(low, skip) {
 			return false
 		}
@@ -253,11 +222,23 @@ func isWakeButtonDevice(name string) bool {
 
 func isWakeKeyCode(code uint16) bool {
 	switch code {
-	case keyPower, keySleep, keyWakeup, keyProg1, keyRestart:
+	case keyPower, keySleep, keyWakeup, keyProg1, keyProg2, keyProg3, keyProg4, keySuspend, keyRestart:
 		return true
 	default:
 		return false
 	}
+}
+
+func readEvdevName(fd int, sysName string) string {
+	if sysName != "" {
+		return sysName
+	}
+	var buf [256]byte
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), eviocgname256, uintptr(unsafe.Pointer(&buf[0])))
+	if errno != 0 {
+		return ""
+	}
+	return cString(buf[:])
 }
 
 func watchEvdevButtons(ctx context.Context, inputDir string, wakeCh chan<- string) {
@@ -268,13 +249,14 @@ func watchEvdevButtons(ctx context.Context, inputDir string, wakeCh chan<- strin
 	for _, devPath := range entries {
 		base := filepath.Base(devPath)
 		nameBytes, _ := os.ReadFile(filepath.Join("/sys/class/input", base, "device/name"))
-		devName := strings.TrimSpace(string(nameBytes))
-		btnDev := isWakeButtonDevice(devName)
+		sysName := strings.TrimSpace(string(nameBytes))
 
 		fd, err := unix.Open(devPath, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 		if err != nil {
 			continue
 		}
+		devName := readEvdevName(fd, sysName)
+		btnDev := isWakeButtonDevice(devName)
 		go func(fd int, anyKey bool, label string) {
 			defer unix.Close(fd)
 			evSize := int(unsafe.Sizeof(unix.Timeval{})) + 8
