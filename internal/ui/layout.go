@@ -18,9 +18,9 @@ const (
 )
 
 const (
-	SysTabTools = iota
-	SysTabWiFi
-	SysTabBT
+	StatusTabDevice = iota
+	StatusTabWiFi
+	StatusTabBT
 )
 
 type ViewDef struct {
@@ -31,8 +31,8 @@ type ViewDef struct {
 }
 
 var TopViews = []ViewDef{
-	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device"}},
-	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools", "WiFi", "BT"}},
+	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
+	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
 }
 
 // ResolveViewport computes inner TUI width and height (and whether a desktop CZ bezel should be drawn).
