@@ -97,6 +97,18 @@ case "$ARCH" in
 esac
 
 if [[ "$VERSION" == "latest" ]]; then
+  if command -v curl >/dev/null 2>&1; then
+    RESOLVED_URL="$(curl -fsSL -H 'Cache-Control: no-cache' -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+    VERSION="${RESOLVED_URL##*/}"
+  elif command -v wget >/dev/null 2>&1; then
+    RESOLVED_URL="$(wget -q --max-redirect=5 --server-response "https://github.com/${REPO}/releases/latest" -O /dev/null 2>&1 | awk '/^  Location: /{loc=$2} END{print loc}' | tr -d '\r')"
+    if [[ -n "$RESOLVED_URL" ]]; then
+      VERSION="${RESOLVED_URL##*/}"
+    fi
+  fi
+fi
+
+if [[ "$VERSION" == "latest" || -z "$VERSION" ]]; then
   BASE_URL="https://github.com/${REPO}/releases/latest/download"
 else
   BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
