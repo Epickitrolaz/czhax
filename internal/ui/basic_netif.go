@@ -22,14 +22,13 @@ func (v *NetIfView) Move(delta int, count int) {
 }
 
 func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot, focused bool) []string {
-	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
-	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
-	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
-	red := lipgloss.NewStyle().Bold(true).Foreground(pal.Red)
-	pur := lipgloss.NewStyle().Bold(true).Foreground(pal.Purple)
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Yellow)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	ifaces := snap.Interfaces
 	if len(ifaces) == 0 {
@@ -63,13 +62,13 @@ func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, s
 		} else {
 			pfx := "  "
 			if i == cursor {
-				pfx = yel.Render("▸ ")
+				pfx = accent.Render("▸ ")
 			}
-			st := red.Render(state)
+			st := danger.Render(state)
 			if inf.Up {
-				st = grn.Render(state)
+				st = ok.Render(state)
 			}
-			row := fmt.Sprintf("%s%s %s %s", pfx, cyan.Render(FitLine(inf.Name, 6)), st, txt.Render(addr))
+			row := fmt.Sprintf("%s%s %s %s", pfx, sec.Render(FitLine(inf.Name, 6)), st, txt.Render(addr))
 			lines = append(lines, row)
 		}
 	}
@@ -87,11 +86,11 @@ func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, s
 		mac = "xx:xx:xx:xx:xx:xx"
 	}
 	if h >= 3 {
-		lines = append(lines, " "+pur.Render("MAC ")+muted.Render(mac)+pur.Render(" MTU ")+txt.Render(fmt.Sprintf("%d", cur.MTU)))
+		lines = append(lines, " "+sec.Render("MAC ")+muted.Render(mac)+sec.Render(" MTU ")+txt.Render(fmt.Sprintf("%d", cur.MTU)))
 	}
 	if h >= 4 {
 		if len(cur.Addrs) > 0 && !cfg.StealthMode {
-			lines = append(lines, " "+yel.Render("IP  ")+txt.Render(strings.Join(cur.Addrs, ", ")))
+			lines = append(lines, " "+sec.Render("IP  ")+txt.Render(strings.Join(cur.Addrs, ", ")))
 		} else {
 			lines = append(lines, " "+muted.Render("r:refresh  ← side"))
 		}

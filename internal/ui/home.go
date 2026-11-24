@@ -41,7 +41,7 @@ func (v *DashView) RefreshPins(pinnedIDs []string) {
 
 func (v *DashView) Move(tab int, delta int) {
 	switch tab {
-	case 1: // Pinned
+	case 1:
 		if len(v.Items) == 0 {
 			return
 		}
@@ -63,35 +63,33 @@ func (v DashView) SelectedPin() (modules.Item, bool) {
 
 func barColor(pal theme.Palette, ratio float64) lipgloss.Color {
 	if ratio >= 0.85 {
-		return pal.Red
+		return pal.Danger
 	}
 	if ratio >= 0.60 {
-		return pal.Yellow
+		return pal.Warning
 	}
-	return pal.Green
+	return pal.Success
 }
 
 func tempColor(pal theme.Palette, c float64) lipgloss.Color {
 	if c >= 75 {
-		return pal.Red
+		return pal.Danger
 	}
 	if c >= 55 {
-		return pal.Yellow
+		return pal.Warning
 	}
-	return pal.Green
+	return pal.Success
 }
 
 func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot, focused bool) []string {
-	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
-	mag := lipgloss.NewStyle().Bold(true).Foreground(pal.Magenta)
-	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
-	pur := lipgloss.NewStyle().Bold(true).Foreground(pal.Purple)
-	org := lipgloss.NewStyle().Bold(true).Foreground(pal.Orange)
-	blu := lipgloss.NewStyle().Bold(true).Foreground(pal.Blue)
-	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Cyan)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 	ascii := cfg.Border == config.BorderAscii
 
 	switch tab {
@@ -104,7 +102,6 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 			if it.Status == modules.StatusReady {
 				st = "RDY"
 			}
-			vCol := theme.ViewColor(pal, it.Target.View)
 			if i == v.Cursor && focused {
 				nameW := max(6, w-len(st)-4)
 				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.Name, nameW), st)
@@ -115,12 +112,12 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 					pfx = "▸ "
 				}
 				nameW := max(6, w-len(st)-4)
-				stView := org.Render(st)
+				stView := warn.Render(st)
 				if it.Status == modules.StatusReady {
-					stView = grn.Render(st)
+					stView = ok.Render(st)
 				}
 				out = append(out, fmt.Sprintf("%s%s %s",
-					lipgloss.NewStyle().Bold(true).Foreground(vCol).Render(pfx),
+					accent.Render(pfx),
 					txt.Render(FitLine(it.Name, nameW)),
 					stView,
 				))
@@ -133,36 +130,36 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 		if snap.IsCardZero {
 			hw = "Cardputer Zero CM0"
 		}
-		netView := lipgloss.NewStyle().Bold(true).Foreground(pal.Red).Render("Offline")
+		netView := danger.Render("Offline")
 		if snap.NetUp {
 			if cfg.StealthMode {
-				netView = grn.Render("Online (masked)")
+				netView = ok.Render("Online (masked)")
 			} else {
-				netView = grn.Render("Online ") + yel.Render(snap.PrimaryIP)
+				netView = ok.Render("Online ") + txt.Render(snap.PrimaryIP)
 			}
 		}
 		rows := []string{
-			" " + cyan.Render("HW   ") + txt.Render(hw),
-			" " + pur.Render("Kern ") + blu.Render(Truncate(snap.Kernel, max(6, w-6))),
-			" " + yel.Render("Net  ") + netView,
-			" " + mag.Render("Load ") + txt.Render(snap.Load1+"  ") + blu.Render("Up "+sysinfo.FormatUptime(snap.Uptime)),
-			" " + org.Render("Disk ") + txt.Render(fmt.Sprintf("%.1fG / %.1fG free", snap.DiskFreeGB, snap.DiskTotGB)),
+			" " + sec.Render("HW   ") + txt.Render(hw),
+			" " + sec.Render("Kern ") + txt.Render(Truncate(snap.Kernel, max(6, w-6))),
+			" " + sec.Render("Net  ") + netView,
+			" " + sec.Render("Load ") + txt.Render(snap.Load1+"  Up "+sysinfo.FormatUptime(snap.Uptime)),
+			" " + sec.Render("Disk ") + txt.Render(fmt.Sprintf("%.1fG / %.1fG free", snap.DiskFreeGB, snap.DiskTotGB)),
 		}
 		if snap.HasBattery {
-			bCol := pal.Green
+			bCol := pal.Success
 			if snap.BatteryPct <= 20 {
-				bCol = pal.Red
+				bCol = pal.Danger
 			} else if snap.BatteryPct <= 50 {
-				bCol = pal.Yellow
+				bCol = pal.Warning
 			}
-			rows = append(rows, " "+grn.Render("Bat  ")+lipgloss.NewStyle().Bold(true).Foreground(bCol).Render(fmt.Sprintf("%d%%", snap.BatteryPct)))
+			rows = append(rows, " "+sec.Render("Bat  ")+lipgloss.NewStyle().Bold(true).Foreground(bCol).Render(fmt.Sprintf("%d%%", snap.BatteryPct)))
 		}
 		maxS := max(0, len(rows)-h)
 		sc := min(v.Scroll, maxS)
 		end := min(len(rows), sc+h)
 		return SplitLinesPadded(rows[sc:end], w, h)
 
-	default: // Pulse (colorful high-contrast dashboard)
+	default: // Pulse
 		host := snap.Hostname
 		ip := snap.PrimaryIP
 		if ip == "" {
@@ -186,13 +183,13 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 		if snap.HasTemp {
 			tempView = lipgloss.NewStyle().Bold(true).Foreground(tempColor(pal, snap.TempC)).Render(fmt.Sprintf("%.0f°C", snap.TempC))
 		}
-		batView := blu.Render("AC")
+		batView := txt.Render("AC")
 		if snap.HasBattery {
-			bCol := pal.Green
+			bCol := pal.Success
 			if snap.BatteryPct <= 20 {
-				bCol = pal.Red
+				bCol = pal.Danger
 			} else if snap.BatteryPct <= 50 {
-				bCol = pal.Yellow
+				bCol = pal.Warning
 			}
 			bTxt := fmt.Sprintf("%d%%", snap.BatteryPct)
 			if snap.Charging {
@@ -201,21 +198,21 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 			batView = lipgloss.NewStyle().Bold(true).Foreground(bCol).Render(bTxt)
 		}
 
-		ipStyle := yel
+		ipView := accent.Render(Truncate(ip, max(6, w-6)))
 		if ip == "offline" {
-			ipStyle = lipgloss.NewStyle().Bold(true).Foreground(pal.Red)
+			ipView = danger.Render(ip)
 		}
 
 		rows := []string{
-			" " + cyan.Render("Host ") + txt.Render(Truncate(host, max(6, w-6))),
-			" " + yel.Render("IP   ") + ipStyle.Render(Truncate(ip, max(6, w-6))),
-			fmt.Sprintf(" %s %s %s", mag.Render("RAM "), memBar, txt.Render(fmt.Sprintf("%d/%dM", snap.MemUsedMB, snap.MemTotalMB))),
-			" " + blu.Render("Up   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)) + "  " + pur.Render("Ld ") + txt.Render(snap.Load1),
-			" " + org.Render("Temp ") + tempView + "  " + grn.Render("Bat ") + batView,
+			" " + sec.Render("Host ") + txt.Render(Truncate(host, max(6, w-6))),
+			" " + sec.Render("IP   ") + ipView,
+			fmt.Sprintf(" %s %s %s", sec.Render("RAM "), memBar, txt.Render(fmt.Sprintf("%d/%dM", snap.MemUsedMB, snap.MemTotalMB))),
+			" " + sec.Render("Up   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)) + "  " + sec.Render("Ld ") + txt.Render(snap.Load1),
+			" " + sec.Render("Temp ") + tempView + "  " + sec.Render("Bat ") + batView,
 		}
 		if h >= 7 {
 			rows = append(rows, "")
-			rows = append(rows, " "+yel.Render("→")+muted.Render(" open  ")+cyan.Render("Tab")+muted.Render(" tabs  ")+mag.Render("/")+muted.Render(" find"))
+			rows = append(rows, " "+sec.Render("→")+muted.Render(" open  ")+sec.Render("Tab")+muted.Render(" tabs  ")+sec.Render("/")+muted.Render(" find"))
 		}
 		maxS := max(0, len(rows)-h)
 		sc := min(v.Scroll, maxS)

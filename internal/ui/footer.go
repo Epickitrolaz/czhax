@@ -18,15 +18,18 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 		Foreground(pal.FooterFg).
 		Background(pal.FooterBg)
 
-	keyColors := []lipgloss.Color{pal.Yellow, pal.Cyan, pal.Magenta, pal.Green, pal.Orange}
+	keyStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(pal.Secondary).
+		Background(pal.FooterBg)
 
 	descStyle := lipgloss.NewStyle().
-		Foreground(pal.Text).
+		Foreground(pal.Muted).
 		Background(pal.FooterBg)
 
 	msgStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(pal.Yellow).
+		Foreground(pal.Warning).
 		Background(pal.FooterBg)
 
 	if statusMsg != "" {
@@ -42,9 +45,8 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 			{Key: "F8", Desc: "Opt"},
 		}
 		var parts []string
-		for i, h := range fnHints {
-			ks := lipgloss.NewStyle().Bold(true).Foreground(keyColors[i%len(keyColors)]).Background(pal.FooterBg)
-			parts = append(parts, ks.Render(h.Key)+descStyle.Render(":"+h.Desc))
+		for _, h := range fnHints {
+			parts = append(parts, keyStyle.Render(h.Key)+descStyle.Render(":"+h.Desc))
 		}
 		line := strings.Join(parts, barStyle.Render(" "))
 		return barStyle.Width(w).Render(FitLine(line, w))
@@ -53,8 +55,7 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 	var parts []string
 	used := 0
 	for i, h := range hints {
-		ks := lipgloss.NewStyle().Bold(true).Foreground(keyColors[i%len(keyColors)]).Background(pal.FooterBg)
-		chunk := ks.Render(h.Key) + descStyle.Render(":"+h.Desc)
+		chunk := keyStyle.Render(h.Key) + descStyle.Render(":"+h.Desc)
 		chunkW := lipgloss.Width(chunk)
 		sepW := 0
 		if i > 0 {

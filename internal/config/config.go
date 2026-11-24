@@ -56,7 +56,7 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Theme:          "cyber-green",
+		Theme:          "pineapple-blue",
 		Viewport:       ViewportAuto,
 		Sidebar:        SidebarAuto,
 		Border:         BorderCompact,

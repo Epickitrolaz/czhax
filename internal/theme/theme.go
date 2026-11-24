@@ -2,14 +2,19 @@ package theme
 
 import "github.com/charmbracelet/lipgloss"
 
+// Palette uses a clean, predictable 4-role color system for small LCDs:
+//  1. Accent    -> active view, active tab, active selection
+//  2. Secondary -> field labels, keycaps, section headers
+//  3. Text/Muted/Border -> crisp white values + calm slate structure
+//  4. Success/Warning/Danger -> semantic state only (UP/ON, warn, DN/OFF)
 type Palette struct {
 	ID        string
 	Name      string
 	Accent    lipgloss.Color
 	Secondary lipgloss.Color
+	Success   lipgloss.Color
 	Warning   lipgloss.Color
 	Danger    lipgloss.Color
-	Success   lipgloss.Color
 	Text      lipgloss.Color
 	Muted     lipgloss.Color
 	Border    lipgloss.Color
@@ -19,148 +24,98 @@ type Palette struct {
 	HeaderFg  lipgloss.Color
 	FooterBg  lipgloss.Color
 	FooterFg  lipgloss.Color
-
-	// Multi-color semantic accents for high-contrast scanning on small LCDs
-	Cyan    lipgloss.Color
-	Magenta lipgloss.Color
-	Yellow  lipgloss.Color
-	Purple  lipgloss.Color
-	Orange  lipgloss.Color
-	Green   lipgloss.Color
-	Red     lipgloss.Color
-	Blue    lipgloss.Color
 }
 
 var Builtins = []Palette{
 	{
-		ID:        "cyber-green",
-		Name:      "Cyber Neon",
-		Accent:    lipgloss.Color("#00FF87"),
-		Secondary: lipgloss.Color("#38BDF8"),
-		Warning:   lipgloss.Color("#FACC15"),
-		Danger:    lipgloss.Color("#FB7185"),
-		Success:   lipgloss.Color("#4ADE80"),
+		ID:        "pineapple-blue",
+		Name:      "Pineapple",
+		Accent:    lipgloss.Color("#38BDF8"), // Sky Cyan: active focus & selection
+		Secondary: lipgloss.Color("#FACC15"), // Amber Gold: labels & keycaps
+		Success:   lipgloss.Color("#4ADE80"), // Green: UP / ON / healthy
+		Warning:   lipgloss.Color("#FDE047"), // Yellow: caution / PH2
+		Danger:    lipgloss.Color("#FB7185"), // Coral Red: DN / OFF / alert
 		Text:      lipgloss.Color("#FFFFFF"),
 		Muted:     lipgloss.Color("#94A3B8"),
-		Border:    lipgloss.Color("#38BDF8"),
+		Border:    lipgloss.Color("#475569"),
+		SelectBg:  lipgloss.Color("#38BDF8"),
+		SelectFg:  lipgloss.Color("#000000"),
+		HeaderBg:  lipgloss.Color("#000000"),
+		HeaderFg:  lipgloss.Color("#FFFFFF"),
+		FooterBg:  lipgloss.Color("#000000"),
+		FooterFg:  lipgloss.Color("#CBD5E1"),
+	},
+	{
+		ID:        "cyber-green",
+		Name:      "Cyber Ops",
+		Accent:    lipgloss.Color("#00FF87"), // Neon Mint: active focus & selection
+		Secondary: lipgloss.Color("#38BDF8"), // Sky Blue: labels & keycaps
+		Success:   lipgloss.Color("#4ADE80"),
+		Warning:   lipgloss.Color("#FACC15"),
+		Danger:    lipgloss.Color("#FB7185"),
+		Text:      lipgloss.Color("#FFFFFF"),
+		Muted:     lipgloss.Color("#94A3B8"),
+		Border:    lipgloss.Color("#475569"),
 		SelectBg:  lipgloss.Color("#00FF87"),
 		SelectFg:  lipgloss.Color("#000000"),
 		HeaderBg:  lipgloss.Color("#000000"),
 		HeaderFg:  lipgloss.Color("#FFFFFF"),
 		FooterBg:  lipgloss.Color("#000000"),
 		FooterFg:  lipgloss.Color("#CBD5E1"),
-		Cyan:      lipgloss.Color("#22D3EE"),
-		Magenta:   lipgloss.Color("#F472B6"),
-		Yellow:    lipgloss.Color("#FACC15"),
-		Purple:    lipgloss.Color("#C084FC"),
-		Orange:    lipgloss.Color("#FB923C"),
-		Green:     lipgloss.Color("#4ADE80"),
-		Red:       lipgloss.Color("#FB7185"),
-		Blue:      lipgloss.Color("#60A5FA"),
-	},
-	{
-		ID:        "pineapple-blue",
-		Name:      "Pineapple",
-		Accent:    lipgloss.Color("#38BDF8"),
-		Secondary: lipgloss.Color("#FACC15"),
-		Warning:   lipgloss.Color("#FDE047"),
-		Danger:    lipgloss.Color("#FB7185"),
-		Success:   lipgloss.Color("#4ADE80"),
-		Text:      lipgloss.Color("#FFFFFF"),
-		Muted:     lipgloss.Color("#CBD5E1"),
-		Border:    lipgloss.Color("#FACC15"),
-		SelectBg:  lipgloss.Color("#38BDF8"),
-		SelectFg:  lipgloss.Color("#000000"),
-		HeaderBg:  lipgloss.Color("#000000"),
-		HeaderFg:  lipgloss.Color("#FFFFFF"),
-		FooterBg:  lipgloss.Color("#000000"),
-		FooterFg:  lipgloss.Color("#E2E8F0"),
-		Cyan:      lipgloss.Color("#22D3EE"),
-		Magenta:   lipgloss.Color("#F472B6"),
-		Yellow:    lipgloss.Color("#FDE047"),
-		Purple:    lipgloss.Color("#C084FC"),
-		Orange:    lipgloss.Color("#FB923C"),
-		Green:     lipgloss.Color("#4ADE80"),
-		Red:       lipgloss.Color("#FB7185"),
-		Blue:      lipgloss.Color("#60A5FA"),
 	},
 	{
 		ID:        "amber-ops",
 		Name:      "Amber Ops",
-		Accent:    lipgloss.Color("#FFB000"),
-		Secondary: lipgloss.Color("#38BDF8"),
+		Accent:    lipgloss.Color("#FFB000"), // Warm Amber: active focus & selection
+		Secondary: lipgloss.Color("#67E8F9"), // Ice Cyan: labels & keycaps
+		Success:   lipgloss.Color("#86EFAC"),
 		Warning:   lipgloss.Color("#FFE066"),
-		Danger:    lipgloss.Color("#FF6B6B"),
-		Success:   lipgloss.Color("#8CE99A"),
+		Danger:    lipgloss.Color("#FCA5A5"),
 		Text:      lipgloss.Color("#FFF8E7"),
-		Muted:     lipgloss.Color("#D4B982"),
-		Border:    lipgloss.Color("#FB923C"),
+		Muted:     lipgloss.Color("#A89878"),
+		Border:    lipgloss.Color("#5C4D32"),
 		SelectBg:  lipgloss.Color("#FFB000"),
 		SelectFg:  lipgloss.Color("#000000"),
 		HeaderBg:  lipgloss.Color("#000000"),
 		HeaderFg:  lipgloss.Color("#FFF8E7"),
 		FooterBg:  lipgloss.Color("#000000"),
-		FooterFg:  lipgloss.Color("#EAD2A0"),
-		Cyan:      lipgloss.Color("#67E8F9"),
-		Magenta:   lipgloss.Color("#F472B6"),
-		Yellow:    lipgloss.Color("#FFE066"),
-		Purple:    lipgloss.Color("#D8B4FE"),
-		Orange:    lipgloss.Color("#FB923C"),
-		Green:     lipgloss.Color("#86EFAC"),
-		Red:       lipgloss.Color("#FCA5A5"),
-		Blue:      lipgloss.Color("#93C5FD"),
+		FooterFg:  lipgloss.Color("#D4C29E"),
 	},
 	{
 		ID:        "purple-hax",
 		Name:      "Purple Hax",
-		Accent:    lipgloss.Color("#C084FC"),
-		Secondary: lipgloss.Color("#22D3EE"),
-		Warning:   lipgloss.Color("#FDE047"),
-		Danger:    lipgloss.Color("#FB7185"),
+		Accent:    lipgloss.Color("#C084FC"), // Violet: active focus & selection
+		Secondary: lipgloss.Color("#38BDF8"), // Cyan: labels & keycaps
 		Success:   lipgloss.Color("#4ADE80"),
+		Warning:   lipgloss.Color("#FACC15"),
+		Danger:    lipgloss.Color("#FB7185"),
 		Text:      lipgloss.Color("#FFFFFF"),
-		Muted:     lipgloss.Color("#CBD5E1"),
-		Border:    lipgloss.Color("#A855F7"),
+		Muted:     lipgloss.Color("#94A3B8"),
+		Border:    lipgloss.Color("#52476B"),
 		SelectBg:  lipgloss.Color("#C084FC"),
 		SelectFg:  lipgloss.Color("#000000"),
 		HeaderBg:  lipgloss.Color("#000000"),
 		HeaderFg:  lipgloss.Color("#FFFFFF"),
 		FooterBg:  lipgloss.Color("#000000"),
-		FooterFg:  lipgloss.Color("#E2E8F0"),
-		Cyan:      lipgloss.Color("#22D3EE"),
-		Magenta:   lipgloss.Color("#F472B6"),
-		Yellow:    lipgloss.Color("#FACC15"),
-		Purple:    lipgloss.Color("#C084FC"),
-		Orange:    lipgloss.Color("#FB923C"),
-		Green:     lipgloss.Color("#4ADE80"),
-		Red:       lipgloss.Color("#FB7185"),
-		Blue:      lipgloss.Color("#60A5FA"),
+		FooterFg:  lipgloss.Color("#CBD5E1"),
 	},
 	{
 		ID:        "mono-hi",
 		Name:      "High Contrast",
 		Accent:    lipgloss.Color("#FFFFFF"),
-		Secondary: lipgloss.Color("#38BDF8"),
+		Secondary: lipgloss.Color("#CBD5E1"),
+		Success:   lipgloss.Color("#86EFAC"),
 		Warning:   lipgloss.Color("#FEF08A"),
 		Danger:    lipgloss.Color("#FCA5A5"),
-		Success:   lipgloss.Color("#86EFAC"),
 		Text:      lipgloss.Color("#FFFFFF"),
-		Muted:     lipgloss.Color("#D1D5DB"),
-		Border:    lipgloss.Color("#FFFFFF"),
+		Muted:     lipgloss.Color("#9CA3AF"),
+		Border:    lipgloss.Color("#6B7280"),
 		SelectBg:  lipgloss.Color("#FFFFFF"),
 		SelectFg:  lipgloss.Color("#000000"),
 		HeaderBg:  lipgloss.Color("#000000"),
 		HeaderFg:  lipgloss.Color("#FFFFFF"),
 		FooterBg:  lipgloss.Color("#000000"),
-		FooterFg:  lipgloss.Color("#FFFFFF"),
-		Cyan:      lipgloss.Color("#67E8F9"),
-		Magenta:   lipgloss.Color("#F9A8D4"),
-		Yellow:    lipgloss.Color("#FEF08A"),
-		Purple:    lipgloss.Color("#DDD6FE"),
-		Orange:    lipgloss.Color("#FDBA74"),
-		Green:     lipgloss.Color("#86EFAC"),
-		Red:       lipgloss.Color("#FCA5A5"),
-		Blue:      lipgloss.Color("#93C5FD"),
+		FooterFg:  lipgloss.Color("#E5E7EB"),
 	},
 }
 
@@ -175,40 +130,16 @@ func Resolve(id string, stealth bool) Palette {
 	if stealth {
 		p.Accent = lipgloss.Color("#94A3B8")
 		p.Secondary = lipgloss.Color("#CBD5E1")
-		p.Border = lipgloss.Color("#64748B")
+		p.Success = lipgloss.Color("#CBD5E1")
+		p.Warning = lipgloss.Color("#94A3B8")
+		p.Danger = lipgloss.Color("#94A3B8")
+		p.Border = lipgloss.Color("#475569")
 		p.SelectBg = lipgloss.Color("#475569")
 		p.SelectFg = lipgloss.Color("#FFFFFF")
 		p.Text = lipgloss.Color("#E2E8F0")
-		p.Muted = lipgloss.Color("#94A3B8")
-		p.Cyan = lipgloss.Color("#94A3B8")
-		p.Magenta = lipgloss.Color("#94A3B8")
-		p.Yellow = lipgloss.Color("#CBD5E1")
-		p.Purple = lipgloss.Color("#94A3B8")
-		p.Orange = lipgloss.Color("#94A3B8")
-		p.Green = lipgloss.Color("#CBD5E1")
-		p.Red = lipgloss.Color("#94A3B8")
-		p.Blue = lipgloss.Color("#94A3B8")
+		p.Muted = lipgloss.Color("#64748B")
 	}
 	return p
-}
-
-func ViewColor(p Palette, viewID int) lipgloss.Color {
-	switch viewID {
-	case 0: // Dash
-		return p.Cyan
-	case 1: // Recon
-		return p.Magenta
-	case 2: // Net
-		return p.Yellow
-	case 3: // Lab
-		return p.Purple
-	case 4: // Sys
-		return p.Green
-	case 5: // Opts
-		return p.Orange
-	default:
-		return p.Accent
-	}
 }
 
 func NextID(current string) string {

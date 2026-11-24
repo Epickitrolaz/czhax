@@ -21,13 +21,7 @@ func (v *SysMonView) Move(delta int) {
 }
 
 func (v SysMonView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot) []string {
-	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
-	pur := lipgloss.NewStyle().Bold(true).Foreground(pal.Purple)
-	blu := lipgloss.NewStyle().Bold(true).Foreground(pal.Blue)
-	mag := lipgloss.NewStyle().Bold(true).Foreground(pal.Magenta)
-	org := lipgloss.NewStyle().Bold(true).Foreground(pal.Orange)
-	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
-	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	ascii := cfg.Border == config.BorderAscii
@@ -58,34 +52,34 @@ func (v SysMonView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, 
 	diskBar := lipgloss.NewStyle().Bold(true).Foreground(barColor(pal, diskRatio)).Render(MiniBar(diskRatio, barW, ascii))
 
 	rows := []string{
-		" " + cyan.Render("Host ") + txt.Render(host) + " " + pur.Render("("+hw+")"),
-		" " + pur.Render("Kern ") + blu.Render(Truncate(snap.Kernel, max(6, w-6))),
-		" " + blu.Render("Up   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)) + "  " + yel.Render("Ld ") + txt.Render(snap.Load1),
-		fmt.Sprintf(" %s %s %s", mag.Render("RAM "), memBar, txt.Render(fmt.Sprintf("%d/%dM", snap.MemUsedMB, snap.MemTotalMB))),
-		fmt.Sprintf(" %s %s %s", org.Render("Disk"), diskBar, txt.Render(fmt.Sprintf("%.1f/%.1fG", snap.DiskFreeGB, snap.DiskTotGB))),
+		" " + sec.Render("Host ") + txt.Render(host) + " " + muted.Render("("+hw+")"),
+		" " + sec.Render("Kern ") + txt.Render(Truncate(snap.Kernel, max(6, w-6))),
+		" " + sec.Render("Up   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)) + "  " + sec.Render("Ld ") + txt.Render(snap.Load1),
+		fmt.Sprintf(" %s %s %s", sec.Render("RAM "), memBar, txt.Render(fmt.Sprintf("%d/%dM", snap.MemUsedMB, snap.MemTotalMB))),
+		fmt.Sprintf(" %s %s %s", sec.Render("Disk"), diskBar, txt.Render(fmt.Sprintf("%.1f/%.1fG", snap.DiskFreeGB, snap.DiskTotGB))),
 	}
 
 	if snap.HasTemp {
 		tCol := tempColor(pal, snap.TempC)
-		rows = append(rows, " "+org.Render("Temp ")+lipgloss.NewStyle().Bold(true).Foreground(tCol).Render(fmt.Sprintf("%.1f°C", snap.TempC)))
+		rows = append(rows, " "+sec.Render("Temp ")+lipgloss.NewStyle().Bold(true).Foreground(tCol).Render(fmt.Sprintf("%.1f°C", snap.TempC)))
 	} else {
-		rows = append(rows, " "+org.Render("Temp ")+muted.Render("n/a"))
+		rows = append(rows, " "+sec.Render("Temp ")+muted.Render("n/a"))
 	}
 
 	if snap.HasBattery {
-		bCol := pal.Green
+		bCol := pal.Success
 		if snap.BatteryPct <= 20 {
-			bCol = pal.Red
+			bCol = pal.Danger
 		} else if snap.BatteryPct <= 50 {
-			bCol = pal.Yellow
+			bCol = pal.Warning
 		}
 		chg := "discharging"
 		if snap.Charging {
 			chg = "charging"
 		}
-		rows = append(rows, " "+grn.Render("Bat  ")+lipgloss.NewStyle().Bold(true).Foreground(bCol).Render(fmt.Sprintf("%d%% (%s)", snap.BatteryPct, chg)))
+		rows = append(rows, " "+sec.Render("Bat  ")+lipgloss.NewStyle().Bold(true).Foreground(bCol).Render(fmt.Sprintf("%d%% (%s)", snap.BatteryPct, chg)))
 	} else {
-		rows = append(rows, " "+grn.Render("Bat  ")+blu.Render("AC power"))
+		rows = append(rows, " "+sec.Render("Bat  ")+muted.Render("AC power"))
 	}
 
 	maxScroll := max(0, len(rows)-h)
