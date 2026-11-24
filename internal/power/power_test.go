@@ -1,12 +1,9 @@
 package power
 
 import (
-	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 	"unsafe"
 )
 
@@ -68,15 +65,23 @@ func TestWakeDetectionHelpers(t *testing.T) {
 			t.Fatalf("did not expect %q to be flagged as dedicated wake button", nonBtn)
 		}
 	}
-	if !isWakeKeyCode(keyPower) || !isWakeKeyCode(keyWakeup) || !isWakeKeyCode(keyProg1) {
-		t.Fatalf("expected power/wakeup/prog1 to be wake keycodes")
+	if !isWakeKeyCode(keyEsc) || !isWakeKeyCode(keyPower) || !isWakeKeyCode(keyWakeup) || !isWakeKeyCode(keyProg1) {
+		t.Fatalf("expected esc/power/wakeup/prog1 to be wake keycodes")
 	}
-	for _, regular := range []uint16{1, 28, 30, 57} {
+	for _, regular := range []uint16{28, 30, 57} {
 		if isWakeKeyCode(regular) {
-			t.Fatalf("did not expect regular keycode %d (Esc/Enter/A/Space) to wake", regular)
+			t.Fatalf("did not expect regular keycode %d (Enter/A/Space) to wake", regular)
 		}
 	}
-	if !isWakeGPIOLine("BOOT_BTN", "") || !isWakeGPIOLine("", "power-button") || !isWakeGPIOLine("EMMC_REENABLE_N", "") || isWakeGPIOLine("LED1", "status") {
+	if !isEscWakeBytes([]byte{0x1b}) || !isEscWakeBytes([]byte{0x03}) {
+		t.Fatalf("expected standalone Esc and Ctrl+C to match Esc wake")
+	}
+	for _, nonEsc := range [][]byte{{0x1b, '[', 'A'}, {'\r'}, {'\n'}, {' '}, {'a'}} {
+		if isEscWakeBytes(nonEsc) {
+			t.Fatalf("did not expect %q to wake sleep mode", nonEsc)
+		}
+	}
+	if !isWakeGPIOLine("BOOT_BTN", "") || !isWakeGPIOLine("", "power-button") || isWakeGPIOLine("LED1", "status") {
 		t.Fatalf("unexpected GPIO wake line classification")
 	}
 }
@@ -102,17 +107,5 @@ func TestGPIOStructSizesMatchLinuxABI(t *testing.T) {
 	}
 	if got := unsafe.Sizeof(gpioV2LineValues{}); got != 16 {
 		t.Fatalf("gpioV2LineValues size = %d, want 16", got)
-	}
-}
-
-func TestWaitForWakeIgnoresEscStdin(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-	defer cancel()
-
-	// Passing Esc/Enter/Space bytes on stdin must NOT wake sleep mode
-	stdin := bytes.NewBuffer([]byte{0x1b, '\r', '\n', ' '})
-	reason := WaitForWake(ctx, t.TempDir(), stdin)
-	if reason != "signal" {
-		t.Fatalf("expected WaitForWake to ignore Esc/stdin and wait until ctx timeout (\"signal\"), got %q", reason)
 	}
 }
