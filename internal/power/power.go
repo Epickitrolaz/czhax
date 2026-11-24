@@ -16,10 +16,12 @@ import (
 
 	"github.com/czhax/czhax/internal/console"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const (
 	evKey      uint16 = 1
+	keyEsc     uint16 = 1
 	keyPower   uint16 = 116
 	keySleep   uint16 = 142
 	keyWakeup  uint16 = 143
@@ -162,14 +164,14 @@ func ProbeInputDevices() []string {
 }
 
 // RunSleepCommand executes full power-save sleep from the CLI (`czhax power sleep`),
-// guarantees hardware restore on wake or signal, and blocks until the hardware boot button
-// wakes the unit.
+// guarantees hardware restore on wake or signal, and blocks until Esc (or a hardware
+// wake button) wakes the unit.
 func RunSleepCommand() error {
 	guard := console.SuppressKernelLogs()
 	defer guard.Restore()
 
 	fmt.Println("Entering CZHax Sleep Mode...")
-	fmt.Println("Press the boot button to wake.")
+	fmt.Println("Press Esc to wake.")
 	time.Sleep(600 * time.Millisecond)
 
 	saved := EnterSleep("")
@@ -178,21 +180,34 @@ func RunSleepCommand() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	reason := WaitForWake(ctx, "/dev/input", nil)
+	reason := WaitForWake(ctx, "/dev/input", os.Stdin)
 	ExitSleep(saved)
 	fmt.Printf("Woke up (%s).\n", reason)
 	return nil
 }
 
-// WaitForWake blocks until a hardware wake button event (evdev or GPIO) is received.
-func WaitForWake(ctx context.Context, inputDir string, _ io.Reader) string {
+// WaitForWake blocks until Esc (via evdev or terminal stdin) or a hardware wake button event is received.
+func WaitForWake(ctx context.Context, inputDir string, stdin io.Reader) string {
 	wakeCh := make(chan string, 4)
 	doneCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Watch Linux evdev & unclaimed GPIO button devices for boot / power button presses
+	// Watch Linux evdev & unclaimed GPIO button devices
 	watchEvdevButtons(doneCtx, inputDir, wakeCh)
 	watchGPIOButtons(doneCtx, wakeCh)
+
+	// Watch terminal stdin for Esc (standalone 0x1b, ignoring multi-byte ANSI sequences)
+	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		fd := int(f.Fd())
+		oldState, err := term.MakeRaw(fd)
+		if err == nil {
+			defer func() {
+				_, _, _ = unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TCFLSH), uintptr(unix.TCIFLUSH))
+				_ = term.Restore(fd, oldState)
+			}()
+		}
+		go watchStdinWake(doneCtx, f, wakeCh)
+	}
 
 	select {
 	case reason := <-wakeCh:
@@ -200,6 +215,45 @@ func WaitForWake(ctx context.Context, inputDir string, _ io.Reader) string {
 	case <-ctx.Done():
 		return "signal"
 	}
+}
+
+func watchStdinWake(ctx context.Context, f *os.File, wakeCh chan<- string) {
+	fd := int(f.Fd())
+	buf := make([]byte, 16)
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		n, err := unix.Poll(pfd, 200)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return
+		}
+		if n <= 0 || (pfd[0].Revents&unix.POLLIN) == 0 {
+			continue
+		}
+		nr, err := unix.Read(fd, buf)
+		if err != nil || nr <= 0 {
+			return
+		}
+		if isEscWakeBytes(buf[:nr]) {
+			select {
+			case wakeCh <- "esc":
+			default:
+			}
+			return
+		}
+	}
+}
+
+func isEscWakeBytes(b []byte) bool {
+	// Match standalone Esc (0x1b) or Ctrl+C (0x03), ignoring multi-byte ANSI sequences like arrows
+	return len(b) == 1 && (b[0] == 0x1b || b[0] == 0x03)
 }
 
 func isWakeButtonDevice(name string) bool {
@@ -222,7 +276,7 @@ func isWakeButtonDevice(name string) bool {
 
 func isWakeKeyCode(code uint16) bool {
 	switch code {
-	case keyPower, keySleep, keyWakeup, keyProg1, keyProg2, keyProg3, keyProg4, keySuspend, keyRestart:
+	case keyEsc, keyPower, keySleep, keyWakeup, keyProg1, keyProg2, keyProg3, keyProg4, keySuspend, keyRestart:
 		return true
 	default:
 		return false

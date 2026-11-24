@@ -109,7 +109,7 @@ func cString(b []byte) string {
 
 func isWakeGPIOLine(name, consumer string) bool {
 	s := strings.ToLower(name + " " + consumer)
-	for _, kw := range []string{"boot", "btn", "button", "pwr", "power", "wake", "sw_det", "emmc_reenable", "emmc_disable", "rpiboot"} {
+	for _, kw := range []string{"boot", "btn", "button", "pwr", "power", "wake", "sw_det"} {
 		if strings.Contains(s, kw) {
 			return true
 		}
