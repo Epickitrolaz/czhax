@@ -80,6 +80,7 @@ Conflicts=getty@tty1.service
 User=%s
 Environment=TERM=linux
 Environment=HOME=%s
+ExecStartPre=+/bin/sh -c 'dmesg -n 1 >/dev/null 2>&1 || true'
 ExecStart=%s
 StandardInput=tty
 StandardOutput=tty

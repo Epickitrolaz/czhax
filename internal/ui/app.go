@@ -72,9 +72,10 @@ type AppModel struct {
 	System SystemView
 	Help   HelpView
 
-	ShowHelp    bool
-	ConfirmExit bool
-	StatusMsg   string
+	ShowHelp      bool
+	ConfirmExit   bool
+	RestartOnQuit bool
+	StatusMsg     string
 }
 
 func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
@@ -141,44 +142,44 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setStatus("Up to date")
 		}
 		m.Version = msg.res.LatestVersion
-		m.System.Note = "Updated to " + msg.res.LatestVersion + " (restart czhax)"
+		m.System.Note = "Done! Select Restart CZHax"
 		return m, m.setStatus("Updated: " + msg.res.LatestVersion)
 
 	case sudoUpdateDoneMsg:
 		m.System.Updating = false
 		if msg.err != nil {
 			m.System.Note = "Update canceled or failed"
-			return m, m.setStatus("Update failed")
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Update failed"))
 		}
-		m.System.Note = "Update complete (restart czhax)"
-		return m, m.setStatus("Update finished")
+		m.System.Note = "Done! Select Restart CZHax"
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Update finished"))
 
 	case shellExitedMsg:
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
-		return m, m.setStatus("Returned from shell")
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"))
 
 	case bootToggledMsg:
 		m.System.BootState = msg.state
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, m.setStatus("Boot toggle failed")
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot toggle failed"))
 		}
 		if msg.state.Enabled {
 			m.System.Note = "Start on boot: ON (" + string(msg.state.Method) + ")"
-			return m, m.setStatus("Boot: ON")
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: ON"))
 		}
 		m.System.Note = "Start on boot: OFF"
-		return m, m.setStatus("Boot: OFF")
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: OFF"))
 
 	case sleepDoneMsg:
 		m.Snap = sysinfo.Collect()
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, m.setStatus("Sleep error")
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"))
 		}
 		m.System.Note = "Woke from sleep"
-		return m, m.setStatus("Awake")
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"))
 
 	case powerActionDoneMsg:
 		if msg.err != nil {
@@ -198,6 +199,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if k == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if k == "ctrl+l" {
+		return m, tea.ClearScreen
 	}
 
 	if m.ConfirmExit {
@@ -351,6 +355,10 @@ func (m AppModel) activateSystemOption() (tea.Model, tea.Cmd) {
 			res, err := updater.CheckAndUpdate(ver, false)
 			return updateDoneMsg{res: res, err: err}
 		}
+
+	case SysOptRestart:
+		m.RestartOnQuit = true
+		return m, tea.Quit
 
 	case SysOptTerminal:
 		c := exec.Command("sh", "-c", `printf "\n[CZHax] Terminal shell — type 'exit' or press Ctrl+D to return.\n\n"; exec "${SHELL:-/bin/sh}"`)

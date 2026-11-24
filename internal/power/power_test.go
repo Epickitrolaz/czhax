@@ -56,13 +56,16 @@ func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
 }
 
 func TestWakeDetectionHelpers(t *testing.T) {
-	if !isWakeButtonDevice("gpio-keys") || !isWakeButtonDevice("pwr_button") {
-		t.Fatalf("expected gpio-keys and pwr_button to be detected as wake buttons")
+	if !isWakeButtonDevice("gpio-keys") || !isWakeButtonDevice("pwr_button") || !isWakeButtonDevice("cardputer-btn") {
+		t.Fatalf("expected button/gpio devices to be detected as wake buttons")
 	}
-	if isWakeButtonDevice("tca8418-keypad") || isWakeButtonDevice("bmi270-imu") {
-		t.Fatalf("did not expect keypad or imu to be flagged as dedicated button")
+	if isWakeButtonDevice("tca8418-keypad") || isWakeButtonDevice("bmi270-imu") || isWakeButtonDevice("") {
+		t.Fatalf("did not expect keypad, imu, or empty name to be flagged as dedicated button")
 	}
 	if !isWakeKeyCode(keyPower) || !isWakeKeyCode(keyWakeup) || isWakeKeyCode(30) {
 		t.Fatalf("unexpected wake keycode classification")
+	}
+	if !isWakeGPIOLine("BOOT_BTN", "") || !isWakeGPIOLine("", "power-button") || isWakeGPIOLine("LED1", "status") {
+		t.Fatalf("unexpected GPIO wake line classification")
 	}
 }

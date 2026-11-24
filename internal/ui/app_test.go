@@ -83,16 +83,20 @@ func TestAllViewsAndSizes(t *testing.T) {
 		}
 		sysView := m.View()
 		assertFitsBounds(t, sysView, sz.w, sz.h, sz.name+"/System/Tabs")
-		for _, want := range []string{"Update CZHax", "Terminal Shell", "Start on Boot"} {
+		for _, want := range []string{"Update CZHax", "Restart CZHax", "Terminal Shell", "Start on Boot"} {
 			if !strings.Contains(sysView, want) {
 				t.Fatalf("[%s] expected %q in System view:\n%s", sz.name, want, sysView)
 			}
 		}
 
-		// Enter enters System content, arrows navigate all options, Esc returns
+		// Enter enters System content, arrows navigate all options (skipping separator), Esc returns
 		m = sendKey(m, "enter")
 		if m.Focus != FocusContent {
 			t.Fatalf("expected FocusContent on enter")
+		}
+		m = sendKey(m, "down")
+		if m.System.Cursor != int(SysOptRestart) {
+			t.Fatalf("expected cursor at SysOptRestart, got %d", m.System.Cursor)
 		}
 		m = sendKey(m, "down")
 		if m.System.Cursor != int(SysOptTerminal) {

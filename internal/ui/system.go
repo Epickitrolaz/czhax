@@ -14,6 +14,7 @@ type SystemOption int
 
 const (
 	SysOptUpdate SystemOption = iota
+	SysOptRestart
 	SysOptTerminal
 	SysOptBoot
 	SysOptSleep
@@ -72,38 +73,58 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 		bootLbl = "[ON]"
 	}
 
-	items := []struct {
+	type sysRow struct {
+		opt    SystemOption
+		isSep  bool
 		name   string
 		val    string
 		ok     bool
 		warn   bool
 		danger bool
-	}{
-		{name: "Update CZHax", val: verLbl, warn: v.Updating},
-		{name: "Terminal Shell", val: shellName()},
-		{name: "Start on Boot", val: bootLbl, ok: v.BootState.Enabled},
-		{name: "Sleep Mode", val: "low pwr"},
-		{name: "Reboot", val: "restart", warn: v.Confirm == "reboot"},
-		{name: "Shutdown", val: "poweroff", danger: true},
+	}
+
+	rows := []sysRow{
+		{opt: SysOptUpdate, name: "Update CZHax", val: verLbl, warn: v.Updating},
+		{opt: SysOptRestart, name: "Restart CZHax", val: "relaunch"},
+		{opt: SysOptTerminal, name: "Terminal Shell", val: shellName()},
+		{opt: SysOptBoot, name: "Start on Boot", val: bootLbl, ok: v.BootState.Enabled},
+		{isSep: true},
+		{opt: SysOptSleep, name: "Sleep Mode", val: "low pwr"},
+		{opt: SysOptReboot, name: "Reboot", val: "restart", warn: v.Confirm == "reboot"},
+		{opt: SysOptShutdown, name: "Shutdown", val: "poweroff", danger: true},
+	}
+
+	// Map option index -> display row index so ScrollWindow tracks across the separator cleanly.
+	cursorRow := 0
+	for i, r := range rows {
+		if !r.isSep && int(r.opt) == v.Cursor {
+			cursorRow = i
+			break
+		}
 	}
 
 	listH := h
-	showBottom := h >= len(items)+2
+	showBottom := h >= len(rows)+2
 	if showBottom {
 		listH = h - 1
 	}
 
-	start, end := ScrollWindow(len(items), v.Cursor, listH)
+	start, end := ScrollWindow(len(rows), cursorRow, listH)
 	var out []string
 	for i := start; i < end; i++ {
-		it := items[i]
-		if i == v.Cursor && focused {
+		it := rows[i]
+		if it.isSep {
+			out = append(out, "")
+			continue
+		}
+		selected := int(it.opt) == v.Cursor
+		if selected && focused {
 			nameW := max(8, w-len(it.val)-5)
 			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
 			out = append(out, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			pfx := "   "
-			if i == v.Cursor {
+			if selected {
 				pfx = accent.Render(" ▸ ")
 			}
 			valStyle := muted
@@ -132,12 +153,14 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 			switch SystemOption(v.Cursor) {
 			case SysOptUpdate:
 				hint = "⏎ check & install latest release"
+			case SysOptRestart:
+				hint = "⏎ relaunch czhax (loads updates)"
 			case SysOptTerminal:
 				hint = "⏎ open shell (exit/^D returns)"
 			case SysOptBoot:
 				hint = fmt.Sprintf("⏎ toggle boot (%s)", v.BootState.Method)
 			case SysOptSleep:
-				hint = "⏎ screen/wifi off; side btn wakes"
+				hint = "⏎ screen/wifi off; btn or Esc wakes"
 			case SysOptReboot:
 				hint = "⏎ reboot unit (asks confirm)"
 			case SysOptShutdown:

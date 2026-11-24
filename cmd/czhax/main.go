@@ -4,10 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/console"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
@@ -96,8 +98,17 @@ func main() {
 				fmt.Fprintf(os.Stderr, "reboot error: %v\n", err)
 				os.Exit(1)
 			}
+		case "probe":
+			fmt.Println("Input devices:")
+			for _, line := range power.ProbeInputDevices() {
+				fmt.Println(" ", line)
+			}
+			fmt.Println("GPIO wake lines:")
+			for _, line := range power.ProbeGPIOLines() {
+				fmt.Println(" ", line)
+			}
 		default:
-			fmt.Fprintln(os.Stderr, "usage: czhax power <sleep|reboot|shutdown>")
+			fmt.Fprintln(os.Stderr, "usage: czhax power <sleep|reboot|shutdown|probe>")
 			os.Exit(1)
 		}
 		return
@@ -141,10 +152,25 @@ func main() {
 		cfg.Viewport = config.ViewportCZ4510
 	}
 
+	guard := console.SuppressKernelLogs()
+
 	model := ui.NewAppModel(cfg, cfgPath, version)
 	p := tea.NewProgram(model, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	guard.Restore()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "czhax error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if app, ok := finalModel.(ui.AppModel); ok && app.RestartOnQuit {
+		exePath, err := updater.ExecutablePath()
+		if err != nil {
+			exePath = os.Args[0]
+		}
+		if err := syscall.Exec(exePath, os.Args, os.Environ()); err != nil {
+			fmt.Fprintf(os.Stderr, "restart error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }

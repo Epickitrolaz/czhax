@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/czhax/czhax/internal/console"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -129,12 +130,35 @@ func isRfkillBlocked(kind string) bool {
 	return strings.Contains(string(out), "Soft blocked: yes")
 }
 
+// ProbeInputDevices lists /dev/input/event* nodes and whether CZHax watches them as wake buttons.
+func ProbeInputDevices() []string {
+	entries, err := filepath.Glob("/dev/input/event*")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, devPath := range entries {
+		base := filepath.Base(devPath)
+		nameBytes, _ := os.ReadFile(filepath.Join("/sys/class/input", base, "device/name"))
+		name := strings.TrimSpace(string(nameBytes))
+		role := "wake-keys-only"
+		if isWakeButtonDevice(name) {
+			role = "wake-button"
+		}
+		out = append(out, fmt.Sprintf("%s: %q (%s)", devPath, name, role))
+	}
+	return out
+}
+
 // RunSleepCommand executes full power-save sleep from the CLI (`czhax power sleep`),
 // guarantees hardware restore on wake or signal, and blocks until the side boot button
 // (or fallback Enter/Esc key) wakes the unit.
 func RunSleepCommand() error {
+	guard := console.SuppressKernelLogs()
+	defer guard.Restore()
+
 	fmt.Println("Entering CZHax Sleep Mode...")
-	fmt.Println("Press the side boot button (or Enter / Esc) to wake.")
+	fmt.Println("Press the side boot button (or Esc / Enter) to wake.")
 	time.Sleep(600 * time.Millisecond)
 
 	saved := EnterSleep("")
@@ -155,8 +179,9 @@ func WaitForWake(ctx context.Context, inputDir string, stdin io.Reader) string {
 	doneCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Watch Linux evdev devices for side boot / power button presses
+	// Watch Linux evdev & unclaimed GPIO button devices for side boot / power button presses
 	watchEvdevButtons(doneCtx, inputDir, wakeCh)
+	watchGPIOButtons(doneCtx, wakeCh)
 
 	// Watch stdin for Enter/Esc/Space fallback if running interactively
 	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
@@ -214,16 +239,16 @@ func watchStdinWake(ctx context.Context, f *os.File, wakeCh chan<- string) {
 
 func isWakeButtonDevice(name string) bool {
 	low := strings.ToLower(name)
-	if strings.Contains(low, "tca8418") || strings.Contains(low, "mouse") || strings.Contains(low, "imu") {
+	if low == "" {
 		return false
 	}
-	return strings.Contains(low, "gpio") ||
-		strings.Contains(low, "btn") ||
-		strings.Contains(low, "button") ||
-		strings.Contains(low, "pwr") ||
-		strings.Contains(low, "power") ||
-		strings.Contains(low, "boot") ||
-		strings.Contains(low, "pmic")
+	// Exclude known non-button peripherals (46-key QWERTY keypad, IMU, mice, HDMI CEC/audio)
+	for _, skip := range []string{"tca8418", "bmi270", "bmm150", "imu", "mouse", "touchpad", "vc4-hdmi", "hdmi"} {
+		if strings.Contains(low, skip) {
+			return false
+		}
+	}
+	return true
 }
 
 func isWakeKeyCode(code uint16) bool {
