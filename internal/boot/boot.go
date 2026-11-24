@@ -74,10 +74,12 @@ func RenderServiceUnit(username, homeDir, exePath string) string {
 	shellPath := detectUserShell(username)
 	return fmt.Sprintf(`[Unit]
 Description=CZHax TUI on tty1
-After=systemd-user-sessions.service
+After=systemd-user-sessions.service plymouth-quit-wait.service rc-local.service network.target
+Before=getty.target
 Conflicts=getty@tty1.service
 
 [Service]
+Type=idle
 User=%s
 WorkingDirectory=%s
 Environment=TERM=linux
@@ -85,14 +87,16 @@ Environment=HOME=%s
 Environment=USER=%s
 Environment=LOGNAME=%s
 Environment=SHELL=%s
-ExecStartPre=+/bin/sh -c 'dmesg -n 1 >/dev/null 2>&1 || true'
+ExecStartPre=+/bin/sh -c 'printf "0 4 0 7\n" >/proc/sys/kernel/printk 2>/dev/null || dmesg -n 1 >/dev/null 2>&1 || true; dmesg -D >/dev/null 2>&1 || true'
 ExecStart=%s
+ExecStopPost=+/bin/sh -c 'printf "4 4 1 7\n" >/proc/sys/kernel/printk 2>/dev/null || true; dmesg -E >/dev/null 2>&1 || true'
 StandardInput=tty
 StandardOutput=tty
 StandardError=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
+TTYVTDisallocate=yes
 Restart=always
 RestartSec=1
 

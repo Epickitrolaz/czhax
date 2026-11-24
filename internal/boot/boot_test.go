@@ -10,14 +10,19 @@ import (
 func TestRenderServiceUnit(t *testing.T) {
 	unit := RenderServiceUnit("pi", "/home/pi", "/usr/local/bin/czhax")
 	for _, want := range []string{
+		"Type=idle",
+		"After=systemd-user-sessions.service plymouth-quit-wait.service rc-local.service network.target",
+		"Before=getty.target",
 		"User=pi",
 		"WorkingDirectory=/home/pi",
 		"Environment=HOME=/home/pi",
 		"Environment=SHELL=",
+		"ExecStartPre=+",
 		"ExecStart=/usr/local/bin/czhax",
 		"StandardError=tty",
 		"Conflicts=getty@tty1.service",
 		"TTYPath=/dev/tty1",
+		"TTYVTDisallocate=yes",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("expected %q in unit:\n%s", want, unit)

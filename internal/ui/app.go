@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -28,6 +29,7 @@ const (
 
 type tickMsg time.Time
 type clearStatusMsg struct{}
+type startupRedrawMsg struct{}
 
 type updateDoneMsg struct {
 	res updater.Result
@@ -109,7 +111,13 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	return tea.Batch(m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd())
+	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd()}
+	if os.Getenv("TERM") == "linux" {
+		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return startupRedrawMsg{}
+		}))
+	}
+	return tea.Batch(cmds...)
 }
 
 func collectWifiCmd() tea.Cmd {
@@ -172,6 +180,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearStatusMsg:
 		m.StatusMsg = ""
 		return m, nil
+
+	case startupRedrawMsg:
+		return m, tea.ClearScreen
 
 	case updateDoneMsg:
 		m.System.Updating = false
