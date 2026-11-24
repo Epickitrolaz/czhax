@@ -30,7 +30,7 @@ func (v *NotesView) Load() {
 	data, err := os.ReadFile(v.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			v.Lines = []string{"CZHax Phase 1 ready.", "Press 'a' to add a quick field note."}
+			v.Lines = []string{"CZHax field notes.", "Press 'a' to add note."}
 			return
 		}
 		v.LastErr = err.Error()
@@ -90,35 +90,41 @@ func (v *NotesView) DeleteCurrent() {
 	_ = v.Save()
 }
 
-func (v NotesView) Render(w, h int, pal theme.Palette) string {
+func (v NotesView) RenderLines(w, h int, pal theme.Palette, focused bool) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	var out []string
-	out = append(out, accent.Render("QUICK NOTES")+" "+muted.Render(ScrollBadge(v.Cursor, len(v.Lines)))+" "+muted.Render("a:add d:del"))
-
 	if v.Adding {
-		out = append(out, accent.Render("New note (Enter=save Esc=cancel):"))
-		out = append(out, sel.Width(w).Render("> "+v.Draft+"_"))
-		return PadLines(out, w, h, "")
+		out = append(out, " "+accent.Render("New note (Enter save, Esc cancel):"))
+		out = append(out, sel.Width(w).Render(" > "+v.Draft+"_"))
+		return SplitLinesPadded(out, w, h)
 	}
 
 	if len(v.Lines) == 0 {
-		out = append(out, muted.Render("No notes yet. Press 'a' to add one."))
-		return PadLines(out, w, h, "")
+		out = append(out, " "+muted.Render("No notes. Press 'a' to add."))
+		return SplitLinesPadded(out, w, h)
 	}
 
 	avail := max(1, h-1)
 	start, end := ScrollWindow(len(v.Lines), v.Cursor, avail)
 	for i := start; i < end; i++ {
-		if i == v.Cursor {
-			row := fmt.Sprintf("▸ %s", v.Lines[i])
+		if i == v.Cursor && focused {
+			row := fmt.Sprintf(" ▸ %s", v.Lines[i])
 			out = append(out, sel.Width(w).Render(Truncate(row, w)))
 		} else {
-			out = append(out, txt.Render(fmt.Sprintf("  %s", Truncate(v.Lines[i], max(4, w-2)))))
+			pfx := "   "
+			if i == v.Cursor {
+				pfx = " ▸ "
+			}
+			out = append(out, txt.Render(Truncate(pfx+v.Lines[i], w)))
 		}
 	}
-	return PadLines(out, w, h, "")
+	for len(out) < h-1 {
+		out = append(out, "")
+	}
+	out = append(out, " "+muted.Render("a:add  d:del  ← sidebar"))
+	return SplitLinesPadded(out, w, h)
 }

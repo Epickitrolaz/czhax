@@ -21,16 +21,16 @@ func (v *NetIfView) Move(delta int, count int) {
 	v.Cursor = (v.Cursor + delta + count) % count
 }
 
-func (v NetIfView) Render(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot) string {
+func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot, focused bool) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	ok := lipgloss.NewStyle().Foreground(pal.Success)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	ifaces := snap.Interfaces
 	if len(ifaces) == 0 {
-		return PadLines([]string{accent.Render("NET INTERFACES"), muted.Render("No interfaces found")}, w, h, "")
+		return SplitLinesPadded([]string{" " + muted.Render("No interfaces found")}, w, h)
 	}
 
 	cursor := v.Cursor
@@ -39,32 +39,34 @@ func (v NetIfView) Render(w, h int, pal theme.Palette, cfg config.Config, snap s
 	}
 
 	var lines []string
-	lines = append(lines, accent.Render("NET INTERFACES")+" "+muted.Render(ScrollBadge(cursor, len(ifaces))))
-
-	listH := max(1, h-3)
+	listH := max(1, h-2)
 	start, end := ScrollWindow(len(ifaces), cursor, listH)
 	for i := start; i < end; i++ {
 		inf := ifaces[i]
-		state := "DOWN"
+		state := "DN"
 		if inf.Up {
-			state = "UP  "
+			state = "UP"
 		}
 		addr := "-"
 		if len(inf.Addrs) > 0 {
-			addr = inf.Addrs[0]
+			addr = strings.Split(inf.Addrs[0], "/")[0]
 			if cfg.StealthMode {
 				addr = "[masked]"
 			}
 		}
-		if i == cursor {
-			row := fmt.Sprintf("▸ %-7s %s %s", Truncate(inf.Name, 7), state, addr)
+		if i == cursor && focused {
+			row := fmt.Sprintf(" ▸ %-6s %s %s", Truncate(inf.Name, 6), state, addr)
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
+			pfx := "  "
+			if i == cursor {
+				pfx = "▸ "
+			}
 			st := muted.Render(state)
 			if inf.Up {
 				st = ok.Render(state)
 			}
-			row := fmt.Sprintf("  %-7s %s %s", Truncate(inf.Name, 7), st, txt.Render(addr))
+			row := fmt.Sprintf("%s%-6s %s %s", accent.Render(pfx), txt.Render(Truncate(inf.Name, 6)), st, txt.Render(addr))
 			lines = append(lines, row)
 		}
 	}
@@ -81,12 +83,16 @@ func (v NetIfView) Render(w, h int, pal theme.Palette, cfg config.Config, snap s
 	if cfg.StealthMode && mac != "none" {
 		mac = "xx:xx:xx:xx:xx:xx"
 	}
-	if h >= 4 {
-		lines = append(lines, muted.Render(fmt.Sprintf("MAC:%s MTU:%d", mac, cur.MTU)))
+	if h >= 3 {
+		lines = append(lines, " "+muted.Render(fmt.Sprintf("MAC %s  MTU %d", mac, cur.MTU)))
 	}
-	if h >= 5 && len(cur.Addrs) > 1 && !cfg.StealthMode {
-		lines = append(lines, muted.Render("Alt: "+strings.Join(cur.Addrs[1:], ", ")))
+	if h >= 4 {
+		if len(cur.Addrs) > 0 && !cfg.StealthMode {
+			lines = append(lines, " "+muted.Render("IP  "+strings.Join(cur.Addrs, ", ")))
+		} else {
+			lines = append(lines, " "+muted.Render("r:refresh  ← sidebar"))
+		}
 	}
 
-	return PadLines(lines, w, h, "")
+	return SplitLinesPadded(lines, w, h)
 }

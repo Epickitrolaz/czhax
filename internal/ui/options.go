@@ -13,28 +13,69 @@ type OptionKey int
 const (
 	OptTheme OptionKey = iota
 	OptViewport
+	OptSidebar
 	OptBorder
 	OptKeyHints
 	OptFnBar
+	OptStealth
+
 	OptNavMode
 	OptRefresh
-	OptStealth
 	OptConfirmQuit
 	OptReset
-	optCount
 )
 
+var displayKeys = []OptionKey{
+	OptTheme,
+	OptViewport,
+	OptSidebar,
+	OptBorder,
+	OptKeyHints,
+	OptFnBar,
+	OptStealth,
+}
+
+var controlKeys = []OptionKey{
+	OptNavMode,
+	OptRefresh,
+	OptConfirmQuit,
+	OptReset,
+}
+
 type OptionsView struct {
-	Cursor int
-	Dirty  bool
+	Cursors [3]int // per horizontal tab: 0=Display, 1=Ctrls, 2=Keys (scroll)
 }
 
-func (v *OptionsView) Move(delta int) {
-	v.Cursor = (v.Cursor + delta + int(optCount)) % int(optCount)
+func (v *OptionsView) Move(tab, delta int) {
+	switch tab {
+	case 0:
+		v.Cursors[0] = (v.Cursors[0] + delta + len(displayKeys)) % len(displayKeys)
+	case 1:
+		v.Cursors[1] = (v.Cursors[1] + delta + len(controlKeys)) % len(controlKeys)
+	case 2:
+		v.Cursors[2] += delta
+		if v.Cursors[2] < 0 {
+			v.Cursors[2] = 0
+		}
+	}
 }
 
-func (v *OptionsView) Adjust(delta int, cfg *config.Config) (action string) {
-	key := OptionKey(v.Cursor)
+func (v *OptionsView) Adjust(tab, delta int, cfg *config.Config) string {
+	var keys []OptionKey
+	switch tab {
+	case 0:
+		keys = displayKeys
+	case 1:
+		keys = controlKeys
+	default:
+		return ""
+	}
+	cur := v.Cursors[tab]
+	if cur < 0 || cur >= len(keys) {
+		return ""
+	}
+	key := keys[cur]
+
 	switch key {
 	case OptTheme:
 		if delta >= 0 {
@@ -47,9 +88,17 @@ func (v *OptionsView) Adjust(delta int, cfg *config.Config) (action string) {
 			config.ViewportAuto,
 			config.ViewportCZ5314,
 			config.ViewportCZ4510,
+			config.ViewportCZ4010,
 			config.ViewportWide,
 		}
 		cfg.Viewport = cycleSlice(modes, cfg.Viewport, delta)
+	case OptSidebar:
+		modes := []config.SidebarMode{
+			config.SidebarAuto,
+			config.SidebarWide,
+			config.SidebarSlim,
+		}
+		cfg.Sidebar = cycleSlice(modes, cfg.Sidebar, delta)
 	case OptBorder:
 		modes := []config.BorderMode{
 			config.BorderCompact,
@@ -61,6 +110,8 @@ func (v *OptionsView) Adjust(delta int, cfg *config.Config) (action string) {
 		cfg.ShowKeyHints = !cfg.ShowKeyHints
 	case OptFnBar:
 		cfg.ShowFnBar = !cfg.ShowFnBar
+	case OptStealth:
+		cfg.StealthMode = !cfg.StealthMode
 	case OptNavMode:
 		modes := []config.NavKeyMode{
 			config.NavArrowsVim,
@@ -71,19 +122,15 @@ func (v *OptionsView) Adjust(delta int, cfg *config.Config) (action string) {
 	case OptRefresh:
 		vals := []int{0, 1, 2, 5, 10}
 		cfg.RefreshSeconds = cycleSlice(vals, cfg.RefreshSeconds, delta)
-	case OptStealth:
-		cfg.StealthMode = !cfg.StealthMode
 	case OptConfirmQuit:
 		cfg.ConfirmQuit = !cfg.ConfirmQuit
 	case OptReset:
-		if delta == 0 {
+		if delta >= 0 {
 			*cfg = config.Default()
-			v.Dirty = true
 			return "reset"
 		}
 		return ""
 	}
-	v.Dirty = true
 	return "changed"
 }
 
@@ -102,52 +149,60 @@ func cycleSlice[T comparable](items []T, current T, delta int) T {
 	return items[(idx+step+len(items))%len(items)]
 }
 
-func optionRow(key OptionKey, cfg config.Config) (label, val, hint string) {
+func optionRow(key OptionKey, cfg config.Config) (label, val string) {
 	switch key {
 	case OptTheme:
-		p := theme.Resolve(cfg.Theme, false)
-		return "Theme", p.Name, "Color palette tuned for 1.9\" ST7789 LCD"
+		return "Theme", theme.Resolve(cfg.Theme, false).Name
 	case OptViewport:
-		var lbl string
 		switch cfg.Viewport {
 		case config.ViewportAuto:
-			lbl = "Auto"
+			return "Viewport", "Auto"
 		case config.ViewportCZ5314:
-			lbl = "CZ 53x14"
+			return "Viewport", "CZ 53x14"
 		case config.ViewportCZ4510:
-			lbl = "CZ 45x10"
+			return "Viewport", "CZ 45x10"
+		case config.ViewportCZ4010:
+			return "Viewport", "CZ 40x10"
 		case config.ViewportWide:
-			lbl = "Full Term"
+			return "Viewport", "Full"
 		}
-		return "Viewport", lbl, "Constrain UI to exact Cardputer Zero dimensions"
+	case OptSidebar:
+		switch cfg.Sidebar {
+		case config.SidebarAuto:
+			return "Sidebar", "Auto"
+		case config.SidebarWide:
+			return "Sidebar", "Wide 7c"
+		case config.SidebarSlim:
+			return "Sidebar", "Slim 3c"
+		}
 	case OptBorder:
-		return "Style", string(cfg.Border), "compact / minimal / pure ASCII symbols"
+		return "Style", string(cfg.Border)
 	case OptKeyHints:
-		return "Footer Hints", onOff(cfg.ShowKeyHints), "Hide footer to gain +1 row on small screens"
+		return "Footer", onOff(cfg.ShowKeyHints)
 	case OptFnBar:
-		return "Fn4-8 Strip", onOff(cfg.ShowFnBar), "Show Cardputer Zero Fn+4..8 soft-key bar"
+		return "Fn4-8 Bar", onOff(cfg.ShowFnBar)
+	case OptStealth:
+		return "Stealth", onOff(cfg.StealthMode)
 	case OptNavMode:
 		switch cfg.NavMode {
 		case config.NavArrowsVim:
-			return "Nav Keys", "Arrows+hjkl", "Support arrows (Fn+F/X/Z/C) and h/j/k/l"
+			return "Nav Keys", "Arr+hjkl"
 		case config.NavArrows:
-			return "Nav Keys", "Arrows only", "Use arrow keys / Fn+F/X/Z/C only"
+			return "Nav Keys", "Arrows"
 		case config.NavFnSoft:
-			return "Nav Keys", "Fn+Arrows", "Prioritize F4-F8 softkeys + arrows"
+			return "Nav Keys", "Fn+Arr"
 		}
 	case OptRefresh:
 		if cfg.RefreshSeconds == 0 {
-			return "Telemetry", "Manual", "Press 'r' to refresh sysinfo manually"
+			return "Refresh", "Manual"
 		}
-		return "Telemetry", fmt.Sprintf("%ds", cfg.RefreshSeconds), "System stats polling interval"
-	case OptStealth:
-		return "Stealth Mode", onOff(cfg.StealthMode), "Dim accents & mask host/IP/MAC in UI"
+		return "Refresh", fmt.Sprintf("%ds", cfg.RefreshSeconds)
 	case OptConfirmQuit:
-		return "Confirm Quit", onOff(cfg.ConfirmQuit), "Prompt before exiting CZHax"
+		return "Ask Quit", onOff(cfg.ConfirmQuit)
 	case OptReset:
-		return "Reset Defaults", "[Enter]", "Restore default Phase 1 options"
+		return "Reset", "[Enter]"
 	}
-	return "", "", ""
+	return "", ""
 }
 
 func onOff(b bool) string {
@@ -157,50 +212,69 @@ func onOff(b bool) string {
 	return "OFF"
 }
 
-func (v OptionsView) Render(w, h int, pal theme.Palette, cfg config.Config) string {
+func (v OptionsView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Config, focused bool) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
-	var lines []string
-	saveTag := ""
-	if v.Dirty {
-		saveTag = " *"
+	if tab == 2 { // Keys reference tab
+		rows := []string{
+			" " + sec.Render("↑↓/Fn+F,X ") + txt.Render("Move up / down"),
+			" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Sidebar ↔ Pane"),
+			" " + sec.Render("Tab / 1-3 ") + txt.Render("Switch top tabs"),
+			" " + sec.Render("F4 - F8   ") + txt.Render("Jump top views"),
+			" " + sec.Render("Enter/Spc ") + txt.Render("Open / toggle opt"),
+			" " + sec.Render("/  or  ?  ") + txt.Render("Find / Help"),
+			" " + sec.Render("p / t / s ") + txt.Render("Pin / Theme / Stl"),
+			" " + sec.Render("q         ") + txt.Render("Quit CZHax"),
+		}
+		maxS := max(0, len(rows)-h)
+		sc := min(v.Cursors[2], maxS)
+		end := min(len(rows), sc+h)
+		return SplitLinesPadded(rows[sc:end], w, h)
 	}
-	lines = append(lines, accent.Render("OPTIONS"+saveTag)+" "+muted.Render(ScrollBadge(v.Cursor, int(optCount)))+" "+muted.Render("←→/⏎:edit"))
 
-	showDesc := h >= 5
-	avail := h - 1
-	if showDesc {
-		avail--
+	keys := displayKeys
+	if tab == 1 {
+		keys = controlKeys
 	}
-	if avail < 1 {
-		avail = 1
+	cur := v.Cursors[tab]
+	if cur >= len(keys) {
+		cur = len(keys) - 1
 	}
 
-	start, end := ScrollWindow(int(optCount), v.Cursor, avail)
+	avail := max(1, h-1)
+	if h <= 5 {
+		avail = h
+	}
+	start, end := ScrollWindow(len(keys), cur, avail)
+	var out []string
 	for i := start; i < end; i++ {
-		lbl, val, _ := optionRow(OptionKey(i), cfg)
-		if i == v.Cursor {
-			lblW := max(8, w-len(val)-6)
-			row := fmt.Sprintf("▸ %s <%s>", FitLine(lbl, lblW), val)
-			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+		lbl, val := optionRow(keys[i], cfg)
+		if i == cur && focused {
+			lblW := max(7, w-len(val)-6)
+			row := fmt.Sprintf(" ▸ %s <%s>", FitLine(lbl, lblW), val)
+			out = append(out, sel.Width(w).Render(Truncate(row, w)))
 		} else {
-			lblW := max(8, w-len(val)-4)
-			row := fmt.Sprintf("  %s %s", txt.Render(FitLine(lbl, lblW)), sec.Render(val))
-			lines = append(lines, row)
+			pfx := "   "
+			if i == cur {
+				pfx = " ▸ "
+			}
+			lblW := max(7, w-len(val)-5)
+			out = append(out, fmt.Sprintf("%s%s %s",
+				accent.Render(pfx),
+				txt.Render(FitLine(lbl, lblW)),
+				sec.Render(val),
+			))
 		}
 	}
-
-	for len(lines) < h-1 && showDesc {
-		lines = append(lines, "")
+	if len(out) < h {
+		for len(out) < h-1 {
+			out = append(out, "")
+		}
+		out = append(out, " "+muted.Render("Enter/Space:change · ← sidebar"))
 	}
-	if showDesc {
-		_, _, hint := optionRow(OptionKey(v.Cursor), cfg)
-		lines = append(lines, muted.Render(Truncate(hint, w)))
-	}
-
-	return PadLines(lines, w, h, "")
+	return SplitLinesPadded(out, w, h)
 }

@@ -42,40 +42,38 @@ func (v SearchView) Selected() (modules.Item, bool) {
 	return v.Results[v.Cursor], true
 }
 
-func (v SearchView) Render(w, h int, pal theme.Palette) string {
+func (v SearchView) RenderLines(w, h int, pal theme.Palette) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	var lines []string
 	prompt := fmt.Sprintf("/ %s_", v.Query)
-	lines = append(lines, accent.Render("FIND: ")+txt.Render(Truncate(prompt, max(8, w-6))))
+	lines = append(lines, " "+accent.Render(Truncate(prompt, max(6, w-1))))
 
 	if len(v.Results) == 0 {
-		lines = append(lines, muted.Render("No matching modules. Esc to close."))
-		return PadLines(lines, w, h, "")
+		lines = append(lines, " "+muted.Render("No match. Esc to close."))
+		return SplitLinesPadded(lines, w, h)
 	}
 
 	avail := max(1, h-1)
 	start, end := ScrollWindow(len(v.Results), v.Cursor, avail)
 	for i := start; i < end; i++ {
 		it := v.Results[i]
-		badge := "[" + it.Tag + "]"
 		st := "PH2"
 		if it.Status == modules.StatusReady {
 			st = "RDY"
 		}
 		if i == v.Cursor {
-			nameW := max(6, w-len(badge)-len(st)-5)
-			row := fmt.Sprintf("▸ %s %s %s", badge, FitLine(it.Name, nameW), st)
+			nameW := max(6, w-len(st)-5)
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.Name, nameW), st)
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
-			nameW := max(6, w-len(badge)-len(st)-5)
-			row := fmt.Sprintf("  %s %s %s", sec.Render(badge), txt.Render(FitLine(it.Name, nameW)), muted.Render(st))
+			nameW := max(6, w-len(st)-5)
+			row := fmt.Sprintf("   %s %s", txt.Render(FitLine(it.Name, nameW)), muted.Render(st))
 			lines = append(lines, row)
 		}
 	}
-	return PadLines(lines, w, h, "")
+	return SplitLinesPadded(lines, w, h)
 }

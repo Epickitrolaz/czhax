@@ -36,14 +36,13 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 		return barStyle.Width(w).Render(FitLine(msgStyle.Render(statusMsg), w))
 	}
 
-	// If Fn Softkeys bar is enabled, render F4..F8 hardware strip matching Cardputer Zero keys below display
 	if cfg.ShowFnBar {
 		fnHints := []Hint{
-			{Key: "F4", Desc: "Hm"},
-			{Key: "F5", Desc: "Sc"},
-			{Key: "F6", Desc: "Bs"},
-			{Key: "F7", Desc: "Op"},
-			{Key: "F8", Desc: "?"},
+			{Key: "F4", Desc: "Dsh"},
+			{Key: "F5", Desc: "Rcn"},
+			{Key: "F6", Desc: "Net"},
+			{Key: "F7", Desc: "Sys"},
+			{Key: "F8", Desc: "Opt"},
 		}
 		var parts []string
 		for _, h := range fnHints {

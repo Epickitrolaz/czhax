@@ -12,7 +12,16 @@ const (
 	ViewportAuto   ViewportMode = "auto"
 	ViewportCZ5314 ViewportMode = "cz53x14"
 	ViewportCZ4510 ViewportMode = "cz45x10"
+	ViewportCZ4010 ViewportMode = "cz40x10"
 	ViewportWide   ViewportMode = "wide"
+)
+
+type SidebarMode string
+
+const (
+	SidebarAuto SidebarMode = "auto"
+	SidebarWide SidebarMode = "wide"
+	SidebarSlim SidebarMode = "slim"
 )
 
 type BorderMode string
@@ -34,6 +43,7 @@ const (
 type Config struct {
 	Theme          string       `json:"theme"`
 	Viewport       ViewportMode `json:"viewport"`
+	Sidebar        SidebarMode  `json:"sidebar"`
 	Border         BorderMode   `json:"border"`
 	ShowKeyHints   bool         `json:"show_key_hints"`
 	ShowFnBar      bool         `json:"show_fn_bar"`
@@ -48,6 +58,7 @@ func Default() Config {
 	return Config{
 		Theme:          "cyber-green",
 		Viewport:       ViewportAuto,
+		Sidebar:        SidebarAuto,
 		Border:         BorderCompact,
 		ShowKeyHints:   true,
 		ShowFnBar:      false,
@@ -115,9 +126,14 @@ func (c *Config) normalize() {
 		c.Theme = "cyber-green"
 	}
 	switch c.Viewport {
-	case ViewportAuto, ViewportCZ5314, ViewportCZ4510, ViewportWide:
+	case ViewportAuto, ViewportCZ5314, ViewportCZ4510, ViewportCZ4010, ViewportWide:
 	default:
 		c.Viewport = ViewportAuto
+	}
+	switch c.Sidebar {
+	case SidebarAuto, SidebarWide, SidebarSlim:
+	default:
+		c.Sidebar = SidebarAuto
 	}
 	switch c.Border {
 	case BorderCompact, BorderMinimal, BorderAscii:

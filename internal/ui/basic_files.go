@@ -117,10 +117,9 @@ func (v *FilesView) Open() {
 	if len(data) > 64*1024 {
 		data = data[:64*1024]
 	}
-	// Quick binary check
 	for i := 0; i < min(256, len(data)); i++ {
 		if data[i] == 0 {
-			v.LastErr = "binary file (preview skipped)"
+			v.LastErr = "binary file"
 			return
 		}
 	}
@@ -145,9 +144,9 @@ func (v *FilesView) Back() bool {
 	return false
 }
 
-func (v FilesView) Render(w, h int, pal theme.Palette) string {
+func (v FilesView) RenderLines(w, h int, pal theme.Palette, focused bool) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	warn := lipgloss.NewStyle().Foreground(pal.Warning)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
@@ -155,22 +154,21 @@ func (v FilesView) Render(w, h int, pal theme.Palette) string {
 
 	if v.PreviewPath != "" {
 		var out []string
-		out = append(out, accent.Render("VIEW: "+Truncate(filepath.Base(v.PreviewPath), max(6, w-12)))+" "+muted.Render("Esc:back"))
+		out = append(out, " "+accent.Render(Truncate(filepath.Base(v.PreviewPath), max(6, w-10)))+" "+muted.Render("Esc:back"))
 		avail := max(1, h-1)
 		maxOff := max(0, len(v.PreviewData)-avail)
 		off := min(v.PreviewOff, maxOff)
 		end := min(len(v.PreviewData), off+avail)
 		for _, line := range v.PreviewData[off:end] {
-			out = append(out, txt.Render(Truncate(line, w)))
+			out = append(out, " "+txt.Render(Truncate(line, max(4, w-1))))
 		}
-		return PadLines(out, w, h, "")
+		return SplitLinesPadded(out, w, h)
 	}
 
 	var out []string
-	hdr := accent.Render("FILES") + " " + muted.Render(Truncate(v.Dir, max(8, w-14)))
-	out = append(out, hdr)
+	out = append(out, " "+muted.Render(Truncate(v.Dir, max(6, w-2))))
 	if v.LastErr != "" {
-		out = append(out, warn.Render(Truncate(v.LastErr, w)))
+		out = append(out, " "+warn.Render(Truncate(v.LastErr, max(6, w-2))))
 	}
 
 	avail := max(1, h-len(out))
@@ -180,33 +178,37 @@ func (v FilesView) Render(w, h int, pal theme.Palette) string {
 		tag := formatSize(e.Size)
 		name := e.Name
 		if e.IsDir {
-			tag = "<DIR>"
+			tag = "DIR"
 			if name != ".." {
 				name += "/"
 			}
 		}
-		if i == v.Cursor {
+		if i == v.Cursor && focused {
 			nameW := max(6, w-len(tag)-4)
-			row := fmt.Sprintf("▸ %s %s", FitLine(name, nameW), tag)
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(name, nameW), tag)
 			out = append(out, sel.Width(w).Render(Truncate(row, w)))
 		} else {
+			pfx := "   "
+			if i == v.Cursor {
+				pfx = " ▸ "
+			}
 			nameW := max(6, w-len(tag)-4)
 			st := txt
 			if e.IsDir {
 				st = sec
 			}
-			out = append(out, fmt.Sprintf("  %s %s", st.Render(FitLine(name, nameW)), muted.Render(tag)))
+			out = append(out, fmt.Sprintf("%s%s %s", accent.Render(pfx), st.Render(FitLine(name, nameW)), muted.Render(tag)))
 		}
 	}
-	return PadLines(out, w, h, "")
+	return SplitLinesPadded(out, w, h)
 }
 
 func formatSize(sz int64) string {
 	if sz < 1024 {
-		return fmt.Sprintf("%4dB", sz)
+		return fmt.Sprintf("%3dB", sz)
 	}
 	if sz < 1024*1024 {
-		return fmt.Sprintf("%3dKB", sz/1024)
+		return fmt.Sprintf("%2dKB", sz/1024)
 	}
-	return fmt.Sprintf("%3dMB", sz/(1024*1024))
+	return fmt.Sprintf("%2dMB", sz/(1024*1024))
 }

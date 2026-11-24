@@ -51,20 +51,23 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Phase 1 Features
 
-- **Small-Screen-First Layout**: Engineered for `53×14` and `45×10` terminal viewports (1-line header + 1-line footer, inline scroll counters, automatic truncation).
+- **WiFi-Pineapple-Style Layout**:
+  - **Left Vertical Sidebar** for top-level views (`Dash`, `Recon`, `Net`, `Lab`, `Sys`, `Opts`).
+  - **Top Horizontal Tabs** inside each view (e.g. `Pulse | Pinned | System`, `WiFi | BLE | IR`, `IFs | Scan | Pkt`, `Crypto | HWBus`, `Mon | Notes | Files`, `Display | Ctrls | Keys`).
+  - **High-Contrast LCD Palettes**: Bright text on pure black with solid inverse selection bars tuned for the 1.9" 320×170 ST7789 display (`53×14`, `45×10`, and `40×10`).
 - **Navigation & Cardputer Zero Keymap**:
-  - `↑↓←→` (`Fn+F/X/Z/C` on Cardputer Zero) and optional `h/j/k/l`
-  - `1`–`4` or `Tab`/`Shift+Tab` to switch **Home / SecTools / Basic / Options**
-  - `F4`–`F8` mapped to **Cardputer Zero `Fn+4`..`Fn+8`** hardware softkeys
-  - `/` quick search launcher across all modules
-  - `p` to pin/unpin tools to Home, `t` to cycle themes, `s` to toggle Stealth Mode, `?` for keymap help
-- **Cybersecurity Hub (Phase 2 Pre-flight)**: Structured modules for `Wi-Fi Recon`, `LAN & Port Scan`, `BLE & IR Lab`, `Packet & DNS`, `Crypto & Hash`, and `I2C / UART / Cap`.
+  - `↑↓` (`Fn+F/X`) or `j/k` moves through views (in sidebar) or items (in pane)
+  - `←→` (`Fn+Z/C`) or `Enter` switches focus between **Sidebar ↔ Content Pane**
+  - `Tab` / `Shift+Tab` or `1`–`3` switches the **top horizontal tabs**
+  - `F4`–`F8` (`Fn+4`..`Fn+8`) jumps directly to `Dash`, `Recon`, `Net`, `Sys`, `Opts`
+  - `/` quick search launcher, `p` pin/unpin to Dash, `t` cycle theme, `s` Stealth Mode, `?` help
+- **Cybersecurity Hub (Phase 2 Pre-flight)**: Structured modules for `WiFi`, `BLE`, `IR`, `Scan`, `Pkt`, `Crypto`, and `HW Bus` (I2C/UART/Cap).
 - **Basic Tools (Active)**:
-  - **System Monitor** (CPU load, RAM, disk, thermal temp, battery fuel gauge, CM0 detection)
-  - **Net Interfaces** (live NICs, IPv4/IPv6, MAC, MTU, link state)
-  - **Quick Notes** (`~/.config/czhax/notes.txt`)
-  - **File Browser** (compact directory navigator & text pager)
-- **Persistent Options** (`~/.config/czhax/config.json`): 5 LCD-tuned themes (`Cyber Green`, `Purple Hax`, `Amber Ops`, `Ice Cyan`, `High Contrast`), Viewport profile, Style (`compact`/`minimal`/`ascii`), Footer hints toggle, Fn4-8 strip toggle, Nav key mode, Telemetry refresh interval, Stealth Mode, and Quit confirmation.
+  - **System Monitor** (`Sys → Mon`): CPU load, RAM, disk, temp, battery fuel gauge, CM0 detection
+  - **Net Interfaces** (`Net → IFs`): live NICs, IPv4/IPv6, MAC, MTU, link state
+  - **Quick Notes** (`Sys → Notes`): saved in `~/.config/czhax/notes.txt`
+  - **File Browser** (`Sys → Files`): compact directory navigator & text pager
+- **Persistent Options** (`~/.config/czhax/config.json`): 5 high-contrast themes (`Cyber Green`, `Pineapple Blue`, `Amber Ops`, `Purple Hax`, `High Contrast`), Viewport (`Auto`, `CZ 53x14`, `CZ 45x10`, `CZ 40x10`, `Full`), Sidebar (`Auto`, `Wide 7c`, `Slim 3c`), Style (`compact`/`minimal`/`ascii`), Footer & Fn4-8 toggles, Nav mode, Refresh rate, Stealth Mode, and Confirm Quit.
 
 ## Build from Source
 

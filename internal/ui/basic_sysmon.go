@@ -20,9 +20,9 @@ func (v *SysMonView) Move(delta int) {
 	}
 }
 
-func (v SysMonView) Render(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot) string {
+func (v SysMonView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	ascii := cfg.Border == config.BorderAscii
@@ -33,7 +33,7 @@ func (v SysMonView) Render(w, h int, pal theme.Palette, cfg config.Config, snap 
 	}
 	hw := "Linux " + snap.Arch
 	if snap.IsCardZero {
-		hw = "RPi CM0 / CardZero"
+		hw = "RPi CM0"
 	}
 
 	var memRatio, diskRatio float64
@@ -44,32 +44,31 @@ func (v SysMonView) Render(w, h int, pal theme.Palette, cfg config.Config, snap 
 		diskRatio = (snap.DiskTotGB - snap.DiskFreeGB) / snap.DiskTotGB
 	}
 
-	barW := 10
-	if w < 48 {
-		barW = 7
+	barW := 8
+	if w < 34 {
+		barW = 5
 	}
 
 	rows := []string{
-		accent.Render("SYSTEM MONITOR") + " " + muted.Render("r:refresh"),
-		sec.Render("Host: ") + txt.Render(host) + " " + muted.Render(hw),
-		sec.Render("Kern: ") + txt.Render(Truncate(snap.Kernel, max(8, w-6))),
-		sec.Render("Up:   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)) + " " + sec.Render("Load: ") + txt.Render(snap.Load1),
-		fmt.Sprintf("%s %s %d/%dMB",
-			sec.Render("RAM: "),
+		" " + sec.Render("Host ") + txt.Render(host+" ("+hw+")"),
+		" " + sec.Render("Kern ") + txt.Render(Truncate(snap.Kernel, max(6, w-6))),
+		" " + sec.Render("Up   ") + txt.Render(sysinfo.FormatUptime(snap.Uptime)+"  Load "+snap.Load1),
+		fmt.Sprintf(" %s %s %d/%dM",
+			sec.Render("RAM "),
 			accent.Render(MiniBar(memRatio, barW, ascii)),
 			snap.MemUsedMB, snap.MemTotalMB,
 		),
-		fmt.Sprintf("%s %s %.1f/%.1fG free",
-			sec.Render("Disk:"),
+		fmt.Sprintf(" %s %s %.1f/%.1fG",
+			sec.Render("Disk"),
 			accent.Render(MiniBar(diskRatio, barW, ascii)),
 			snap.DiskFreeGB, snap.DiskTotGB,
 		),
 	}
 
 	if snap.HasTemp {
-		rows = append(rows, sec.Render("Temp: ")+txt.Render(fmt.Sprintf("%.1f°C", snap.TempC)))
+		rows = append(rows, " "+sec.Render("Temp ")+txt.Render(fmt.Sprintf("%.1f°C", snap.TempC)))
 	} else {
-		rows = append(rows, sec.Render("Temp: ")+muted.Render("n/a (no thermal zone)"))
+		rows = append(rows, " "+sec.Render("Temp ")+muted.Render("n/a"))
 	}
 
 	if snap.HasBattery {
@@ -77,13 +76,13 @@ func (v SysMonView) Render(w, h int, pal theme.Palette, cfg config.Config, snap 
 		if snap.Charging {
 			chg = "charging"
 		}
-		rows = append(rows, sec.Render("Bat:  ")+txt.Render(fmt.Sprintf("%d%% (%s)", snap.BatteryPct, chg)))
+		rows = append(rows, " "+sec.Render("Bat  ")+txt.Render(fmt.Sprintf("%d%% (%s)", snap.BatteryPct, chg)))
 	} else {
-		rows = append(rows, sec.Render("Bat:  ")+muted.Render("AC / no fuel gauge"))
+		rows = append(rows, " "+sec.Render("Bat  ")+muted.Render("AC power"))
 	}
 
 	maxScroll := max(0, len(rows)-h)
 	scroll := min(v.Scroll, maxScroll)
 	end := min(len(rows), scroll+h)
-	return PadLines(rows[scroll:end], w, h, "")
+	return SplitLinesPadded(rows[scroll:end], w, h)
 }

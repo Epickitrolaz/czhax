@@ -60,13 +60,14 @@ func assertFitsBounds(t *testing.T, view string, maxW, exactH int, label string)
 	}
 }
 
-func TestSmallScreenGeometryAllScreens(t *testing.T) {
+func TestPineappleLayoutAllViewsAndSizes(t *testing.T) {
 	sizes := []struct {
 		name string
 		w, h int
 	}{
 		{"CZ_53x14", 53, 14},
 		{"CZ_45x10", 45, 10},
+		{"CZ_40x10", 40, 10},
 		{"Wide_100x30", 100, 30},
 	}
 
@@ -77,53 +78,26 @@ func TestSmallScreenGeometryAllScreens(t *testing.T) {
 		next, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
 		m = next.(AppModel)
 
-		// Home
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Home")
+		for vIdx, vd := range TopViews {
+			// Move to view via F-key or down
+			m.ActiveView = ViewID(vIdx)
+			m.Focus = FocusSidebar
+			assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/"+vd.Name+"/Sidebar")
 
-		// SecTools + Tool Detail
-		m = sendKey(m, "2")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/SecList")
-		m = sendKey(m, "enter")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/ToolDetail")
-		m = sendKey(m, "esc")
-
-		// Basic + each sub-screen
-		m = sendKey(m, "3")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/BasicList")
-
-		// SysMon
-		m = sendKey(m, "enter")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/SysMon")
-		m = sendKey(m, "esc")
-
-		// NetIF
-		m = sendKey(m, "down")
-		m = sendKey(m, "enter")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/NetIF")
-		m = sendKey(m, "esc")
-
-		// Notes
-		m = sendKey(m, "down")
-		m = sendKey(m, "enter")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Notes")
-		m = sendKey(m, "esc")
-
-		// Files
-		m = sendKey(m, "down")
-		m = sendKey(m, "enter")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Files")
-		for m.Sub == SubFiles {
+			m = sendKey(m, "right")
+			if m.Focus != FocusContent {
+				t.Fatalf("expected FocusContent after right in %s", vd.Name)
+			}
+			for tIdx, tabName := range vd.Tabs {
+				m.setTab(tIdx)
+				assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/"+vd.Name+"/"+tabName)
+			}
 			m = sendKey(m, "esc")
 		}
-
-		// Options
-		m = sendKey(m, "4")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Options")
 
 		// Search overlay
 		m = sendKey(m, "/")
 		m = sendKey(m, "w")
-		m = sendKey(m, "i")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Search")
 		m = sendKey(m, "esc")
 
@@ -134,61 +108,54 @@ func TestSmallScreenGeometryAllScreens(t *testing.T) {
 	}
 }
 
-func TestNavigationAndOptionsBehavior(t *testing.T) {
+func TestNavigationTabsAndOptions(t *testing.T) {
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	m := NewAppModel(cfg, cfgPath)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 53, Height: 14})
 	m = next.(AppModel)
 
-	// Fn softkey tabs F5 -> Sec, F6 -> Basic, F7 -> Options, F4 -> Home
-	m = sendKey(m, "f5")
-	if m.ActiveTab != TabSec {
-		t.Fatalf("expected TabSec on F5, got %v", m.ActiveTab)
+	// Sidebar navigation
+	m = sendKey(m, "down")
+	if m.ActiveView != ViewRecon {
+		t.Fatalf("expected ViewRecon, got %v", m.ActiveView)
 	}
-	m = sendKey(m, "f6")
-	if m.ActiveTab != TabBasic {
-		t.Fatalf("expected TabBasic on F6, got %v", m.ActiveTab)
+	m = sendKey(m, "tab")
+	if m.ActiveTabs[ViewRecon] != 1 {
+		t.Fatalf("expected horizontal tab 1 (BLE), got %d", m.ActiveTabs[ViewRecon])
 	}
-	m = sendKey(m, "f7")
-	if m.ActiveTab != TabOptions {
-		t.Fatalf("expected TabOptions on F7, got %v", m.ActiveTab)
-	}
-	m = sendKey(m, "f8")
-	if !m.ShowHelp {
-		t.Fatalf("expected Help overlay on F8")
-	}
-	m = sendKey(m, "esc")
 
-	// Adjust Theme in Options and verify persistence
+	// Pin/unpin in Recon
 	m = sendKey(m, "right")
+	origPins := len(m.Cfg.PinnedIDs)
+	m = sendKey(m, "p")
+	if len(m.Cfg.PinnedIDs) != origPins+1 {
+		t.Fatalf("expected BLE module to be pinned, pins=%v", m.Cfg.PinnedIDs)
+	}
+	m = sendKey(m, "p")
+	if len(m.Cfg.PinnedIDs) != origPins {
+		t.Fatalf("expected BLE module to be unpinned, pins=%v", m.Cfg.PinnedIDs)
+	}
+
+	// Jump to Opts via F8 and change Theme
+	m = sendKey(m, "f8")
+	if m.ActiveView != ViewOpts {
+		t.Fatalf("expected ViewOpts on F8, got %v", m.ActiveView)
+	}
+	m.Focus = FocusContent
+	m = sendKey(m, "enter")
 	if m.Cfg.Theme == config.Default().Theme {
-		t.Fatalf("expected theme to change on right key in Options")
+		t.Fatalf("expected theme to change on Enter in Opts")
 	}
 	loaded, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("failed loading saved config: %v", err)
-	}
-	if loaded.Theme != m.Cfg.Theme {
-		t.Fatalf("expected saved theme %q, got %q", m.Cfg.Theme, loaded.Theme)
+	if err != nil || loaded.Theme != m.Cfg.Theme {
+		t.Fatalf("expected persisted theme %q, got %q (err=%v)", m.Cfg.Theme, loaded.Theme, err)
 	}
 
-	// Toggle Stealth via 's'
-	m = sendKey(m, "s")
-	if !m.Cfg.StealthMode {
-		t.Fatalf("expected StealthMode ON after 's'")
-	}
-
-	// Pin/unpin on SecTools
-	m = sendKey(m, "f5")
-	origPins := len(m.Cfg.PinnedIDs)
-	m = sendKey(m, "p") // wifi-recon is initially pinned -> unpins it
-	if len(m.Cfg.PinnedIDs) != origPins-1 {
-		t.Fatalf("expected pin toggle to remove item, pins=%v", m.Cfg.PinnedIDs)
-	}
-	m = sendKey(m, "p") // re-pin
-	if len(m.Cfg.PinnedIDs) != origPins {
-		t.Fatalf("expected pin toggle to restore item, pins=%v", m.Cfg.PinnedIDs)
+	// Back to sidebar via left
+	m = sendKey(m, "left")
+	if m.Focus != FocusSidebar {
+		t.Fatalf("expected FocusSidebar on left in Opts")
 	}
 }
 

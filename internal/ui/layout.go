@@ -9,46 +9,35 @@ import (
 	"github.com/czhax/czhax/internal/config"
 )
 
-type Tab int
+type ViewID int
 
 const (
-	TabHome Tab = iota
-	TabSec
-	TabBasic
-	TabOptions
+	ViewDash ViewID = iota
+	ViewRecon
+	ViewNet
+	ViewLab
+	ViewSys
+	ViewOpts
+	viewCount
 )
 
-func (t Tab) Label() string {
-	switch t {
-	case TabHome:
-		return "Home"
-	case TabSec:
-		return "Sec"
-	case TabBasic:
-		return "Basic"
-	case TabOptions:
-		return "Opts"
-	default:
-		return "Home"
-	}
+type ViewDef struct {
+	ID    ViewID
+	Name  string
+	Slim  string
+	Tabs  []string
 }
 
-func (t Tab) FullLabel() string {
-	switch t {
-	case TabHome:
-		return "Home"
-	case TabSec:
-		return "SecTools"
-	case TabBasic:
-		return "Basic"
-	case TabOptions:
-		return "Options"
-	default:
-		return "Home"
-	}
+var TopViews = []ViewDef{
+	{ID: ViewDash, Name: "Dash", Slim: "D", Tabs: []string{"Pulse", "Pinned", "System"}},
+	{ID: ViewRecon, Name: "Recon", Slim: "R", Tabs: []string{"WiFi", "BLE", "IR"}},
+	{ID: ViewNet, Name: "Net", Slim: "N", Tabs: []string{"IFs", "Scan", "Pkt"}},
+	{ID: ViewLab, Name: "Lab", Slim: "L", Tabs: []string{"Crypto", "HWBus"}},
+	{ID: ViewSys, Name: "Sys", Slim: "S", Tabs: []string{"Mon", "Notes", "Files"}},
+	{ID: ViewOpts, Name: "Opts", Slim: "O", Tabs: []string{"Display", "Ctrls", "Keys"}},
 }
 
-// Viewport computes the inner TUI width and height (and whether a desktop CZ bezel should be drawn).
+// ResolveViewport computes inner TUI width and height (and whether a desktop CZ bezel should be drawn).
 func ResolveViewport(termW, termH int, mode config.ViewportMode) (w, h int, bezel bool) {
 	if termW <= 0 {
 		termW = 53
@@ -68,13 +57,32 @@ func ResolveViewport(termW, termH int, mode config.ViewportMode) (w, h int, beze
 			return 45, 10, true
 		}
 		return min(termW, 45), min(termH, 10), false
+	case config.ViewportCZ4010:
+		if termW >= 44 && termH >= 14 {
+			return 40, 10, true
+		}
+		return min(termW, 40), min(termH, 10), false
 	case config.ViewportWide:
-		return max(40, termW), max(10, termH), false
+		return max(36, termW), max(10, termH), false
 	default: // Auto
 		if termW <= 60 || termH <= 18 {
-			return max(36, termW), max(10, termH), false
+			return max(34, termW), max(9, termH), false
 		}
 		return termW, termH, false
+	}
+}
+
+func ResolveSidebarWidth(totalW int, mode config.SidebarMode) int {
+	switch mode {
+	case config.SidebarSlim:
+		return 3
+	case config.SidebarWide:
+		return 7
+	default:
+		if totalW < 42 {
+			return 3
+		}
+		return 7
 	}
 }
 
@@ -110,19 +118,20 @@ func Truncate(s string, maxW int) string {
 	return ansi.Truncate(s, maxW-1, "…")
 }
 
-func PadLines(lines []string, width, height int, emptyLine string) string {
-	if emptyLine == "" {
-		emptyLine = strings.Repeat(" ", max(0, width))
-	}
+func SplitLinesPadded(lines []string, width, height int) []string {
 	out := make([]string, 0, height)
 	for i := 0; i < height; i++ {
 		if i < len(lines) {
 			out = append(out, FitLine(lines[i], width))
 		} else {
-			out = append(out, FitLine(emptyLine, width))
+			out = append(out, strings.Repeat(" ", max(0, width)))
 		}
 	}
-	return strings.Join(out, "\n")
+	return out
+}
+
+func PadLines(lines []string, width, height int, emptyLine string) string {
+	return strings.Join(SplitLinesPadded(lines, width, height), "\n")
 }
 
 func MiniBar(ratio float64, width int, ascii bool) string {

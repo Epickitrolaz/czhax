@@ -13,15 +13,11 @@ import (
 	"github.com/czhax/czhax/internal/theme"
 )
 
-type SubScreen int
+type FocusZone int
 
 const (
-	SubNone SubScreen = iota
-	SubToolDetail
-	SubSysMon
-	SubNetIf
-	SubNotes
-	SubFiles
+	FocusSidebar FocusZone = iota
+	FocusContent
 )
 
 type tickMsg time.Time
@@ -35,18 +31,17 @@ type AppModel struct {
 	TermW int
 	TermH int
 
-	ActiveTab Tab
-	Sub       SubScreen
+	ActiveView ViewID
+	ActiveTabs [viewCount]int
+	Focus      FocusZone
 
-	Home       HomeView
-	SecList    ModuleListView
-	BasicList  ModuleListView
-	Options    OptionsView
-	ToolDetail ToolDetailView
+	Dash       DashView
+	ModPanel   ModulePanelView
 	SysMon     SysMonView
 	NetIf      NetIfView
 	Notes      NotesView
 	Files      FilesView
+	Options    OptionsView
 	Search     SearchView
 	Help       HelpView
 
@@ -57,17 +52,16 @@ type AppModel struct {
 }
 
 func NewAppModel(cfg config.Config, cfgPath string) AppModel {
-	snap := sysinfo.Collect()
 	return AppModel{
 		Cfg:        cfg,
 		ConfigPath: cfgPath,
-		Snap:       snap,
+		Snap:       sysinfo.Collect(),
 		TermW:      53,
 		TermH:      14,
-		ActiveTab:  TabHome,
-		Home:       NewHomeView(cfg.PinnedIDs),
-		SecList:    NewModuleListView("SECTOOLS", modules.ByCategory(modules.CatSec)),
-		BasicList:  NewModuleListView("BASIC TOOLS", modules.ByCategory(modules.CatBasic)),
+		ActiveView: ViewDash,
+		Focus:      FocusSidebar,
+		Dash:       NewDashView(cfg.PinnedIDs),
+		ModPanel:   NewModulePanelView(),
 		Notes:      NewNotesView(),
 		Files:      NewFilesView(),
 		Search:     NewSearchView(),
@@ -123,15 +117,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Confirm exit prompt takes priority
 	if m.ConfirmExit {
 		switch k {
 		case "y", "Y", "enter", "q":
 			return m, tea.Quit
-		case "n", "N", "esc":
-			m.ConfirmExit = false
-			m.StatusMsg = ""
-			return m, nil
 		default:
 			m.ConfirmExit = false
 			m.StatusMsg = ""
@@ -154,7 +143,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if it, ok := m.Search.Selected(); ok {
 				m.ShowSearch = false
-				m.openModule(it)
+				m.jumpToModule(it)
 			}
 			return m, nil
 		case "backspace":
@@ -173,8 +162,8 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Notes text input mode
-	if m.Sub == SubNotes && m.Notes.Adding {
+	// Notes inline editor captures text input
+	if m.ActiveView == ViewSys && m.ActiveTabs[ViewSys] == 1 && m.Focus == FocusContent && m.Notes.Adding {
 		switch k {
 		case "esc":
 			m.Notes.Adding = false
@@ -201,7 +190,6 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Help overlay
 	if m.ShowHelp {
 		switch {
 		case k == "esc" || k == "?" || k == "q" || k == "enter":
@@ -214,7 +202,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Global overlays & shortcuts
+	// Global shortcuts
 	switch k {
 	case "?":
 		m.ShowHelp = true
@@ -225,42 +213,38 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.Search.SetQuery("")
 		return m, nil
 	case "f4":
-		m.switchTab(TabHome)
+		m.ActiveView = ViewDash
 		return m, nil
 	case "f5":
-		m.switchTab(TabSec)
+		m.ActiveView = ViewRecon
 		return m, nil
 	case "f6":
-		m.switchTab(TabBasic)
+		m.ActiveView = ViewNet
 		return m, nil
 	case "f7":
-		m.switchTab(TabOptions)
+		m.ActiveView = ViewSys
 		return m, nil
 	case "f8":
-		m.ShowHelp = true
-		m.Help.Scroll = 0
-		return m, nil
-	case "1":
-		m.switchTab(TabHome)
-		return m, nil
-	case "2":
-		m.switchTab(TabSec)
-		return m, nil
-	case "3":
-		m.switchTab(TabBasic)
-		return m, nil
-	case "4":
-		m.switchTab(TabOptions)
+		m.ActiveView = ViewOpts
 		return m, nil
 	case "tab", "]":
-		m.switchTab(Tab((int(m.ActiveTab) + 1) % 4))
+		m.cycleTab(1)
 		return m, nil
 	case "shift+tab", "[":
-		m.switchTab(Tab((int(m.ActiveTab) + 3) % 4))
+		m.cycleTab(-1)
+		return m, nil
+	case "1":
+		m.setTab(0)
+		return m, nil
+	case "2":
+		m.setTab(1)
+		return m, nil
+	case "3":
+		m.setTab(2)
 		return m, nil
 	case "r":
 		m.Snap = sysinfo.Collect()
-		if m.Sub == SubFiles {
+		if m.ActiveView == ViewSys && m.ActiveTabs[ViewSys] == 2 {
 			m.Files.Reload()
 		}
 		return m, m.setStatus("Refreshed")
@@ -285,86 +269,156 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Sub-screen routing
-	if m.Sub != SubNone {
-		return m.handleSubScreenKey(k)
-	}
-
-	// Main tab routing
-	switch m.ActiveTab {
-	case TabHome:
+	// Left Sidebar focus
+	if m.Focus == FocusSidebar {
 		switch {
 		case m.isUp(k):
-			m.Home.Move(-1)
+			m.ActiveView = ViewID((int(m.ActiveView) - 1 + int(viewCount)) % int(viewCount))
 		case m.isDown(k):
-			m.Home.Move(1)
-		case k == "enter" || k == " " || m.isRight(k):
-			if it, ok := m.Home.Selected(); ok {
-				m.openModule(it)
-			}
-		case k == "p":
-			if it, ok := m.Home.Selected(); ok {
-				return m, m.togglePin(it)
-			}
+			m.ActiveView = ViewID((int(m.ActiveView) + 1) % int(viewCount))
+		case k == "enter" || m.isRight(k):
+			m.Focus = FocusContent
 		case k == "esc":
 			if m.Cfg.ConfirmQuit {
 				m.ConfirmExit = true
 			}
 		}
 		return m, nil
+	}
 
-	case TabSec:
+	// Right Content focus
+	return m.handleContentKey(k)
+}
+
+func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
+	tab := m.ActiveTabs[m.ActiveView]
+
+	// Handle per-view content actions
+	switch m.ActiveView {
+	case ViewDash:
 		switch {
+		case k == "esc" || m.isLeft(k):
+			m.Focus = FocusSidebar
 		case m.isUp(k):
-			m.SecList.Move(-1)
+			m.Dash.Move(tab, -1)
 		case m.isDown(k):
-			m.SecList.Move(1)
-		case k == "enter" || k == " " || m.isRight(k):
-			if it, ok := m.SecList.Selected(); ok {
-				m.openModule(it)
+			m.Dash.Move(tab, 1)
+		case tab == 1 && (k == "enter" || k == " "):
+			if it, ok := m.Dash.SelectedPin(); ok {
+				m.jumpToModule(it)
 			}
-		case k == "p":
-			if it, ok := m.SecList.Selected(); ok {
+		case tab == 1 && k == "p":
+			if it, ok := m.Dash.SelectedPin(); ok {
 				return m, m.togglePin(it)
 			}
-		case k == "esc":
-			m.switchTab(TabHome)
 		}
 		return m, nil
 
-	case TabBasic:
+	case ViewRecon, ViewLab:
+		it, _ := modules.FindByTarget(int(m.ActiveView), tab)
 		switch {
+		case k == "esc" || m.isLeft(k):
+			m.Focus = FocusSidebar
 		case m.isUp(k):
-			m.BasicList.Move(-1)
+			m.ModPanel.Move(it, -1)
 		case m.isDown(k):
-			m.BasicList.Move(1)
-		case k == "enter" || k == " " || m.isRight(k):
-			if it, ok := m.BasicList.Selected(); ok {
-				m.openModule(it)
-			}
+			m.ModPanel.Move(it, 1)
 		case k == "p":
-			if it, ok := m.BasicList.Selected(); ok {
-				return m, m.togglePin(it)
-			}
-		case k == "esc":
-			m.switchTab(TabHome)
+			return m, m.togglePin(it)
 		}
 		return m, nil
 
-	case TabOptions:
+	case ViewNet:
+		if tab == 0 { // Live Net Interfaces
+			switch {
+			case k == "esc" || m.isLeft(k):
+				m.Focus = FocusSidebar
+			case m.isUp(k):
+				m.NetIf.Move(-1, len(m.Snap.Interfaces))
+			case m.isDown(k):
+				m.NetIf.Move(1, len(m.Snap.Interfaces))
+			case k == "p":
+				if it, ok := modules.FindByTarget(int(ViewNet), 0); ok {
+					return m, m.togglePin(it)
+				}
+			}
+			return m, nil
+		}
+		it, _ := modules.FindByTarget(int(ViewNet), tab)
 		switch {
+		case k == "esc" || m.isLeft(k):
+			m.Focus = FocusSidebar
 		case m.isUp(k):
-			m.Options.Move(-1)
+			m.ModPanel.Move(it, -1)
 		case m.isDown(k):
-			m.Options.Move(1)
-		case m.isRight(k):
-			return m, m.applyOption(1)
-		case m.isLeft(k):
-			return m, m.applyOption(-1)
-		case k == "enter" || k == " ":
-			return m, m.applyOption(0)
-		case k == "esc":
-			m.switchTab(TabHome)
+			m.ModPanel.Move(it, 1)
+		case k == "p":
+			return m, m.togglePin(it)
+		}
+		return m, nil
+
+	case ViewSys:
+		switch tab {
+		case 0: // SysMon
+			switch {
+			case k == "esc" || m.isLeft(k):
+				m.Focus = FocusSidebar
+			case m.isUp(k):
+				m.SysMon.Move(-1)
+			case m.isDown(k):
+				m.SysMon.Move(1)
+			case k == "p":
+				if it, ok := modules.FindByID("sys-mon"); ok {
+					return m, m.togglePin(it)
+				}
+			}
+		case 1: // Notes
+			switch {
+			case k == "esc" || m.isLeft(k):
+				m.Focus = FocusSidebar
+			case m.isUp(k):
+				m.Notes.Move(-1)
+			case m.isDown(k):
+				m.Notes.Move(1)
+			case k == "a":
+				m.Notes.Adding = true
+				m.Notes.Draft = ""
+			case k == "d":
+				m.Notes.DeleteCurrent()
+				return m, m.setStatus("Note deleted")
+			}
+		case 2: // Files
+			switch {
+			case k == "esc" || k == "backspace":
+				if !m.Files.Back() {
+					m.Focus = FocusSidebar
+				}
+			case m.isLeft(k):
+				if !m.Files.Back() {
+					m.Focus = FocusSidebar
+				}
+			case m.isUp(k):
+				m.Files.Move(-1)
+			case m.isDown(k):
+				m.Files.Move(1)
+			case k == "enter" || m.isRight(k):
+				m.Files.Open()
+			}
+		}
+		return m, nil
+
+	case ViewOpts:
+		switch {
+		case k == "esc" || m.isLeft(k):
+			m.Focus = FocusSidebar
+		case m.isUp(k):
+			m.Options.Move(tab, -1)
+		case m.isDown(k):
+			m.Options.Move(tab, 1)
+		case k == "enter" || k == " " || k == "+" || k == "=" || m.isRight(k):
+			return m, m.applyOption(tab, 1)
+		case k == "-":
+			return m, m.applyOption(tab, -1)
 		}
 		return m, nil
 	}
@@ -372,17 +426,44 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *AppModel) applyOption(delta int) tea.Cmd {
+func (m *AppModel) cycleTab(delta int) {
+	tabs := TopViews[m.ActiveView].Tabs
+	if len(tabs) == 0 {
+		return
+	}
+	cur := m.ActiveTabs[m.ActiveView]
+	m.ActiveTabs[m.ActiveView] = (cur + delta + len(tabs)) % len(tabs)
+}
+
+func (m *AppModel) setTab(idx int) {
+	tabs := TopViews[m.ActiveView].Tabs
+	if idx >= 0 && idx < len(tabs) {
+		m.ActiveTabs[m.ActiveView] = idx
+	}
+}
+
+func (m *AppModel) jumpToModule(it modules.Item) {
+	m.ActiveView = ViewID(it.Target.View)
+	m.setTab(it.Target.Tab)
+	m.Focus = FocusContent
+	if it.ID == "sys-mon" || it.ID == "net-if" {
+		m.Snap = sysinfo.Collect()
+	}
+	if it.ID == "files" {
+		m.Files.Reload()
+	}
+}
+
+func (m *AppModel) applyOption(tab, delta int) tea.Cmd {
 	prevRefresh := m.Cfg.RefreshSeconds
-	action := m.Options.Adjust(delta, &m.Cfg)
+	action := m.Options.Adjust(tab, delta, &m.Cfg)
 	if action == "" {
 		return nil
 	}
 	if err := config.Save(m.ConfigPath, m.Cfg); err != nil {
 		return m.setStatus("Save err: " + err.Error())
 	}
-	m.Options.Dirty = false
-	m.Home.RefreshPins(m.Cfg.PinnedIDs)
+	m.Dash.RefreshPins(m.Cfg.PinnedIDs)
 
 	var cmds []tea.Cmd
 	if action == "reset" {
@@ -394,113 +475,6 @@ func (m *AppModel) applyOption(delta int) tea.Cmd {
 		cmds = append(cmds, m.scheduleTick())
 	}
 	return tea.Batch(cmds...)
-}
-
-func (m AppModel) handleSubScreenKey(k string) (tea.Model, tea.Cmd) {
-	switch m.Sub {
-	case SubToolDetail:
-		switch {
-		case k == "esc" || k == "backspace" || m.isLeft(k):
-			m.Sub = SubNone
-		case m.isUp(k):
-			m.ToolDetail.Move(-1)
-		case m.isDown(k):
-			m.ToolDetail.Move(1)
-		case k == "p":
-			return m, m.togglePin(m.ToolDetail.Item)
-		}
-		return m, nil
-
-	case SubSysMon:
-		switch {
-		case k == "esc" || k == "backspace" || m.isLeft(k):
-			m.Sub = SubNone
-		case m.isUp(k):
-			m.SysMon.Move(-1)
-		case m.isDown(k):
-			m.SysMon.Move(1)
-		}
-		return m, nil
-
-	case SubNetIf:
-		switch {
-		case k == "esc" || k == "backspace" || m.isLeft(k):
-			m.Sub = SubNone
-		case m.isUp(k):
-			m.NetIf.Move(-1, len(m.Snap.Interfaces))
-		case m.isDown(k):
-			m.NetIf.Move(1, len(m.Snap.Interfaces))
-		}
-		return m, nil
-
-	case SubNotes:
-		switch {
-		case k == "esc" || k == "backspace" || m.isLeft(k):
-			m.Sub = SubNone
-		case m.isUp(k):
-			m.Notes.Move(-1)
-		case m.isDown(k):
-			m.Notes.Move(1)
-		case k == "a":
-			m.Notes.Adding = true
-			m.Notes.Draft = ""
-		case k == "d":
-			m.Notes.DeleteCurrent()
-			return m, m.setStatus("Note deleted")
-		}
-		return m, nil
-
-	case SubFiles:
-		switch {
-		case k == "esc" || k == "backspace" || m.isLeft(k):
-			if !m.Files.Back() {
-				m.Sub = SubNone
-			}
-		case m.isUp(k):
-			m.Files.Move(-1)
-		case m.isDown(k):
-			m.Files.Move(1)
-		case k == "enter" || m.isRight(k):
-			m.Files.Open()
-		}
-		return m, nil
-	}
-	return m, nil
-}
-
-func (m *AppModel) switchTab(t Tab) {
-	m.ActiveTab = t
-	m.Sub = SubNone
-}
-
-func (m *AppModel) openModule(it modules.Item) {
-	switch it.ID {
-	case "sys-mon":
-		m.ActiveTab = TabBasic
-		m.Sub = SubSysMon
-		m.SysMon.Scroll = 0
-		m.Snap = sysinfo.Collect()
-	case "net-if":
-		m.ActiveTab = TabBasic
-		m.Sub = SubNetIf
-		m.NetIf.Cursor = 0
-		m.Snap = sysinfo.Collect()
-	case "notes":
-		m.ActiveTab = TabBasic
-		m.Sub = SubNotes
-	case "files":
-		m.ActiveTab = TabBasic
-		m.Sub = SubFiles
-		m.Files.Reload()
-	default:
-		if it.Category == modules.CatSec {
-			m.ActiveTab = TabSec
-		} else {
-			m.ActiveTab = TabBasic
-		}
-		m.Sub = SubToolDetail
-		m.ToolDetail = NewToolDetailView(it)
-	}
 }
 
 func (m *AppModel) togglePin(it modules.Item) tea.Cmd {
@@ -520,7 +494,7 @@ func (m *AppModel) togglePin(it modules.Item) tea.Cmd {
 		msg = "Pinned: " + it.ShortName
 	}
 	_ = config.Save(m.ConfigPath, m.Cfg)
-	m.Home.RefreshPins(m.Cfg.PinnedIDs)
+	m.Dash.RefreshPins(m.Cfg.PinnedIDs)
 	return m.setStatus(msg)
 }
 
@@ -556,11 +530,28 @@ func (m AppModel) View() string {
 	w, h, bezel := ResolveViewport(m.TermW, m.TermH, m.Cfg.Viewport)
 	pal := theme.Resolve(m.Cfg.Theme, m.Cfg.StealthMode)
 
-	breadcrumb := m.currentBreadcrumb()
-	header := RenderHeader(w, pal, m.Cfg, m.ActiveTab, breadcrumb, m.Snap)
+	sideW := ResolveSidebarWidth(w, m.Cfg.Sidebar)
+	mainW := max(16, w-sideW-1)
+	if sideW+1+mainW > w {
+		sideW = max(3, w-mainW-1)
+	}
 
+	overlayTitle := ""
+	if m.ShowSearch {
+		overlayTitle = "FIND"
+	} else if m.ShowHelp {
+		overlayTitle = "HELP"
+	}
+
+	topRow := RenderTopRow(sideW, mainW, pal, m.Cfg, m.ActiveView, m.ActiveTabs[m.ActiveView], overlayTitle, m.Snap)
+
+	showDivider := h >= 12
 	showFooter := m.Cfg.ShowKeyHints || m.ConfirmExit || m.StatusMsg != ""
+
 	bodyH := h - 1
+	if showDivider {
+		bodyH--
+	}
 	if showFooter {
 		bodyH--
 	}
@@ -568,43 +559,22 @@ func (m AppModel) View() string {
 		bodyH = 1
 	}
 
-	var body string
-	switch {
-	case m.ShowSearch:
-		body = m.Search.Render(w, bodyH, pal)
-	case m.ShowHelp:
-		body = m.Help.Render(w, bodyH, pal)
-	case m.Sub == SubToolDetail:
-		body = m.ToolDetail.Render(w, bodyH, pal, m.Cfg)
-	case m.Sub == SubSysMon:
-		body = m.SysMon.Render(w, bodyH, pal, m.Cfg, m.Snap)
-	case m.Sub == SubNetIf:
-		body = m.NetIf.Render(w, bodyH, pal, m.Cfg, m.Snap)
-	case m.Sub == SubNotes:
-		body = m.Notes.Render(w, bodyH, pal)
-	case m.Sub == SubFiles:
-		body = m.Files.Render(w, bodyH, pal)
-	default:
-		switch m.ActiveTab {
-		case TabHome:
-			body = m.Home.Render(w, bodyH, pal, m.Cfg, m.Snap)
-		case TabSec:
-			body = m.SecList.Render(w, bodyH, pal, m.Cfg)
-		case TabBasic:
-			body = m.BasicList.Render(w, bodyH, pal, m.Cfg)
-		case TabOptions:
-			body = m.Options.Render(w, bodyH, pal, m.Cfg)
-		}
-	}
+	sideLines := RenderSidebarColumn(sideW, bodyH, pal, m.Cfg, m.ActiveView, m.Focus == FocusSidebar && !m.ShowSearch && !m.ShowHelp)
+	mainLines := m.renderMainLines(mainW, bodyH, pal)
+	bodyBlock := JoinPaneColumns(sideLines, mainLines, sideW, mainW, bodyH, pal, m.Cfg)
 
-	parts := []string{header, body}
+	parts := []string{topRow}
+	if showDivider {
+		parts = append(parts, RenderDividerRow(sideW, mainW, pal, m.Cfg))
+	}
+	parts = append(parts, bodyBlock)
+
 	if showFooter {
 		status := m.StatusMsg
 		if m.ConfirmExit {
 			status = "Quit CZHax? [y/Enter] Yes  [n/Esc] No"
 		}
-		footer := RenderFooter(w, pal, m.Cfg, m.currentHints(), status)
-		parts = append(parts, footer)
+		parts = append(parts, RenderFooter(w, pal, m.Cfg, m.currentHints(), status))
 	}
 
 	screen := strings.Join(parts, "\n")
@@ -613,7 +583,6 @@ func (m AppModel) View() string {
 		return screen
 	}
 
-	// Render centered Cardputer Zero hardware simulator bezel when desktop terminal is large
 	bdr := lipgloss.RoundedBorder()
 	if m.Cfg.Border == config.BorderAscii {
 		bdr = lipgloss.ASCIIBorder()
@@ -628,81 +597,84 @@ func (m AppModel) View() string {
 		Render(fmt.Sprintf("M5Stack Cardputer Zero · %dx%d (320x170 ST7789)", w, h))
 	fnLegend := lipgloss.NewStyle().
 		Foreground(pal.Muted).
-		Render("Keys: ↑↓/Fn+FX nav · F4-F8 softkeys · / find · ? help")
+		Render("↑↓ view/item · ←→ sidebar/pane · Tab tabs · / find · ? help")
 
 	composed := lipgloss.JoinVertical(lipgloss.Center, label, frame, fnLegend)
 	return lipgloss.Place(m.TermW, m.TermH, lipgloss.Center, lipgloss.Center, composed)
 }
 
-func (m AppModel) currentBreadcrumb() string {
+func (m AppModel) renderMainLines(w, h int, pal theme.Palette) []string {
 	if m.ShowSearch {
-		return "Find"
+		return m.Search.RenderLines(w, h, pal)
 	}
 	if m.ShowHelp {
-		return "Help"
+		return m.Help.RenderLines(w, h, pal)
 	}
-	switch m.Sub {
-	case SubToolDetail:
-		return m.ActiveTab.FullLabel() + "/" + m.ToolDetail.Item.ShortName
-	case SubSysMon:
-		return "Basic/SysMon"
-	case SubNetIf:
-		return "Basic/NetIF"
-	case SubNotes:
-		return "Basic/Notes"
-	case SubFiles:
-		return "Basic/Files"
+
+	tab := m.ActiveTabs[m.ActiveView]
+	focused := m.Focus == FocusContent
+
+	switch m.ActiveView {
+	case ViewDash:
+		return m.Dash.RenderLines(tab, w, h, pal, m.Cfg, m.Snap, focused)
+	case ViewRecon, ViewLab:
+		if it, ok := modules.FindByTarget(int(m.ActiveView), tab); ok {
+			return m.ModPanel.RenderLines(it, w, h, pal, m.Cfg, focused)
+		}
+	case ViewNet:
+		if tab == 0 {
+			return m.NetIf.RenderLines(w, h, pal, m.Cfg, m.Snap, focused)
+		}
+		if it, ok := modules.FindByTarget(int(ViewNet), tab); ok {
+			return m.ModPanel.RenderLines(it, w, h, pal, m.Cfg, focused)
+		}
+	case ViewSys:
+		switch tab {
+		case 0:
+			return m.SysMon.RenderLines(w, h, pal, m.Cfg, m.Snap)
+		case 1:
+			return m.Notes.RenderLines(w, h, pal, focused)
+		case 2:
+			return m.Files.RenderLines(w, h, pal, focused)
+		}
+	case ViewOpts:
+		return m.Options.RenderLines(tab, w, h, pal, m.Cfg, focused)
 	}
-	return ""
+	return SplitLinesPadded(nil, w, h)
 }
 
 func (m AppModel) currentHints() []Hint {
 	if m.ShowSearch {
-		return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "open"}, {Key: "Esc", Desc: "close"}}
+		return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "jump"}, {Key: "Esc", Desc: "close"}}
 	}
 	if m.ShowHelp {
 		return []Hint{{Key: "↑↓", Desc: "scroll"}, {Key: "Esc", Desc: "close"}}
 	}
-	if m.Sub != SubNone {
-		switch m.Sub {
-		case SubNotes:
-			if m.Notes.Adding {
-				return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
-			}
-			return []Hint{{Key: "a", Desc: "add"}, {Key: "d", Desc: "del"}, {Key: "Esc", Desc: "back"}}
-		case SubFiles:
-			return []Hint{{Key: "↑↓", Desc: "nav"}, {Key: "⏎", Desc: "open"}, {Key: "Esc", Desc: "back"}}
-		case SubToolDetail:
-			return []Hint{{Key: "p", Desc: "pin"}, {Key: "↑↓", Desc: "scroll"}, {Key: "Esc", Desc: "back"}}
-		default:
-			return []Hint{{Key: "↑↓", Desc: "scroll"}, {Key: "r", Desc: "ref"}, {Key: "Esc", Desc: "back"}}
-		}
-	}
-
-	switch m.ActiveTab {
-	case TabOptions:
+	if m.Focus == FocusSidebar {
 		return []Hint{
-			{Key: "↑↓", Desc: "opt"},
-			{Key: "←→", Desc: "set"},
-			{Key: "Tab", Desc: "view"},
-			{Key: "?", Desc: "help"},
-		}
-	case TabSec, TabBasic:
-		return []Hint{
-			{Key: "↑↓", Desc: "nav"},
-			{Key: "⏎", Desc: "open"},
-			{Key: "p", Desc: "pin"},
-			{Key: "/", Desc: "find"},
-			{Key: "q", Desc: "quit"},
-		}
-	default:
-		return []Hint{
-			{Key: "↑↓", Desc: "nav"},
-			{Key: "⏎", Desc: "open"},
+			{Key: "↑↓", Desc: "view"},
+			{Key: "→", Desc: "open"},
 			{Key: "Tab", Desc: "tab"},
 			{Key: "/", Desc: "find"},
 			{Key: "?", Desc: "help"},
-			{Key: "q", Desc: "quit"},
 		}
+	}
+	if m.ActiveView == ViewOpts {
+		return []Hint{
+			{Key: "↑↓", Desc: "opt"},
+			{Key: "⏎", Desc: "set"},
+			{Key: "←", Desc: "side"},
+			{Key: "Tab", Desc: "tab"},
+		}
+	}
+	if m.ActiveView == ViewSys && m.ActiveTabs[ViewSys] == 1 && m.Notes.Adding {
+		return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
+	}
+	return []Hint{
+		{Key: "↑↓", Desc: "nav"},
+		{Key: "←", Desc: "side"},
+		{Key: "Tab", Desc: "tab"},
+		{Key: "/", Desc: "find"},
+		{Key: "?", Desc: "help"},
 	}
 }

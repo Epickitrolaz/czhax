@@ -16,6 +16,21 @@ const (
 	StatusPhase2 Status = "PH2"
 )
 
+// ViewTarget identifies the left-sidebar view and horizontal sub-tab index for a module.
+type ViewTarget struct {
+	View int
+	Tab  int
+}
+
+const (
+	ViewDash  = 0
+	ViewRecon = 1
+	ViewNet   = 2
+	ViewLab   = 3
+	ViewSys   = 4
+	ViewOpts  = 5
+)
+
 type Item struct {
 	ID          string
 	Name        string
@@ -23,6 +38,7 @@ type Item struct {
 	Tag         string
 	Category    Category
 	Status      Status
+	Target      ViewTarget
 	Summary     string
 	Hardware    string
 	Privileges  string
@@ -31,7 +47,7 @@ type Item struct {
 
 func All() []Item {
 	return []Item{
-		// Cybersecurity Modules (Phase 2 roadmap + Phase 1 pre-flight views)
+		// Recon (Left View: Recon, Top Tabs: WiFi | BLE | IR)
 		{
 			ID:          "wifi-recon",
 			Name:        "Wi-Fi Recon",
@@ -39,47 +55,80 @@ func All() []Item {
 			Tag:         "WIFI",
 			Category:    CatSec,
 			Status:      StatusPhase2,
-			Summary:     "Passive AP/client survey, RSSI & channel map on wlan0/USB adapter.",
-			Hardware:    "CM0 2.4GHz Wi-Fi / USB OTG adapter",
+			Target:      ViewTarget{View: ViewRecon, Tab: 0},
+			Summary:     "AP/client survey, RSSI & channel map on wlan0.",
+			Hardware:    "CM0 2.4GHz Wi-Fi / USB OTG",
 			Privileges:  "root / CAP_NET_ADMIN",
 			PlannedOpts: []string{"Passive AP Scan", "Channel Hop 1-14", "Client Probe Log"},
+		},
+		{
+			ID:          "ble-scan",
+			Name:        "BLE Scanner",
+			ShortName:   "BLE",
+			Tag:         "BLE",
+			Category:    CatSec,
+			Status:      StatusPhase2,
+			Target:      ViewTarget{View: ViewRecon, Tab: 1},
+			Summary:     "BLE advertisement & beacon monitor.",
+			Hardware:    "CM0 Bluetooth",
+			Privileges:  "bluetooth group",
+			PlannedOpts: []string{"Beacon Monitor", "Device RSSI List", "Adv Inspector"},
+		},
+		{
+			ID:          "ir-lab",
+			Name:        "IR Tx/Rx Lab",
+			ShortName:   "IR",
+			Tag:         "IR",
+			Category:    CatSec,
+			Status:      StatusPhase2,
+			Target:      ViewTarget{View: ViewRecon, Tab: 2},
+			Summary:     "Cardputer Zero IR signal capture & replay.",
+			Hardware:    "Built-in IR Tx + Rx",
+			Privileges:  "lirc / gpio group",
+			PlannedOpts: []string{"IR Raw Capture", "Replay Vault", "NEC/RC5 Decode"},
+		},
+
+		// Net (Left View: Net, Top Tabs: IFs | Scan | Pkt)
+		{
+			ID:         "net-if",
+			Name:       "Net Interfaces",
+			ShortName:  "IFs",
+			Tag:        "NET",
+			Category:   CatBasic,
+			Status:     StatusReady,
+			Target:     ViewTarget{View: ViewNet, Tab: 0},
+			Summary:    "Live local NICs, IPs, MACs, MTU and link states.",
+			Hardware:   "Linux netlink",
+			Privileges: "standard user",
 		},
 		{
 			ID:          "net-scan",
 			Name:        "LAN & Port Scan",
 			ShortName:   "Scan",
-			Tag:         "NET",
+			Tag:         "SCAN",
 			Category:    CatSec,
 			Status:      StatusPhase2,
-			Summary:     "Fast subnet ARP sweep and TCP service probe for pocket recon.",
-			Hardware:    "Wi-Fi / SR9900A 100M Ethernet",
-			Privileges:  "standard (ARP/SYN needs root)",
-			PlannedOpts: []string{"ARP Host Discovery", "Top-100 TCP Probe", "Banner Grab"},
-		},
-		{
-			ID:          "ble-rf",
-			Name:        "BLE & IR Lab",
-			ShortName:   "BLE/IR",
-			Tag:         "RF",
-			Category:    CatSec,
-			Status:      StatusPhase2,
-			Summary:     "BLE advertisement scanner + Cardputer Zero IR Tx/Rx capture.",
-			Hardware:    "CM0 BT + built-in IR Tx/Rx",
-			Privileges:  "bluetooth / lirc group",
-			PlannedOpts: []string{"BLE Beacon Monitor", "IR Raw Capture", "IR Replay Vault"},
+			Target:      ViewTarget{View: ViewNet, Tab: 1},
+			Summary:     "Subnet ARP sweep & TCP port probe.",
+			Hardware:    "Wi-Fi / SR9900A Ethernet",
+			Privileges:  "standard (SYN needs root)",
+			PlannedOpts: []string{"ARP Host Sweep", "Top-100 TCP Probe", "Banner Grab"},
 		},
 		{
 			ID:          "pkt-dns",
 			Name:        "Packet & DNS",
-			ShortName:   "Pkt/DNS",
+			ShortName:   "Pkt",
 			Tag:         "PKT",
 			Category:    CatSec,
 			Status:      StatusPhase2,
-			Summary:     "Compact live packet summary, DNS resolver & ARP watch.",
+			Target:      ViewTarget{View: ViewNet, Tab: 2},
+			Summary:     "Live packet stats, DNS lookup & ARP watch.",
 			Hardware:    "Any up net interface",
 			Privileges:  "CAP_NET_RAW for capture",
-			PlannedOpts: []string{"DNS Lookup", "ARP Spoof Watch", "Mini TShark Stats"},
+			PlannedOpts: []string{"DNS Lookup", "ARP Spoof Watch", "Packet Summary"},
 		},
+
+		// Lab (Left View: Lab, Top Tabs: Crypto | HW Bus)
 		{
 			ID:          "creds-crypto",
 			Name:        "Crypto & Hash",
@@ -87,10 +136,11 @@ func All() []Item {
 			Tag:         "CRY",
 			Category:    CatSec,
 			Status:      StatusPhase2,
-			Summary:     "Offline hash identifier, Base64/Hex codec & entropy meter.",
+			Target:      ViewTarget{View: ViewLab, Tab: 0},
+			Summary:     "Hash ID, Base64/Hex codec & passphrase gen.",
 			Hardware:    "CPU only (offline)",
 			Privileges:  "standard user",
-			PlannedOpts: []string{"Hash ID", "B64 / Hex / URL Codec", "Passphrase Gen"},
+			PlannedOpts: []string{"Hash Identifier", "B64 / Hex Codec", "Passphrase Gen"},
 		},
 		{
 			ID:          "hw-gpio",
@@ -99,33 +149,24 @@ func All() []Item {
 			Tag:         "HW",
 			Category:    CatSec,
 			Status:      StatusPhase2,
-			Summary:     "Probe CZ I2C1 (0x34 KB, 0x4F IOE, 0x68 IMU), Grove & EXT UART.",
+			Target:      ViewTarget{View: ViewLab, Tab: 1},
+			Summary:     "Probe CZ I2C1 (0x34/0x4F/0x68), Grove & EXT UART.",
 			Hardware:    "I2C1 / UART0 / EXT 14P",
 			Privileges:  "i2c / dialout group",
-			PlannedOpts: []string{"I2C Bus Map", "Grove UART Term", "USB Host/Slave Check"},
+			PlannedOpts: []string{"I2C Bus Map", "Grove UART Term", "USB Host/Slave"},
 		},
 
-		// Basic Features (Active in Phase 1!)
+		// Sys (Left View: Sys, Top Tabs: Mon | Notes | Files)
 		{
 			ID:         "sys-mon",
 			Name:       "System Monitor",
-			ShortName:  "SysMon",
+			ShortName:  "Mon",
 			Tag:        "SYS",
 			Category:   CatBasic,
 			Status:     StatusReady,
-			Summary:    "Live CPU load, RAM, temp, battery & CM0 hardware telemetry.",
+			Target:     ViewTarget{View: ViewSys, Tab: 0},
+			Summary:    "Live CPU load, RAM, disk, temp & battery.",
 			Hardware:   "Linux /proc & /sys",
-			Privileges: "standard user",
-		},
-		{
-			ID:         "net-if",
-			Name:       "Net Interfaces",
-			ShortName:  "NetIF",
-			Tag:        "NET",
-			Category:   CatBasic,
-			Status:     StatusReady,
-			Summary:    "Inspect local NICs, IPs, MACs, MTU and link states.",
-			Hardware:   "Linux netlink",
 			Privileges: "standard user",
 		},
 		{
@@ -135,7 +176,8 @@ func All() []Item {
 			Tag:        "NOTE",
 			Category:   CatBasic,
 			Status:     StatusReady,
-			Summary:    "Pocket field notes saved locally in ~/.config/czhax/notes.txt.",
+			Target:     ViewTarget{View: ViewSys, Tab: 1},
+			Summary:    "Field notes saved in ~/.config/czhax/notes.txt.",
 			Hardware:   "microSD storage",
 			Privileges: "standard user",
 		},
@@ -146,26 +188,26 @@ func All() []Item {
 			Tag:        "FILE",
 			Category:   CatBasic,
 			Status:     StatusReady,
-			Summary:    "Compact directory navigator and text file pager.",
+			Target:     ViewTarget{View: ViewSys, Tab: 2},
+			Summary:    "Directory navigator and text file pager.",
 			Hardware:   "local filesystem",
 			Privileges: "standard user",
 		},
 	}
 }
 
-func ByCategory(cat Category) []Item {
-	var out []Item
-	for _, it := range All() {
-		if it.Category == cat {
-			out = append(out, it)
-		}
-	}
-	return out
-}
-
 func FindByID(id string) (Item, bool) {
 	for _, it := range All() {
 		if it.ID == id {
+			return it, true
+		}
+	}
+	return Item{}, false
+}
+
+func FindByTarget(view, tab int) (Item, bool) {
+	for _, it := range All() {
+		if it.Target.View == view && it.Target.Tab == tab {
 			return it, true
 		}
 	}
