@@ -31,6 +31,12 @@ func sendKey(m AppModel, key string) AppModel {
 		msg = tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
 		msg = tea.KeyMsg{Type: tea.KeyEsc}
+	case "tab":
+		msg = tea.KeyMsg{Type: tea.KeyTab}
+	case "backspace":
+		msg = tea.KeyMsg{Type: tea.KeyBackspace}
+	case " ":
+		msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 	default:
 		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
 	}
@@ -241,6 +247,110 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc from BT")
 		}
 
+		// Down moves to WiFi view (Scan tab)
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewWiFi {
+			t.Fatalf("expected ViewWiFi on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/Tabs")
+
+		// Enter WiFi -> Scan content (auto-starts scan if not scanned yet)
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent || !m.WifiScan.Scanning {
+			t.Fatalf("expected FocusContent and initial scanning on WiFi enter, got focus=%v scanning=%v", m.Focus, m.WifiScan.Scanning)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/Scanning")
+
+		// Sync interfaces (wlan0 + wlan1) and deliver scan results
+		nextM, _ := m.Update(wifiRefreshedMsg{ifaces: []wifi.Interface{
+			{Name: "wlan0", Up: true, Mode: "managed", SSID: "LabNet"},
+			{Name: "wlan1", Up: false, Mode: "managed"},
+		}})
+		m = nextM.(AppModel)
+		nextM, _ = m.Update(wifiNetworksScannedMsg{
+			iface: "wlan0",
+			nets: []wifi.Network{
+				{SSID: "LabNet", BSSID: "5C:7B:5C:46:E7:A8", Signal: 76, RSSI: -62, HasRSSI: true, Channel: "1", Freq: "2412 MHz", Rate: "540 Mbit/s", Mode: "Infra", Security: "WPA1 WPA2", InUse: true},
+				{SSID: "FastSAE", BSSID: "EC:81:9C:1C:5C:44", Signal: 52, Channel: "3", Freq: "2422 MHz", Security: "WPA2 WPA3"},
+				{SSID: "", BSSID: "5C:7B:5C:46:E7:AB", Signal: 48, Channel: "1", Security: "WPA2"},
+				{SSID: "CafeGuest", BSSID: "AA:BB:CC:DD:EE:FF", Signal: 25, Channel: "6", Security: "Open"},
+			},
+		})
+		m = nextM.(AppModel)
+		scanListView := m.View()
+		assertFitsBounds(t, scanListView, sz.w, sz.h, sz.name+"/WiFi/List")
+		if !strings.Contains(scanListView, "LabNet") || !strings.Contains(scanListView, "wlan0") {
+			t.Fatalf("[%s] expected LabNet and wlan0 in scan list:\n%s", sz.name, scanListView)
+		}
+
+		// Right cycles scan interface to wlan1, left returns to wlan0 (stays in FocusContent)
+		m = sendKey(m, "right")
+		if m.WifiScan.EffectiveScanIface() != "wlan1" || m.Focus != FocusContent {
+			t.Fatalf("expected scan iface wlan1 and FocusContent, got %q / %v", m.WifiScan.EffectiveScanIface(), m.Focus)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/IfaceWlan1")
+		m = sendKey(m, "left")
+		if m.WifiScan.EffectiveScanIface() != "wlan0" {
+			t.Fatalf("expected scan iface wlan0, got %q", m.WifiScan.EffectiveScanIface())
+		}
+
+		// Down moves to FastSAE, Enter opens Details, Esc returns to List (still FocusContent)
+		m = sendKey(m, "down")
+		m = sendKey(m, "enter")
+		if m.WifiScan.Mode != scanModeDetail || m.Focus != FocusContent {
+			t.Fatalf("expected scanModeDetail and FocusContent, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		detailView := m.View()
+		assertFitsBounds(t, detailView, sz.w, sz.h, sz.name+"/WiFi/Detail")
+		if !strings.Contains(detailView, "FastSAE") || !strings.Contains(detailView, "EC:81:9C:1C:5C:44") {
+			t.Fatalf("[%s] expected network details in:\n%s", sz.name, detailView)
+		}
+		m = sendKey(m, "down")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/DetailScroll")
+
+		// Enter from Detail opens Connect Interface Picker; pick wlan1 while scan iface is wlan0
+		m = sendKey(m, "enter")
+		if m.WifiScan.Mode != scanModePickIface {
+			t.Fatalf("expected scanModePickIface, got %v", m.WifiScan.Mode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PickIface")
+		m = sendKey(m, "down") // wlan1
+		m = sendKey(m, "enter")
+		if m.WifiScan.Mode != scanModePassword || m.WifiScan.ConnectIface != "wlan1" {
+			t.Fatalf("expected scanModePassword on wlan1, got mode=%v iface=%q", m.WifiScan.Mode, m.WifiScan.ConnectIface)
+		}
+		// Typing q/r/? must go to password input, not global handlers
+		for _, ch := range []string{"q", "r", "?", " ", "x"} {
+			m = sendKey(m, ch)
+		}
+		if m.WifiScan.Password != "qr? x" || m.ShowHelp || m.ConfirmExit {
+			t.Fatalf("expected password 'qr? x' without triggering global keys, got %q help=%v quit=%v", m.WifiScan.Password, m.ShowHelp, m.ConfirmExit)
+		}
+		m = sendKey(m, "backspace")
+		if m.WifiScan.Password != "qr? " {
+			t.Fatalf("expected backspace to drop x, got %q", m.WifiScan.Password)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordMasked")
+		m = sendKey(m, "tab")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordVisible")
+		// Esc steps back: Password -> PickIface -> Detail -> List -> FocusTabs
+		m = sendKey(m, "esc")
+		if m.WifiScan.Mode != scanModePickIface || m.Focus != FocusContent {
+			t.Fatalf("expected back to PickIface, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		m = sendKey(m, "esc")
+		if m.WifiScan.Mode != scanModeDetail || m.Focus != FocusContent {
+			t.Fatalf("expected back to Detail, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		m = sendKey(m, "esc")
+		if m.WifiScan.Mode != scanModeList || m.Focus != FocusContent {
+			t.Fatalf("expected back to List, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from WiFi List")
+		}
+
 		// Down moves to System view
 		m = sendKey(m, "down")
 		if m.ActiveView != ViewSystem {
@@ -396,3 +506,93 @@ func TestTTYExecRoutesNonTTYSysderrToStdout(t *testing.T) {
 		t.Fatalf("expected CZHAX_NESTED=1 in shell command env")
 	}
 }
+
+func TestWifiScanConnectHiddenOpenAndErrors(t *testing.T) {
+	cfg := config.Default()
+	m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"), "v0.2.0")
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	m = next.(AppModel)
+
+	m = sendKey(m, "down")  // ViewWiFi
+	m = sendKey(m, "enter") // FocusContent
+
+	nextM, _ := m.Update(wifiRefreshedMsg{ifaces: []wifi.Interface{
+		{Name: "wlan0", Up: true, Mode: "managed", SSID: "LabNet"},
+		{Name: "wlan1", Up: false, Mode: "managed"},
+	}})
+	m = nextM.(AppModel)
+
+	// Scan error bounds
+	nextM, _ = m.Update(wifiNetworksScannedMsg{iface: "wlan0", err: os.ErrPermission})
+	m = nextM.(AppModel)
+	assertFitsBounds(t, m.View(), 40, 10, "40x10/WiFi/ScanError")
+
+	// Deliver hidden + open networks
+	nextM, _ = m.Update(wifiNetworksScannedMsg{
+		iface: "wlan0",
+		nets: []wifi.Network{
+			{SSID: "", BSSID: "11:22:33:44:55:66", Signal: 70, Security: "WPA2"},
+			{SSID: "FreeSpot", BSSID: "AA:BB:CC:DD:EE:FF", Signal: 60, Security: "Open"},
+		},
+	})
+	m = nextM.(AppModel)
+
+	// Connect to hidden network via 'c' shortcut -> PickIface -> SSID -> Password
+	m = sendKey(m, "c")
+	if m.WifiScan.Mode != scanModePickIface {
+		t.Fatalf("expected scanModePickIface on 'c', got %v", m.WifiScan.Mode)
+	}
+	m = sendKey(m, "down")  // select wlan1
+	m = sendKey(m, "enter") // confirm wlan1 -> hidden SSID prompt
+	if m.WifiScan.Mode != scanModeSSID {
+		t.Fatalf("expected scanModeSSID for hidden network, got %v", m.WifiScan.Mode)
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "40x10/WiFi/HiddenSSID")
+	for _, ch := range []string{"S", "e", "c", "r", "e", "t"} {
+		m = sendKey(m, ch)
+	}
+	m = sendKey(m, "enter")
+	if m.WifiScan.Mode != scanModePassword {
+		t.Fatalf("expected scanModePassword after SSID, got %v", m.WifiScan.Mode)
+	}
+	for _, ch := range []string{"p", "a", "s", "s"} {
+		m = sendKey(m, ch)
+	}
+	req := m.WifiScan.BuildConnectRequest()
+	if req.Iface != "wlan1" || req.SSID != "Secret" || req.Password != "pass" || !req.Hidden {
+		t.Fatalf("unexpected hidden connect request: %+v", req)
+	}
+	m = sendKey(m, "enter")
+	if !m.WifiScan.Connecting {
+		t.Fatalf("expected Connecting=true on password submit")
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "40x10/WiFi/Connecting")
+
+	// Simulate connect failure then success
+	nextM, _ = m.Update(wifiConnectDoneMsg{req: req, err: os.ErrInvalid})
+	m = nextM.(AppModel)
+	if m.WifiScan.Connecting || m.WifiScan.ConnectErr == "" {
+		t.Fatalf("expected ConnectErr after failure")
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "40x10/WiFi/ConnectError")
+
+	nextM, _ = m.Update(wifiConnectDoneMsg{req: req, err: nil})
+	m = nextM.(AppModel)
+	if m.WifiScan.Mode != scanModeList || m.WifiScan.NoteIsErr {
+		t.Fatalf("expected scanModeList and success note, got mode=%v note=%q", m.WifiScan.Mode, m.WifiScan.Note)
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "40x10/WiFi/ConnectSuccess")
+
+	// Open network skips password and immediately enters Connecting=true
+	m = sendKey(m, "down") // FreeSpot
+	m = sendKey(m, "c")    // PickIface
+	m = sendKey(m, "enter")
+	if !m.WifiScan.Connecting {
+		t.Fatalf("expected Open network to start connecting immediately after interface pick")
+	}
+	openReq := m.WifiScan.BuildConnectRequest()
+	if openReq.SSID != "FreeSpot" || openReq.Iface != "wlan0" || openReq.Hidden {
+		t.Fatalf("unexpected open connect request: %+v", openReq)
+	}
+}
+
