@@ -66,6 +66,7 @@ func TestAllViewsAndSizes(t *testing.T) {
 		{"CZ_53x14", 53, 14},
 		{"CZ_45x10", 45, 10},
 		{"CZ_40x10", 40, 10},
+		{"CZ_40x21", 40, 21},
 		{"Wide_100x30", 100, 30},
 	}
 
@@ -330,9 +331,19 @@ func TestAllViewsAndSizes(t *testing.T) {
 		if m.WifiScan.Password != "qr? " {
 			t.Fatalf("expected backspace to drop x, got %q", m.WifiScan.Password)
 		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordMasked")
+		if !m.WifiScan.ShowPassword {
+			t.Fatalf("expected ShowPassword to default to true")
+		}
+		pwVisView := m.View()
+		assertFitsBounds(t, pwVisView, sz.w, sz.h, sz.name+"/WiFi/PasswordVisible")
+		if !strings.Contains(pwVisView, "qr? _") {
+			t.Fatalf("[%s] expected visible passphrase 'qr? _' by default in:\n%s", sz.name, pwVisView)
+		}
 		m = sendKey(m, "tab")
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordVisible")
+		if m.WifiScan.ShowPassword {
+			t.Fatalf("expected Tab to hide password")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordMasked")
 		// Esc steps back: Password -> PickIface -> Detail -> List -> FocusTabs
 		m = sendKey(m, "esc")
 		if m.WifiScan.Mode != scanModePickIface || m.Focus != FocusContent {

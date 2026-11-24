@@ -135,7 +135,7 @@ func TestScanWithSudoAndFallback(t *testing.T) {
 }
 
 func TestConnectWithArgs(t *testing.T) {
-	var gotArgs []string
+	var calls [][]string
 	s := scanner{
 		euid:   func() int { return 0 },
 		hasBin: func(string) bool { return true },
@@ -143,8 +143,17 @@ func TestConnectWithArgs(t *testing.T) {
 			if name != "nmcli" {
 				return "", errors.New("unexpected binary")
 			}
-			gotArgs = args
-			return "Device 'wlan1' successfully activated.\n", nil
+			calls = append(calls, append([]string(nil), args...))
+			if len(args) >= 2 && args[0] == "-t" && args[len(args)-1] == "show" {
+				return "1111-2222:czhax-wlan1-TargetNet:802-11-wireless\n3333-4444:netplan-wlan0-M&P24:802-11-wireless\n", nil
+			}
+			if len(args) >= 2 && args[0] == "-g" {
+				if args[len(args)-1] == "1111-2222" {
+					return "TargetNet\nwlan1\n", nil
+				}
+				return "M&P24\nwlan0\n", nil
+			}
+			return "ok\n", nil
 		},
 	}
 
@@ -157,12 +166,15 @@ func TestConnectWithArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected connect err: %v", err)
 	}
-	want := []string{"dev", "wifi", "connect", "TargetNet", "password", "secret", "ifname", "wlan1"}
-	if !reflect.DeepEqual(gotArgs, want) {
-		t.Fatalf("args mismatch: got %v, want %v", gotArgs, want)
+	wantDel := []string{"con", "delete", "uuid", "1111-2222"}
+	wantAdd := []string{"con", "add", "type", "wifi", "con-name", "czhax-wlan1-TargetNet", "ifname", "wlan1", "ssid", "TargetNet", "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", "secret"}
+	wantUp := []string{"con", "up", "id", "czhax-wlan1-TargetNet", "ifname", "wlan1"}
+	if len(calls) != 4 || !reflect.DeepEqual(calls[1], wantDel) || !reflect.DeepEqual(calls[2], wantAdd) || !reflect.DeepEqual(calls[3], wantUp) {
+		t.Fatalf("unexpected calls for WPA2 connect: %+v", calls)
 	}
 
-	// Open network omits password even if field somehow populated; hidden sets hidden yes
+	// Open hidden network omits wifi-sec and sets 802-11-wireless.hidden yes
+	calls = nil
 	err = connectWith(s, ConnectRequest{
 		Iface:    "",
 		SSID:     "HiddenOpen",
@@ -173,8 +185,53 @@ func TestConnectWithArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected open hidden err: %v", err)
 	}
-	want2 := []string{"dev", "wifi", "connect", "HiddenOpen", "hidden", "yes", "ifname", "wlan0"}
-	if !reflect.DeepEqual(gotArgs, want2) {
-		t.Fatalf("args mismatch for open hidden: got %v, want %v", gotArgs, want2)
+	wantOpenAdd := []string{"con", "add", "type", "wifi", "con-name", "czhax-wlan0-HiddenOpen", "ifname", "wlan0", "ssid", "HiddenOpen", "802-11-wireless.hidden", "yes"}
+	wantOpenUp := []string{"con", "up", "id", "czhax-wlan0-HiddenOpen", "ifname", "wlan0"}
+	if len(calls) != 3 || !reflect.DeepEqual(calls[1], wantOpenAdd) || !reflect.DeepEqual(calls[2], wantOpenUp) {
+		t.Fatalf("unexpected calls for open hidden: %+v", calls)
+	}
+
+	// Blank password on secured network activates saved profile via con up uuid
+	calls = nil
+	err = connectWith(s, ConnectRequest{
+		Iface:    "wlan0",
+		SSID:     "M&P24",
+		Password: "",
+		Security: "WPA1 WPA2",
+	})
+	if err != nil {
+		t.Fatalf("unexpected saved profile connect err: %v", err)
+	}
+	wantSavedUp := []string{"con", "up", "uuid", "3333-4444", "ifname", "wlan0"}
+	if len(calls) != 4 || !reflect.DeepEqual(calls[3], wantSavedUp) {
+		t.Fatalf("expected saved profile con up, got %+v", calls)
+	}
+
+	// Failed con up cleans up the temporary czhax profile
+	calls = nil
+	sFail := scanner{
+		euid:   func() int { return 0 },
+		hasBin: func(string) bool { return true },
+		runCmd: func(_ context.Context, _ string, args ...string) (string, error) {
+			calls = append(calls, append([]string(nil), args...))
+			if len(args) >= 2 && args[0] == "con" && args[1] == "up" {
+				return "Error: Secrets were required, but not provided.\n", errors.New("exit 4")
+			}
+			return "", nil
+		},
+	}
+	err = connectWith(sFail, ConnectRequest{
+		Iface:    "wlan0",
+		SSID:     "WrongPassNet",
+		Password: "bad",
+		Security: "WPA3",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Secrets were required") {
+		t.Fatalf("expected Secrets error, got %v", err)
+	}
+	lastCall := calls[len(calls)-1]
+	wantCleanup := []string{"con", "delete", "id", "czhax-wlan0-WrongPassNet"}
+	if !reflect.DeepEqual(lastCall, wantCleanup) {
+		t.Fatalf("expected cleanup delete call %v, got %v", wantCleanup, lastCall)
 	}
 }
