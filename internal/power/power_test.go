@@ -13,7 +13,9 @@ func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
 	fbDir := filepath.Join(root, "class/graphics/fb0")
 	cpuDir := filepath.Join(root, "devices/system/cpu/cpu0/cpufreq")
 	ledDir := filepath.Join(root, "class/leds/fn-led")
-	for _, d := range []string{blDir, fbDir, cpuDir, ledDir} {
+	actDir := filepath.Join(root, "class/leds/ACT")
+	offDir := filepath.Join(root, "class/leds/ext_5v_out")
+	for _, d := range []string{blDir, fbDir, cpuDir, ledDir, actDir, offDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -23,11 +25,19 @@ func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
 	fbFile := filepath.Join(fbDir, "blank")
 	govFile := filepath.Join(cpuDir, "scaling_governor")
 	ledFile := filepath.Join(ledDir, "brightness")
+	ledTrig := filepath.Join(ledDir, "trigger")
+	actFile := filepath.Join(actDir, "brightness")
+	actTrig := filepath.Join(actDir, "trigger")
+	offFile := filepath.Join(offDir, "brightness")
 
 	_ = os.WriteFile(blFile, []byte("75\n"), 0o644)
 	_ = os.WriteFile(fbFile, []byte("0\n"), 0o644)
 	_ = os.WriteFile(govFile, []byte("ondemand\n"), 0o644)
 	_ = os.WriteFile(ledFile, []byte("1\n"), 0o644)
+	_ = os.WriteFile(ledTrig, []byte("[none] timer\n"), 0o644)
+	_ = os.WriteFile(actFile, []byte("255\n"), 0o644)
+	_ = os.WriteFile(actTrig, []byte("none [actpwr] mmc0\n"), 0o644)
+	_ = os.WriteFile(offFile, []byte("0\n"), 0o644)
 
 	saved := EnterSleep(root)
 
@@ -47,6 +57,10 @@ func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
 	checkVal(fbFile, "1")
 	checkVal(govFile, "powersave")
 	checkVal(ledFile, "0")
+	checkVal(ledTrig, "[none] timer")
+	checkVal(actFile, "0")
+	checkVal(actTrig, "none")
+	checkVal(offFile, "0")
 
 	ExitSleep(saved)
 
@@ -54,6 +68,9 @@ func TestEnterAndExitSleepRestoresSysfs(t *testing.T) {
 	checkVal(fbFile, "0")
 	checkVal(govFile, "ondemand")
 	checkVal(ledFile, "1")
+	checkVal(actFile, "255")
+	checkVal(actTrig, "actpwr")
+	checkVal(offFile, "0")
 }
 
 func TestWakeDetectionHelpers(t *testing.T) {

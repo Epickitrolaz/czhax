@@ -68,10 +68,8 @@ func EnterSleep(sysRoot string) *SavedState {
 	// 4. Save & set CPU scaling governors to powersave
 	st.Files = append(st.Files, writeGlobSaved(filepath.Join(sysRoot, "devices/system/cpu/cpu*/cpufreq/scaling_governor"), "powersave")...)
 
-	// 5. Save & turn off keypad/expansion LEDs
-	for _, led := range []string{"capslock-led", "fn-led", "tables-sel-led", "ext_5v_out", "grove_5v_out"} {
-		st.Files = append(st.Files, writeGlobSaved(filepath.Join(sysRoot, "class/leds", led, "brightness"), "0")...)
-	}
+	// 5. Save & turn off all LEDs under /sys/class/leds/* (disabling active triggers first)
+	st.Files = append(st.Files, saveAndDisableLEDs(sysRoot)...)
 
 	// 6. Soft-block Wi-Fi & Bluetooth if rfkill is available and not already blocked
 	if _, err := exec.LookPath("rfkill"); err == nil {
@@ -105,6 +103,48 @@ func ExitSleep(st *SavedState) {
 		sf := st.Files[i]
 		_ = os.WriteFile(sf.Path, []byte(sf.Value+"\n"), 0o644)
 	}
+}
+
+func saveAndDisableLEDs(sysRoot string) []SavedFile {
+	leds, err := filepath.Glob(filepath.Join(sysRoot, "class/leds/*"))
+	if err != nil {
+		return nil
+	}
+	var saved []SavedFile
+	for _, ledDir := range leds {
+		trigPath := filepath.Join(ledDir, "trigger")
+		activeTrig := ""
+		if b, err := os.ReadFile(trigPath); err == nil {
+			activeTrig = parseActiveTrigger(string(b))
+			if activeTrig != "" && activeTrig != "none" {
+				if err := os.WriteFile(trigPath, []byte("none\n"), 0o644); err == nil {
+					saved = append(saved, SavedFile{Path: trigPath, Value: activeTrig})
+				}
+			}
+		}
+
+		brightPath := filepath.Join(ledDir, "brightness")
+		if b, err := os.ReadFile(brightPath); err == nil {
+			orig := strings.TrimSpace(string(b))
+			if orig != "0" {
+				if err := os.WriteFile(brightPath, []byte("0\n"), 0o644); err == nil {
+					saved = append(saved, SavedFile{Path: brightPath, Value: orig})
+				}
+			} else if activeTrig != "" && activeTrig != "none" {
+				_ = os.WriteFile(brightPath, []byte("0\n"), 0o644)
+			}
+		}
+	}
+	return saved
+}
+
+func parseActiveTrigger(s string) string {
+	start := strings.IndexByte(s, '[')
+	end := strings.IndexByte(s, ']')
+	if start >= 0 && end > start+1 {
+		return strings.TrimSpace(s[start+1 : end])
+	}
+	return ""
 }
 
 func writeGlobSaved(pattern, newVal string) []SavedFile {
