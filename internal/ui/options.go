@@ -171,9 +171,9 @@ func optionRow(key OptionKey, cfg config.Config) (label, val string) {
 		case config.SidebarAuto:
 			return "Sidebar", "Auto"
 		case config.SidebarWide:
-			return "Sidebar", "Icon+Lbl"
+			return "Sidebar", "Full"
 		case config.SidebarSlim:
-			return "Sidebar", "Icons"
+			return "Sidebar", "3-Char"
 		}
 	case OptBorder:
 		return "Style", string(cfg.Border)
@@ -213,22 +213,26 @@ func onOff(b bool) string {
 }
 
 func (v OptionsView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Config, focused bool) []string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	org := lipgloss.NewStyle().Bold(true).Foreground(pal.Orange)
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
+	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
+	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	red := lipgloss.NewStyle().Bold(true).Foreground(pal.Red)
+	mag := lipgloss.NewStyle().Bold(true).Foreground(pal.Magenta)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Orange)
 
 	if tab == 2 { // Keys reference tab
 		rows := []string{
-			" " + sec.Render("↑↓/Fn+F,X ") + txt.Render("Move up / down"),
-			" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Sidebar ↔ Pane"),
-			" " + sec.Render("Tab / 1-3 ") + txt.Render("Switch top tabs"),
-			" " + sec.Render("F4 - F8   ") + txt.Render("Jump top views"),
-			" " + sec.Render("Enter/Spc ") + txt.Render("Open / toggle opt"),
-			" " + sec.Render("/  or  ?  ") + txt.Render("Find / Help"),
-			" " + sec.Render("p / t / s ") + txt.Render("Pin / Theme / Stl"),
-			" " + sec.Render("q         ") + txt.Render("Quit CZHax"),
+			" " + yel.Render("↑↓/Fn+F,X ") + txt.Render("Move up / down"),
+			" " + cyan.Render("←→/Fn+Z,C ") + txt.Render("Sidebar ↔ Pane"),
+			" " + mag.Render("Tab / 1-3 ") + txt.Render("Switch top tabs"),
+			" " + grn.Render("F4 - F8   ") + txt.Render("Jump top views"),
+			" " + org.Render("Enter/Spc ") + txt.Render("Open / toggle opt"),
+			" " + cyan.Render("/  or  ?  ") + txt.Render("Find / Help"),
+			" " + yel.Render("p / t / s ") + txt.Render("Pin / Theme / Stl"),
+			" " + red.Render("q         ") + txt.Render("Quit CZHax"),
 		}
 		maxS := max(0, len(rows)-h)
 		sc := min(v.Cursors[2], maxS)
@@ -260,13 +264,28 @@ func (v OptionsView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Co
 		} else {
 			pfx := "   "
 			if i == cur {
-				pfx = " ▸ "
+				pfx = org.Render(" ▸ ")
+			}
+			valStyle := cyan
+			switch val {
+			case "ON":
+				valStyle = grn
+			case "OFF":
+				valStyle = red
+			case "[Enter]":
+				valStyle = yel
+			default:
+				if keys[i] == OptTheme {
+					valStyle = mag
+				} else if keys[i] == OptViewport || keys[i] == OptSidebar {
+					valStyle = yel
+				}
 			}
 			lblW := max(7, w-len(val)-5)
 			out = append(out, fmt.Sprintf("%s%s %s",
-				accent.Render(pfx),
+				pfx,
 				txt.Render(FitLine(lbl, lblW)),
-				sec.Render(val),
+				valStyle.Render(val),
 			))
 		}
 	}
@@ -274,7 +293,7 @@ func (v OptionsView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Co
 		for len(out) < h-1 {
 			out = append(out, "")
 		}
-		out = append(out, " "+muted.Render("Enter/Space:change · ← sidebar"))
+		out = append(out, " "+muted.Render("Enter/Space:change · ← side"))
 	}
 	return SplitLinesPadded(out, w, h)
 }

@@ -22,11 +22,14 @@ func (v *NetIfView) Move(delta int, count int) {
 }
 
 func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, snap sysinfo.Snapshot, focused bool) []string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
+	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	red := lipgloss.NewStyle().Bold(true).Foreground(pal.Red)
+	pur := lipgloss.NewStyle().Bold(true).Foreground(pal.Purple)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Yellow)
 
 	ifaces := snap.Interfaces
 	if len(ifaces) == 0 {
@@ -60,13 +63,13 @@ func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, s
 		} else {
 			pfx := "  "
 			if i == cursor {
-				pfx = "▸ "
+				pfx = yel.Render("▸ ")
 			}
-			st := muted.Render(state)
+			st := red.Render(state)
 			if inf.Up {
-				st = ok.Render(state)
+				st = grn.Render(state)
 			}
-			row := fmt.Sprintf("%s%-6s %s %s", accent.Render(pfx), txt.Render(Truncate(inf.Name, 6)), st, txt.Render(addr))
+			row := fmt.Sprintf("%s%s %s %s", pfx, cyan.Render(FitLine(inf.Name, 6)), st, txt.Render(addr))
 			lines = append(lines, row)
 		}
 	}
@@ -84,13 +87,13 @@ func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, s
 		mac = "xx:xx:xx:xx:xx:xx"
 	}
 	if h >= 3 {
-		lines = append(lines, " "+muted.Render(fmt.Sprintf("MAC %s  MTU %d", mac, cur.MTU)))
+		lines = append(lines, " "+pur.Render("MAC ")+muted.Render(mac)+pur.Render(" MTU ")+txt.Render(fmt.Sprintf("%d", cur.MTU)))
 	}
 	if h >= 4 {
 		if len(cur.Addrs) > 0 && !cfg.StealthMode {
-			lines = append(lines, " "+muted.Render("IP  "+strings.Join(cur.Addrs, ", ")))
+			lines = append(lines, " "+yel.Render("IP  ")+txt.Render(strings.Join(cur.Addrs, ", ")))
 		} else {
-			lines = append(lines, " "+muted.Render("r:refresh  ← sidebar"))
+			lines = append(lines, " "+muted.Render("r:refresh  ← side"))
 		}
 	}
 

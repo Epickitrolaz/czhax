@@ -17,18 +17,23 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 		vbar = "|"
 	}
 
-	brandStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.Accent)
+	viewCol := theme.ViewColor(pal, int(activeView))
+	brandStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Purple)
+	if cfg.StealthMode {
+		brandStyle = lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	}
 	divStyle := lipgloss.NewStyle().Foreground(pal.Border)
-	activeTabStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.Accent)
-	tabStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Text)
+	activeTabStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(viewCol)
+	tabStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Blue)
 	mutedStyle := lipgloss.NewStyle().Foreground(pal.Muted)
-	okStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
-	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	okStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
+	dangerStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Red)
 
 	// Left cell: Brand matching exact sidebar width
 	brandTxt := "CZHAX"
-	if sideW >= 9 {
-		brandTxt = " CZHAX"
+	if sideW >= 7 {
+		brandTxt = " CZHAX "
 	}
 	leftCell := brandStyle.Render(FitLine(brandTxt, sideW))
 
@@ -44,15 +49,17 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 		}
 		st := okStyle
 		if snap.BatteryPct <= 20 {
+			st = dangerStyle
+		} else if snap.BatteryPct <= 50 {
 			st = warnStyle
 		}
 		stParts = append(stParts, st.Render(fmt.Sprintf("%s%d%%", pfx, snap.BatteryPct)))
 	}
 	if snap.NetUp {
 		if snap.WifiUp {
-			stParts = append(stParts, okStyle.Render("W"))
+			stParts = append(stParts, lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan).Render("W"))
 		} else {
-			stParts = append(stParts, okStyle.Render("N"))
+			stParts = append(stParts, warnStyle.Render("N"))
 		}
 	}
 	statusStr := strings.Join(stParts, " ")
@@ -109,27 +116,24 @@ func RenderSidebarColumn(sideW, bodyH int, pal theme.Palette, cfg config.Config,
 		marker = ">"
 	}
 
-	selFocused := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
-	selPassive := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	itemStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Text)
-
 	start, end := ScrollWindow(len(TopViews), int(active), bodyH)
 	lines := make([]string, 0, bodyH)
 	for i := start; i < end; i++ {
 		vd := TopViews[i]
-		lbl := vd.Icon + " " + vd.Name
-		if sideW < 10 {
-			lbl = vd.Icon
+		lbl := vd.Name
+		if sideW < 7 {
+			lbl = vd.Short3
 		}
+		vCol := theme.ViewColor(pal, i)
 		if ViewID(i) == active {
 			txt := FitLine(marker+lbl, sideW)
 			if focused {
-				lines = append(lines, selFocused.Render(txt))
+				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(vCol).Render(txt))
 			} else {
-				lines = append(lines, selPassive.Render(txt))
+				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(vCol).Render(txt))
 			}
 		} else {
-			lines = append(lines, itemStyle.Render(FitLine(" "+lbl, sideW)))
+			lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(vCol).Render(FitLine(" "+lbl, sideW)))
 		}
 	}
 	for len(lines) < bodyH {

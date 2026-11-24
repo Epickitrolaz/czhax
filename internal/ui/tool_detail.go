@@ -27,12 +27,15 @@ func (v *ModulePanelView) Move(it modules.Item, delta int) {
 }
 
 func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palette, cfg config.Config, focused bool) []string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
-	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	vCol := theme.ViewColor(pal, it.Target.View)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(vCol)
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
+	mag := lipgloss.NewStyle().Bold(true).Foreground(pal.Magenta)
+	org := lipgloss.NewStyle().Bold(true).Foreground(pal.Orange)
+	yel := lipgloss.NewStyle().Bold(true).Foreground(pal.Yellow)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(vCol)
 
 	pinned := false
 	for _, id := range cfg.PinnedIDs {
@@ -43,17 +46,19 @@ func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palett
 	}
 	pinTxt := "p:pin"
 	if pinned {
-		pinTxt = "★ p:unpin"
+		pinTxt = yel.Render("★") + muted.Render(" p:unpin")
+	} else {
+		pinTxt = muted.Render(pinTxt)
 	}
 
 	var rows []string
-	rows = append(rows, " "+accent.Render(it.Name)+" "+warn.Render("[PH2]"))
+	rows = append(rows, " "+titleStyle.Render(it.Name)+" "+org.Render("[PH2]"))
 	rows = append(rows, " "+txt.Render(Truncate(it.Summary, max(6, w-1))))
 	if h >= 6 {
-		rows = append(rows, " "+sec.Render("HW   ")+muted.Render(Truncate(it.Hardware, max(6, w-6))))
+		rows = append(rows, " "+cyan.Render("HW   ")+muted.Render(Truncate(it.Hardware, max(6, w-6))))
 	}
 	if h >= 7 {
-		rows = append(rows, " "+sec.Render("Priv ")+muted.Render(Truncate(it.Privileges, max(6, w-6))))
+		rows = append(rows, " "+mag.Render("Priv ")+muted.Render(Truncate(it.Privileges, max(6, w-6))))
 	}
 
 	cur := v.Cursors[it.ID]
@@ -63,7 +68,7 @@ func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palett
 
 	avail := h - len(rows)
 	if h >= 8 && avail > 1 {
-		avail-- // leave bottom line for pin action hint
+		avail--
 	}
 	if avail > 0 && len(it.PlannedOpts) > 0 {
 		start, end := ScrollWindow(len(it.PlannedOpts), cur, avail)
@@ -75,9 +80,9 @@ func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palett
 			} else {
 				pfx := "   "
 				if i == cur {
-					pfx = " ▸ "
+					pfx = titleStyle.Render(" ▸ ")
 				}
-				rows = append(rows, txt.Render(Truncate(pfx+opt, w)))
+				rows = append(rows, pfx+txt.Render(Truncate(opt, max(4, w-3))))
 			}
 		}
 	}
@@ -86,7 +91,7 @@ func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palett
 		rows = append(rows, "")
 	}
 	if len(rows) < h {
-		rows = append(rows, " "+muted.Render(pinTxt+" · ← sidebar"))
+		rows = append(rows, " "+pinTxt+muted.Render(" · ← side"))
 	}
 
 	return SplitLinesPadded(rows, w, h)

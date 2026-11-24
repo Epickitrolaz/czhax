@@ -43,14 +43,16 @@ func (v SearchView) Selected() (modules.Item, bool) {
 }
 
 func (v SearchView) RenderLines(w, h int, pal theme.Palette) []string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(pal.Cyan)
+	grn := lipgloss.NewStyle().Bold(true).Foreground(pal.Green)
+	org := lipgloss.NewStyle().Bold(true).Foreground(pal.Orange)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(pal.Cyan)
 
 	var lines []string
 	prompt := fmt.Sprintf("/ %s_", v.Query)
-	lines = append(lines, " "+accent.Render(Truncate(prompt, max(6, w-1))))
+	lines = append(lines, " "+cyan.Render(Truncate(prompt, max(6, w-1))))
 
 	if len(v.Results) == 0 {
 		lines = append(lines, " "+muted.Render("No match. Esc to close."))
@@ -71,7 +73,12 @@ func (v SearchView) RenderLines(w, h int, pal theme.Palette) []string {
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			nameW := max(6, w-len(st)-5)
-			row := fmt.Sprintf("   %s %s", txt.Render(FitLine(it.Name, nameW)), muted.Render(st))
+			stView := org.Render(st)
+			if it.Status == modules.StatusReady {
+				stView = grn.Render(st)
+			}
+			vCol := lipgloss.NewStyle().Bold(true).Foreground(theme.ViewColor(pal, it.Target.View))
+			row := fmt.Sprintf(" %s %s %s", vCol.Render("•"), txt.Render(FitLine(it.Name, nameW)), stView)
 			lines = append(lines, row)
 		}
 	}
