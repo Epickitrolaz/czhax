@@ -10,7 +10,6 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "czhax", "config.json")
 
 	cfg := Default()
-	cfg.Theme = "amber-ops"
 	cfg.Viewport = ViewportCZ5314
 	cfg.ShowFnBar = true
 	cfg.StealthMode = true
@@ -24,7 +23,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if got.Theme != "amber-ops" || got.Viewport != ViewportCZ5314 || !got.ShowFnBar || !got.StealthMode || got.RefreshSeconds != 5 {
+	if got.Theme != "mono-hi" || got.Viewport != ViewportCZ5314 || !got.ShowFnBar || !got.StealthMode || got.RefreshSeconds != 5 {
 		t.Fatalf("loaded config mismatch: %+v", got)
 	}
 }

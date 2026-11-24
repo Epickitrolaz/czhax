@@ -56,7 +56,7 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Theme:          "pineapple-blue",
+		Theme:          "mono-hi",
 		Viewport:       ViewportAuto,
 		Sidebar:        SidebarAuto,
 		Border:         BorderCompact,
@@ -122,9 +122,7 @@ func Save(path string, cfg Config) error {
 }
 
 func (c *Config) normalize() {
-	if c.Theme == "" {
-		c.Theme = "cyber-green"
-	}
+	c.Theme = "mono-hi"
 	switch c.Viewport {
 	case ViewportAuto, ViewportCZ5314, ViewportCZ4510, ViewportCZ4010, ViewportWide:
 	default:

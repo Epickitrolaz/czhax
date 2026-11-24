@@ -11,8 +11,7 @@ import (
 type OptionKey int
 
 const (
-	OptTheme OptionKey = iota
-	OptViewport
+	OptViewport OptionKey = iota
 	OptSidebar
 	OptBorder
 	OptKeyHints
@@ -26,7 +25,6 @@ const (
 )
 
 var displayKeys = []OptionKey{
-	OptTheme,
 	OptViewport,
 	OptSidebar,
 	OptBorder,
@@ -77,12 +75,6 @@ func (v *OptionsView) Adjust(tab, delta int, cfg *config.Config) string {
 	key := keys[cur]
 
 	switch key {
-	case OptTheme:
-		if delta >= 0 {
-			cfg.Theme = theme.NextID(cfg.Theme)
-		} else {
-			cfg.Theme = theme.PrevID(cfg.Theme)
-		}
 	case OptViewport:
 		modes := []config.ViewportMode{
 			config.ViewportAuto,
@@ -151,8 +143,6 @@ func cycleSlice[T comparable](items []T, current T, delta int) T {
 
 func optionRow(key OptionKey, cfg config.Config) (label, val string) {
 	switch key {
-	case OptTheme:
-		return "Theme", theme.Resolve(cfg.Theme, false).Name
 	case OptViewport:
 		switch cfg.Viewport {
 		case config.ViewportAuto:
@@ -283,7 +273,7 @@ func (v OptionsView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Co
 		for len(out) < h-1 {
 			out = append(out, "")
 		}
-		out = append(out, " "+muted.Render("Enter/Space:change · ← side"))
+		out = append(out, " "+muted.Render("←→/⏎:change · Esc:tabs"))
 	}
 	return SplitLinesPadded(out, w, h)
 }

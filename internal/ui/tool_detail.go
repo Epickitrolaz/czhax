@@ -86,7 +86,7 @@ func (v ModulePanelView) RenderLines(it modules.Item, w, h int, pal theme.Palett
 		rows = append(rows, "")
 	}
 	if len(rows) < h {
-		rows = append(rows, " "+pinTxt+muted.Render(" · ← side"))
+		rows = append(rows, " "+pinTxt+muted.Render(" · Esc:tabs"))
 	}
 
 	return SplitLinesPadded(rows, w, h)

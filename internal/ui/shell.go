@@ -10,7 +10,7 @@ import (
 	"github.com/czhax/czhax/internal/theme"
 )
 
-func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, activeView ViewID, activeTab int, overlayTitle string, snap sysinfo.Snapshot) string {
+func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, activeView ViewID, activeTab int, tabsFocused bool, overlayTitle string, snap sysinfo.Snapshot) string {
 	ascii := cfg.Border == config.BorderAscii
 	vbar := "│"
 	if ascii {
@@ -19,7 +19,8 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 
 	brandStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.Accent)
 	divStyle := lipgloss.NewStyle().Foreground(pal.Border)
-	activeTabStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.Accent)
+	activeTabFocused := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	activeTabPassive := lipgloss.NewStyle().Bold(true).Underline(true).Foreground(pal.Accent)
 	tabStyle := lipgloss.NewStyle().Foreground(pal.Muted)
 	okStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
 	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
@@ -61,13 +62,17 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 
 	var tabArea string
 	if overlayTitle != "" {
-		tabArea = " " + activeTabStyle.Render(" "+overlayTitle+" ")
+		tabArea = " " + activeTabFocused.Render(" "+overlayTitle+" ")
 	} else {
 		vd := TopViews[activeView]
 		var tabStrs []string
 		for i, lbl := range vd.Tabs {
 			if i == activeTab {
-				tabStrs = append(tabStrs, activeTabStyle.Render(" "+lbl+" "))
+				if tabsFocused {
+					tabStrs = append(tabStrs, activeTabFocused.Render(" "+lbl+" "))
+				} else {
+					tabStrs = append(tabStrs, activeTabPassive.Render("["+lbl+"]"))
+				}
 			} else {
 				tabStrs = append(tabStrs, tabStyle.Render(lbl))
 			}

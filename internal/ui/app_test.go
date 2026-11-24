@@ -79,20 +79,22 @@ func TestPineappleLayoutAllViewsAndSizes(t *testing.T) {
 		m = next.(AppModel)
 
 		for vIdx, vd := range TopViews {
-			// Move to view via F-key or down
 			m.ActiveView = ViewID(vIdx)
-			m.Focus = FocusSidebar
-			assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/"+vd.Name+"/Sidebar")
+			m.Focus = FocusTabs
+			assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/"+vd.Name+"/Tabs")
 
-			m = sendKey(m, "right")
+			m = sendKey(m, "enter")
 			if m.Focus != FocusContent {
-				t.Fatalf("expected FocusContent after right in %s", vd.Name)
+				t.Fatalf("expected FocusContent after enter in %s", vd.Name)
 			}
 			for tIdx, tabName := range vd.Tabs {
 				m.setTab(tIdx)
 				assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/"+vd.Name+"/"+tabName)
 			}
 			m = sendKey(m, "esc")
+			if m.Focus != FocusTabs {
+				t.Fatalf("expected FocusTabs after esc in %s", vd.Name)
+			}
 		}
 
 		// Search overlay
@@ -108,54 +110,80 @@ func TestPineappleLayoutAllViewsAndSizes(t *testing.T) {
 	}
 }
 
-func TestNavigationTabsAndOptions(t *testing.T) {
+func TestTabAndContentArrowNavigation(t *testing.T) {
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	m := NewAppModel(cfg, cfgPath)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 53, Height: 14})
 	m = next.(AppModel)
 
-	// Sidebar navigation
+	// In tab selection mode: Up/Down moves vertical views, Left/Right moves horizontal tabs
+	if m.Focus != FocusTabs {
+		t.Fatalf("expected initial FocusTabs")
+	}
 	m = sendKey(m, "down")
 	if m.ActiveView != ViewRecon {
-		t.Fatalf("expected ViewRecon, got %v", m.ActiveView)
+		t.Fatalf("expected ViewRecon on down, got %v", m.ActiveView)
 	}
-	m = sendKey(m, "tab")
+	m = sendKey(m, "right")
 	if m.ActiveTabs[ViewRecon] != 1 {
-		t.Fatalf("expected horizontal tab 1 (BLE), got %d", m.ActiveTabs[ViewRecon])
+		t.Fatalf("expected horizontal tab 1 (BLE) on right, got %d", m.ActiveTabs[ViewRecon])
+	}
+	m = sendKey(m, "left")
+	if m.ActiveTabs[ViewRecon] != 0 {
+		t.Fatalf("expected horizontal tab 0 (WiFi) on left, got %d", m.ActiveTabs[ViewRecon])
 	}
 
-	// Pin/unpin in Recon
-	m = sendKey(m, "right")
+	// Enter goes into content
+	m = sendKey(m, "enter")
+	if m.Focus != FocusContent {
+		t.Fatalf("expected FocusContent on enter")
+	}
 	origPins := len(m.Cfg.PinnedIDs)
 	m = sendKey(m, "p")
-	if len(m.Cfg.PinnedIDs) != origPins+1 {
-		t.Fatalf("expected BLE module to be pinned, pins=%v", m.Cfg.PinnedIDs)
+	if len(m.Cfg.PinnedIDs) != origPins-1 {
+		t.Fatalf("expected WiFi module to be unpinned, pins=%v", m.Cfg.PinnedIDs)
 	}
 	m = sendKey(m, "p")
 	if len(m.Cfg.PinnedIDs) != origPins {
-		t.Fatalf("expected BLE module to be unpinned, pins=%v", m.Cfg.PinnedIDs)
+		t.Fatalf("expected WiFi module to be re-pinned, pins=%v", m.Cfg.PinnedIDs)
 	}
 
-	// Jump to Opts via F8 and change Theme
+	// Esc returns to tab selection view
+	m = sendKey(m, "esc")
+	if m.Focus != FocusTabs {
+		t.Fatalf("expected FocusTabs on esc")
+	}
+
+	// Jump to Opts, enter content, and use Left/Right arrows to adjust Viewport (first option, since Theme is removed)
 	m = sendKey(m, "f8")
 	if m.ActiveView != ViewOpts {
 		t.Fatalf("expected ViewOpts on F8, got %v", m.ActiveView)
 	}
-	m.Focus = FocusContent
 	m = sendKey(m, "enter")
-	if m.Cfg.Theme == config.Default().Theme {
-		t.Fatalf("expected theme to change on Enter in Opts")
+	if m.Focus != FocusContent {
+		t.Fatalf("expected FocusContent on enter in Opts")
+	}
+	m = sendKey(m, "right")
+	if m.Focus != FocusContent {
+		t.Fatalf("left/right inside Opts content must stay in FocusContent")
+	}
+	if m.Cfg.Viewport != config.ViewportCZ5314 {
+		t.Fatalf("expected ViewportCZ5314 on right in Opts, got %v", m.Cfg.Viewport)
+	}
+	m = sendKey(m, "left")
+	if m.Cfg.Viewport != config.ViewportAuto {
+		t.Fatalf("expected ViewportAuto on left in Opts, got %v", m.Cfg.Viewport)
 	}
 	loaded, err := config.Load(cfgPath)
-	if err != nil || loaded.Theme != m.Cfg.Theme {
-		t.Fatalf("expected persisted theme %q, got %q (err=%v)", m.Cfg.Theme, loaded.Theme, err)
+	if err != nil || loaded.Theme != "mono-hi" {
+		t.Fatalf("expected persisted theme mono-hi, got %q (err=%v)", loaded.Theme, err)
 	}
 
-	// Back to sidebar via left
-	m = sendKey(m, "left")
-	if m.Focus != FocusSidebar {
-		t.Fatalf("expected FocusSidebar on left in Opts")
+	// Esc returns to tab selection view
+	m = sendKey(m, "esc")
+	if m.Focus != FocusTabs {
+		t.Fatalf("expected FocusTabs on esc from Opts")
 	}
 }
 
@@ -176,7 +204,6 @@ func TestDesktopBezelMode(t *testing.T) {
 		}
 	}
 
-	// Verify 3-character labels in compact 45x10 mode
 	m.Cfg.Viewport = config.ViewportCZ4510
 	compactView := m.View()
 	for _, lbl := range []string{"Dsh", "Rcn", "Net", "Lab", "Sys", "Opt"} {

@@ -212,7 +212,7 @@ func (v DashView) RenderLines(tab, w, h int, pal theme.Palette, cfg config.Confi
 		}
 		if h >= 7 {
 			rows = append(rows, "")
-			rows = append(rows, " "+sec.Render("→")+muted.Render(" open  ")+sec.Render("Tab")+muted.Render(" tabs  ")+sec.Render("/")+muted.Render(" find"))
+			rows = append(rows, " "+sec.Render("⏎")+muted.Render(" enter  ")+sec.Render("←→")+muted.Render(" tabs  ")+sec.Render("/")+muted.Render(" find"))
 		}
 		maxS := max(0, len(rows)-h)
 		sc := min(v.Scroll, maxS)

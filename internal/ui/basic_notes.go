@@ -125,6 +125,6 @@ func (v NotesView) RenderLines(w, h int, pal theme.Palette, focused bool) []stri
 	for len(out) < h-1 {
 		out = append(out, "")
 	}
-	out = append(out, " "+muted.Render("a:add  d:del  ← sidebar"))
+	out = append(out, " "+muted.Render("a:add  d:del  Esc:tabs"))
 	return SplitLinesPadded(out, w, h)
 }

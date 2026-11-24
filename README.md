@@ -56,18 +56,17 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - **Top Horizontal Tabs** inside each view (e.g. `Pulse | Pinned | System`, `WiFi | BLE | IR`, `IFs | Scan | Pkt`, `Crypto | HWBus`, `Mon | Notes | Files`, `Display | Ctrls | Keys`).
   - **High-Contrast LCD Palettes**: Bright text on pure black with solid inverse selection bars tuned for the 1.9" 320×170 ST7789 display (`53×14`, `45×10`, and `40×10`).
 - **Navigation & Cardputer Zero Keymap**:
-  - `↑↓` (`Fn+F/X`) or `j/k` moves through views (in sidebar) or items (in pane)
-  - `←→` (`Fn+Z/C`) or `Enter` switches focus between **Sidebar ↔ Content Pane**
-  - `Tab` / `Shift+Tab` or `1`–`3` switches the **top horizontal tabs**
+  - **Tab selection view**: `↑↓` (`Fn+F/X`) moves through vertical left views, `←→` (`Fn+Z/C`) switches top horizontal tabs, `Enter` enters the tab's content
+  - **Inside tab content**: `↑↓←→` navigate and adjust within that tab; `Esc` returns to the tab selection view
   - `F4`–`F8` (`Fn+4`..`Fn+8`) jumps directly to `Dash`, `Recon`, `Net`, `Sys`, `Opts`
-  - `/` quick search launcher, `p` pin/unpin to Dash, `t` cycle theme, `s` Stealth Mode, `?` help
+  - `/` quick search launcher, `p` pin/unpin to Dash, `s` Stealth Mode, `?` help
 - **Cybersecurity Hub (Phase 2 Pre-flight)**: Structured modules for `WiFi`, `BLE`, `IR`, `Scan`, `Pkt`, `Crypto`, and `HW Bus` (I2C/UART/Cap).
 - **Basic Tools (Active)**:
   - **System Monitor** (`Sys → Mon`): CPU load, RAM, disk, temp, battery fuel gauge, CM0 detection
   - **Net Interfaces** (`Net → IFs`): live NICs, IPv4/IPv6, MAC, MTU, link state
   - **Quick Notes** (`Sys → Notes`): saved in `~/.config/czhax/notes.txt`
   - **File Browser** (`Sys → Files`): compact directory navigator & text pager
-- **Persistent Options** (`~/.config/czhax/config.json`): 5 high-contrast themes (`Cyber Green`, `Pineapple Blue`, `Amber Ops`, `Purple Hax`, `High Contrast`), Viewport (`Auto`, `CZ 53x14`, `CZ 45x10`, `CZ 40x10`, `Full`), Sidebar (`Auto`, `Wide 7c`, `Slim 3c`), Style (`compact`/`minimal`/`ascii`), Footer & Fn4-8 toggles, Nav mode, Refresh rate, Stealth Mode, and Confirm Quit.
+- **Persistent Options** (`~/.config/czhax/config.json`): High Contrast display mode, Viewport (`Auto`, `CZ 53x14`, `CZ 45x10`, `CZ 40x10`, `Full`), Sidebar (`Auto`, `3-Char`, `Full`), Style (`compact`/`minimal`/`ascii`), Footer & Fn4-8 toggles, Nav mode, Refresh rate, Stealth Mode, and Confirm Quit.
 
 ## Build from Source
 

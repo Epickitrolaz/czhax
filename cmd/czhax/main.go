@@ -15,7 +15,6 @@ var version = "0.1.0-phase1"
 func main() {
 	czMode := flag.Bool("cz", false, "Render inside a 53x14 Cardputer Zero viewport frame")
 	cz45 := flag.Bool("cz45", false, "Render inside a compact 45x10 Cardputer Zero viewport frame")
-	themeFlag := flag.String("theme", "", "Override theme (cyber-green, purple-hax, amber-ops, ice-cyan, mono-hi)")
 	cfgFlag := flag.String("config", "", "Custom config file path")
 	verFlag := flag.Bool("version", false, "Print CZHax version and exit")
 	flag.Parse()
@@ -40,9 +39,6 @@ func main() {
 	}
 	if *cz45 {
 		cfg.Viewport = config.ViewportCZ4510
-	}
-	if *themeFlag != "" {
-		cfg.Theme = *themeFlag
 	}
 
 	model := ui.NewAppModel(cfg, cfgPath)

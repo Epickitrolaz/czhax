@@ -92,7 +92,7 @@ func (v NetIfView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, s
 		if len(cur.Addrs) > 0 && !cfg.StealthMode {
 			lines = append(lines, " "+sec.Render("IP  ")+txt.Render(strings.Join(cur.Addrs, ", ")))
 		} else {
-			lines = append(lines, " "+muted.Render("r:refresh  ← side"))
+			lines = append(lines, " "+muted.Render("r:refresh  Esc:tabs"))
 		}
 	}
 

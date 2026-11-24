@@ -16,7 +16,7 @@ import (
 type FocusZone int
 
 const (
-	FocusSidebar FocusZone = iota
+	FocusTabs FocusZone = iota
 	FocusContent
 )
 
@@ -35,15 +35,15 @@ type AppModel struct {
 	ActiveTabs [viewCount]int
 	Focus      FocusZone
 
-	Dash       DashView
-	ModPanel   ModulePanelView
-	SysMon     SysMonView
-	NetIf      NetIfView
-	Notes      NotesView
-	Files      FilesView
-	Options    OptionsView
-	Search     SearchView
-	Help       HelpView
+	Dash     DashView
+	ModPanel ModulePanelView
+	SysMon   SysMonView
+	NetIf    NetIfView
+	Notes    NotesView
+	Files    FilesView
+	Options  OptionsView
+	Search   SearchView
+	Help     HelpView
 
 	ShowSearch  bool
 	ShowHelp    bool
@@ -59,7 +59,7 @@ func NewAppModel(cfg config.Config, cfgPath string) AppModel {
 		TermW:      53,
 		TermH:      14,
 		ActiveView: ViewDash,
-		Focus:      FocusSidebar,
+		Focus:      FocusTabs,
 		Dash:       NewDashView(cfg.PinnedIDs),
 		ModPanel:   NewModulePanelView(),
 		Notes:      NewNotesView(),
@@ -248,11 +248,6 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.Files.Reload()
 		}
 		return m, m.setStatus("Refreshed")
-	case "t":
-		m.Cfg.Theme = theme.NextID(m.Cfg.Theme)
-		_ = config.Save(m.ConfigPath, m.Cfg)
-		pal := theme.Resolve(m.Cfg.Theme, m.Cfg.StealthMode)
-		return m, m.setStatus("Theme: " + pal.Name)
 	case "s":
 		m.Cfg.StealthMode = !m.Cfg.StealthMode
 		_ = config.Save(m.ConfigPath, m.Cfg)
@@ -269,14 +264,18 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Left Sidebar focus
-	if m.Focus == FocusSidebar {
+	// Tab selection view: Up/Down = vertical views, Left/Right = horizontal tabs, Enter = enter content
+	if m.Focus == FocusTabs {
 		switch {
 		case m.isUp(k):
 			m.ActiveView = ViewID((int(m.ActiveView) - 1 + int(viewCount)) % int(viewCount))
 		case m.isDown(k):
 			m.ActiveView = ViewID((int(m.ActiveView) + 1) % int(viewCount))
-		case k == "enter" || m.isRight(k):
+		case m.isLeft(k):
+			m.cycleTab(-1)
+		case m.isRight(k):
+			m.cycleTab(1)
+		case k == "enter":
 			m.Focus = FocusContent
 		case k == "esc":
 			if m.Cfg.ConfirmQuit {
@@ -286,19 +285,18 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Right Content focus
+	// Content view: arrow keys belong to tab content; Esc returns to tab selection view
 	return m.handleContentKey(k)
 }
 
 func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	tab := m.ActiveTabs[m.ActiveView]
 
-	// Handle per-view content actions
 	switch m.ActiveView {
 	case ViewDash:
 		switch {
-		case k == "esc" || m.isLeft(k):
-			m.Focus = FocusSidebar
+		case k == "esc":
+			m.Focus = FocusTabs
 		case m.isUp(k):
 			m.Dash.Move(tab, -1)
 		case m.isDown(k):
@@ -317,8 +315,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	case ViewRecon, ViewLab:
 		it, _ := modules.FindByTarget(int(m.ActiveView), tab)
 		switch {
-		case k == "esc" || m.isLeft(k):
-			m.Focus = FocusSidebar
+		case k == "esc":
+			m.Focus = FocusTabs
 		case m.isUp(k):
 			m.ModPanel.Move(it, -1)
 		case m.isDown(k):
@@ -329,10 +327,10 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ViewNet:
-		if tab == 0 { // Live Net Interfaces
+		if tab == 0 {
 			switch {
-			case k == "esc" || m.isLeft(k):
-				m.Focus = FocusSidebar
+			case k == "esc":
+				m.Focus = FocusTabs
 			case m.isUp(k):
 				m.NetIf.Move(-1, len(m.Snap.Interfaces))
 			case m.isDown(k):
@@ -346,8 +344,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		}
 		it, _ := modules.FindByTarget(int(ViewNet), tab)
 		switch {
-		case k == "esc" || m.isLeft(k):
-			m.Focus = FocusSidebar
+		case k == "esc":
+			m.Focus = FocusTabs
 		case m.isUp(k):
 			m.ModPanel.Move(it, -1)
 		case m.isDown(k):
@@ -361,8 +359,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		switch tab {
 		case 0: // SysMon
 			switch {
-			case k == "esc" || m.isLeft(k):
-				m.Focus = FocusSidebar
+			case k == "esc":
+				m.Focus = FocusTabs
 			case m.isUp(k):
 				m.SysMon.Move(-1)
 			case m.isDown(k):
@@ -374,8 +372,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			}
 		case 1: // Notes
 			switch {
-			case k == "esc" || m.isLeft(k):
-				m.Focus = FocusSidebar
+			case k == "esc":
+				m.Focus = FocusTabs
 			case m.isUp(k):
 				m.Notes.Move(-1)
 			case m.isDown(k):
@@ -389,14 +387,14 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			}
 		case 2: // Files
 			switch {
-			case k == "esc" || k == "backspace":
-				if !m.Files.Back() {
-					m.Focus = FocusSidebar
+			case k == "esc":
+				if m.Files.PreviewPath != "" {
+					m.Files.Back()
+				} else {
+					m.Focus = FocusTabs
 				}
-			case m.isLeft(k):
-				if !m.Files.Back() {
-					m.Focus = FocusSidebar
-				}
+			case k == "backspace" || m.isLeft(k):
+				m.Files.Back()
 			case m.isUp(k):
 				m.Files.Move(-1)
 			case m.isDown(k):
@@ -409,15 +407,15 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 	case ViewOpts:
 		switch {
-		case k == "esc" || m.isLeft(k):
-			m.Focus = FocusSidebar
+		case k == "esc":
+			m.Focus = FocusTabs
 		case m.isUp(k):
 			m.Options.Move(tab, -1)
 		case m.isDown(k):
 			m.Options.Move(tab, 1)
 		case k == "enter" || k == " " || k == "+" || k == "=" || m.isRight(k):
 			return m, m.applyOption(tab, 1)
-		case k == "-":
+		case k == "-" || m.isLeft(k):
 			return m, m.applyOption(tab, -1)
 		}
 		return m, nil
@@ -543,7 +541,8 @@ func (m AppModel) View() string {
 		overlayTitle = "HELP"
 	}
 
-	topRow := RenderTopRow(sideW, mainW, pal, m.Cfg, m.ActiveView, m.ActiveTabs[m.ActiveView], overlayTitle, m.Snap)
+	tabsFocused := m.Focus == FocusTabs && !m.ShowSearch && !m.ShowHelp
+	topRow := RenderTopRow(sideW, mainW, pal, m.Cfg, m.ActiveView, m.ActiveTabs[m.ActiveView], tabsFocused, overlayTitle, m.Snap)
 
 	showDivider := h >= 12
 	showFooter := m.Cfg.ShowKeyHints || m.ConfirmExit || m.StatusMsg != ""
@@ -559,7 +558,7 @@ func (m AppModel) View() string {
 		bodyH = 1
 	}
 
-	sideLines := RenderSidebarColumn(sideW, bodyH, pal, m.Cfg, m.ActiveView, m.Focus == FocusSidebar && !m.ShowSearch && !m.ShowHelp)
+	sideLines := RenderSidebarColumn(sideW, bodyH, pal, m.Cfg, m.ActiveView, tabsFocused)
 	mainLines := m.renderMainLines(mainW, bodyH, pal)
 	bodyBlock := JoinPaneColumns(sideLines, mainLines, sideW, mainW, bodyH, pal, m.Cfg)
 
@@ -597,7 +596,7 @@ func (m AppModel) View() string {
 		Render(fmt.Sprintf("M5Stack Cardputer Zero · %dx%d (320x170 ST7789)", w, h))
 	fnLegend := lipgloss.NewStyle().
 		Foreground(pal.Muted).
-		Render("↑↓ view/item · ←→ sidebar/pane · Tab tabs · / find · ? help")
+		Render("↑↓ view · ←→ tab · ⏎ enter · Esc tabs · / find · ? help")
 
 	composed := lipgloss.JoinVertical(lipgloss.Center, label, frame, fnLegend)
 	return lipgloss.Place(m.TermW, m.TermH, lipgloss.Center, lipgloss.Center, composed)
@@ -650,11 +649,11 @@ func (m AppModel) currentHints() []Hint {
 	if m.ShowHelp {
 		return []Hint{{Key: "↑↓", Desc: "scroll"}, {Key: "Esc", Desc: "close"}}
 	}
-	if m.Focus == FocusSidebar {
+	if m.Focus == FocusTabs {
 		return []Hint{
 			{Key: "↑↓", Desc: "view"},
-			{Key: "→", Desc: "open"},
-			{Key: "Tab", Desc: "tab"},
+			{Key: "←→", Desc: "tab"},
+			{Key: "⏎", Desc: "enter"},
 			{Key: "/", Desc: "find"},
 			{Key: "?", Desc: "help"},
 		}
@@ -662,19 +661,17 @@ func (m AppModel) currentHints() []Hint {
 	if m.ActiveView == ViewOpts {
 		return []Hint{
 			{Key: "↑↓", Desc: "opt"},
-			{Key: "⏎", Desc: "set"},
-			{Key: "←", Desc: "side"},
-			{Key: "Tab", Desc: "tab"},
+			{Key: "←→", Desc: "set"},
+			{Key: "Esc", Desc: "tabs"},
 		}
 	}
 	if m.ActiveView == ViewSys && m.ActiveTabs[ViewSys] == 1 && m.Notes.Adding {
 		return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
 	}
 	return []Hint{
-		{Key: "↑↓", Desc: "nav"},
-		{Key: "←", Desc: "side"},
-		{Key: "Tab", Desc: "tab"},
-		{Key: "/", Desc: "find"},
+		{Key: "↑↓←→", Desc: "nav"},
+		{Key: "⏎", Desc: "act"},
+		{Key: "Esc", Desc: "tabs"},
 		{Key: "?", Desc: "help"},
 	}
 }
