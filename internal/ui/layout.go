@@ -22,19 +22,19 @@ const (
 )
 
 type ViewDef struct {
-	ID    ViewID
-	Name  string
-	Slim  string
-	Tabs  []string
+	ID   ViewID
+	Name string
+	Icon string
+	Tabs []string
 }
 
 var TopViews = []ViewDef{
-	{ID: ViewDash, Name: "Dash", Slim: "D", Tabs: []string{"Pulse", "Pinned", "System"}},
-	{ID: ViewRecon, Name: "Recon", Slim: "R", Tabs: []string{"WiFi", "BLE", "IR"}},
-	{ID: ViewNet, Name: "Net", Slim: "N", Tabs: []string{"IFs", "Scan", "Pkt"}},
-	{ID: ViewLab, Name: "Lab", Slim: "L", Tabs: []string{"Crypto", "HWBus"}},
-	{ID: ViewSys, Name: "Sys", Slim: "S", Tabs: []string{"Mon", "Notes", "Files"}},
-	{ID: ViewOpts, Name: "Opts", Slim: "O", Tabs: []string{"Display", "Ctrls", "Keys"}},
+	{ID: ViewDash, Name: "Dash", Icon: "[#]", Tabs: []string{"Pulse", "Pinned", "System"}},
+	{ID: ViewRecon, Name: "Recon", Icon: "((o", Tabs: []string{"WiFi", "BLE", "IR"}},
+	{ID: ViewNet, Name: "Net", Icon: "<->", Tabs: []string{"IFs", "Scan", "Pkt"}},
+	{ID: ViewLab, Name: "Lab", Icon: "{*}", Tabs: []string{"Crypto", "HWBus"}},
+	{ID: ViewSys, Name: "Sys", Icon: ">$_", Tabs: []string{"Mon", "Notes", "Files"}},
+	{ID: ViewOpts, Name: "Opts", Icon: "[=]", Tabs: []string{"Display", "Ctrls", "Keys"}},
 }
 
 // ResolveViewport computes inner TUI width and height (and whether a desktop CZ bezel should be drawn).
@@ -75,14 +75,14 @@ func ResolveViewport(termW, termH int, mode config.ViewportMode) (w, h int, beze
 func ResolveSidebarWidth(totalW int, mode config.SidebarMode) int {
 	switch mode {
 	case config.SidebarSlim:
-		return 3
+		return 5
 	case config.SidebarWide:
-		return 7
+		return 11
 	default:
-		if totalW < 42 {
-			return 3
+		if totalW < 50 {
+			return 5
 		}
-		return 7
+		return 11
 	}
 }
 

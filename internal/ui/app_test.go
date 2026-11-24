@@ -170,4 +170,9 @@ func TestDesktopBezelMode(t *testing.T) {
 	if !strings.Contains(view, "M5Stack Cardputer Zero") {
 		t.Fatalf("expected desktop bezel label in CZ5314 mode on 100x30 terminal")
 	}
+	for _, icon := range []string{"[#]", "((o", "<->", "{*}", ">$_", "[=]"} {
+		if !strings.Contains(view, icon) {
+			t.Fatalf("expected sidebar ASCII icon %q in view:\n%s", icon, view)
+		}
+	}
 }

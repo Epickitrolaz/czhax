@@ -26,9 +26,9 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
 
 	// Left cell: Brand matching exact sidebar width
-	brandTxt := " CZHAX "
-	if sideW < 7 {
-		brandTxt = "CZ "
+	brandTxt := "CZHAX"
+	if sideW >= 9 {
+		brandTxt = " CZHAX"
 	}
 	leftCell := brandStyle.Render(FitLine(brandTxt, sideW))
 
@@ -117,9 +117,9 @@ func RenderSidebarColumn(sideW, bodyH int, pal theme.Palette, cfg config.Config,
 	lines := make([]string, 0, bodyH)
 	for i := start; i < end; i++ {
 		vd := TopViews[i]
-		lbl := vd.Name
-		if sideW <= 4 {
-			lbl = vd.Slim
+		lbl := vd.Icon + " " + vd.Name
+		if sideW < 10 {
+			lbl = vd.Icon
 		}
 		if ViewID(i) == active {
 			txt := FitLine(marker+lbl, sideW)

@@ -171,9 +171,9 @@ func optionRow(key OptionKey, cfg config.Config) (label, val string) {
 		case config.SidebarAuto:
 			return "Sidebar", "Auto"
 		case config.SidebarWide:
-			return "Sidebar", "Wide 7c"
+			return "Sidebar", "Icon+Lbl"
 		case config.SidebarSlim:
-			return "Sidebar", "Slim 3c"
+			return "Sidebar", "Icons"
 		}
 	case OptBorder:
 		return "Style", string(cfg.Border)
