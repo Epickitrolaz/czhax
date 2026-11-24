@@ -47,7 +47,8 @@ type WifiScanView struct {
 
 func NewWifiScanView() WifiScanView {
 	return WifiScanView{
-		ScanIface: "wlan0",
+		ScanIface:    "wlan0",
+		ShowPassword: true,
 	}
 }
 
@@ -212,7 +213,7 @@ func (v *WifiScanView) BeginConnect(fromMode WifiScanMode) bool {
 	v.ConnectErr = ""
 	v.Password = ""
 	v.SSIDInput = ""
-	v.ShowPassword = false
+	v.ShowPassword = true
 	v.Note = ""
 	v.NoteIsErr = false
 
@@ -448,6 +449,13 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 
 	ifaces := v.AvailableIfaces()
 	ifaceName := v.EffectiveScanIface()
+	ifaceBands := ""
+	for _, inf := range ifaces {
+		if inf.Name == ifaceName {
+			ifaceBands = inf.Bands
+			break
+		}
+	}
 	ifacePart := sec.Render("If:") + accent.Render(Truncate(ifaceName, max(5, w-18)))
 	if len(ifaces) > 1 {
 		ifacePart += muted.Render("◂▸")
@@ -468,8 +476,11 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 	}
 
 	rightW := lipgloss.Width(rightPart)
-	leftMax := max(6, w-rightW-2)
-	header := " " + FitLine(ifacePart, leftMax) + " " + rightPart
+	leftMax := max(6, w-rightW-3)
+	if ifaceBands != "" && lipgloss.Width(ifacePart)+1+len(ifaceBands) <= leftMax {
+		ifacePart += " " + muted.Render(ifaceBands)
+	}
+	header := " " + FitLine(ifacePart, leftMax) + " " + rightPart + " "
 	if h <= 1 {
 		return SplitLinesPadded([]string{header}, w, h)
 	}
@@ -484,19 +495,19 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 
 	switch {
 	case v.Scanning && len(v.Networks) == 0:
-		lines = append(lines, " "+warn.Render(Truncate("Scanning "+ifaceName+"...", max(6, w-1))))
+		lines = append(lines, " "+warn.Render(Truncate("Scanning "+ifaceName+"...", max(6, w-2))))
 
 	case v.ScanErr != "" && len(v.Networks) == 0:
 		lines = append(lines, " "+danger.Render("Scan failed:"))
-		lines = append(lines, " "+muted.Render(Truncate(v.ScanErr, max(6, w-1))))
+		lines = append(lines, " "+muted.Render(Truncate(v.ScanErr, max(6, w-2))))
 		lines = append(lines, " "+muted.Render("Press s to retry"))
 
 	case len(v.Networks) == 0:
 		if !v.HasScanned {
 			lines = append(lines, " "+muted.Render("No scan yet"))
-			lines = append(lines, " "+muted.Render(Truncate("Press s or ⏎ to scan "+ifaceName, max(6, w-1))))
+			lines = append(lines, " "+muted.Render(Truncate("Press s or ⏎ to scan "+ifaceName, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("No networks on "+ifaceName, max(6, w-1))))
+			lines = append(lines, " "+muted.Render(Truncate("No networks on "+ifaceName, max(6, w-2))))
 			lines = append(lines, " "+muted.Render("Press s to rescan"))
 		}
 
@@ -510,7 +521,7 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			sigTxt := fmt.Sprintf("%3d%%", n.Signal)
 			rightPlain := sigTxt + " " + secLbl
 			rightPlainW := lipgloss.Width(rightPlain)
-			ssidW := max(4, w-2-1-rightPlainW)
+			ssidW := max(4, w-2-1-rightPlainW-1)
 			ssidTxt := Truncate(n.DisplaySSID(), ssidW)
 
 			if selected && focused {
@@ -518,7 +529,7 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 				if n.InUse {
 					mark = "*"
 				}
-				row := fmt.Sprintf("▸%s%s %s", mark, FitLine(ssidTxt, ssidW), rightPlain)
+				row := fmt.Sprintf("▸%s%s %s ", mark, FitLine(ssidTxt, ssidW), rightPlain)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := " "
@@ -554,9 +565,9 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			if v.NoteIsErr {
 				st = danger
 			}
-			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-1))))
+			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:info  c:conn  ←→:if  s:scan", max(6, w-1))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎:info c:conn ←→:if s:scan", max(6, w-2))))
 		}
 	}
 
@@ -641,8 +652,8 @@ func (v WifiScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []
 
 	action := sec.Render("[⏎]") + okStyle.Render("Conn")
 	actionW := lipgloss.Width(action)
-	titleW := max(6, w-actionW-2)
-	header := " " + FitLine(muted.Render("◂ ")+accent.Render(Truncate(net.DisplaySSID(), max(4, titleW-2))), titleW) + " " + action
+	titleW := max(6, w-actionW-3)
+	header := " " + FitLine(muted.Render("◂ ")+accent.Render(Truncate(net.DisplaySSID(), max(4, titleW-2))), titleW) + " " + action + " "
 	if h <= 1 {
 		return SplitLinesPadded([]string{header}, w, h)
 	}
@@ -670,9 +681,9 @@ func (v WifiScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []
 			if v.NoteIsErr {
 				st = danger
 			}
-			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-1))))
+			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎/c:connect  ↑↓:scroll  Esc:list", max(6, w-1))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎/c:conn  ↑↓:scr  Esc:list", max(6, w-2))))
 		}
 	}
 
@@ -691,14 +702,14 @@ func (v WifiScanView) renderPickIface(w, h int, pal theme.Palette, focused bool)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	lines := []string{
-		" " + accent.Render(Truncate("Connect: "+net.DisplaySSID(), max(6, w-1))),
+		" " + accent.Render(Truncate("Connect: "+net.DisplaySSID(), max(6, w-2))),
 	}
 	if h <= 1 {
 		return SplitLinesPadded(lines, w, h)
 	}
 
 	if v.Connecting {
-		lines = append(lines, " "+warn.Render(Truncate("Connecting via "+v.ConnectIface+"...", max(6, w-1))))
+		lines = append(lines, " "+warn.Render(Truncate("Connecting via "+v.ConnectIface+"...", max(6, w-2))))
 		return SplitLinesPadded(lines, w, h)
 	}
 
@@ -731,13 +742,13 @@ func (v WifiScanView) renderPickIface(w, h int, pal theme.Palette, focused bool)
 			stPlain = "MON"
 		}
 
-		maxStW := max(4, w/2)
+		maxStW := max(4, w/2-1)
 		stPlain = Truncate(stPlain, maxStW)
-		nameW := max(5, w-4-len([]rune(stPlain)))
+		nameW := max(5, w-5-len([]rune(stPlain)))
 		nameTxt := Truncate(inf.Name, nameW)
 
 		if selected && focused {
-			row := fmt.Sprintf(" ▸ %s %s", FitLine(nameTxt, nameW), stPlain)
+			row := fmt.Sprintf(" ▸ %s %s ", FitLine(nameTxt, nameW), stPlain)
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			pfx := "   "
@@ -759,9 +770,9 @@ func (v WifiScanView) renderPickIface(w, h int, pal theme.Palette, focused bool)
 			lines = append(lines, "")
 		}
 		if v.ConnectErr != "" {
-			lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-1))))
+			lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:choose  Esc:back", max(6, w-1))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎:choose  Esc:back", max(6, w-2))))
 		}
 	}
 
@@ -778,27 +789,27 @@ func (v WifiScanView) renderSSIDInput(w, h int, pal theme.Palette) []string {
 
 	net, _ := v.SelectedNetwork()
 	lines := []string{
-		" " + accent.Render(Truncate("Hidden AP ("+v.ConnectIface+")", max(6, w-1))),
+		" " + accent.Render(Truncate("Hidden AP ("+v.ConnectIface+")", max(6, w-2))),
 	}
 	if v.Connecting {
-		lines = append(lines, " "+warn.Render(Truncate("Connecting via "+v.ConnectIface+"...", max(6, w-1))))
+		lines = append(lines, " "+warn.Render(Truncate("Connecting via "+v.ConnectIface+"...", max(6, w-2))))
 		return SplitLinesPadded(lines, w, h)
 	}
 
 	lines = append(lines, " "+sec.Render("Enter SSID:"))
-	fieldW := max(6, w-4)
+	fieldW := max(6, w-5)
 	lines = append(lines, " > "+txt.Render(tailWindow(v.SSIDInput, fieldW-1)+"_"))
 	if net.BSSID != "" {
-		lines = append(lines, " "+muted.Render(Truncate("BSSID: "+net.BSSID, max(6, w-1))))
+		lines = append(lines, " "+muted.Render(Truncate("BSSID: "+net.BSSID, max(6, w-2))))
 	}
 	if v.ConnectErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-1))))
+		lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-2))))
 	}
 	if h >= 6 {
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate("⏎:next  Esc:back", max(6, w-1))))
+		lines = append(lines, " "+muted.Render(Truncate("⏎:next  Esc:back", max(6, w-2))))
 	}
 	return SplitLinesPadded(lines, w, h)
 }
@@ -818,26 +829,26 @@ func (v WifiScanView) renderPasswordInput(w, h int, pal theme.Palette) []string 
 	}
 
 	lines := []string{
-		" " + accent.Render(Truncate(ssid+" ("+v.ConnectIface+")", max(6, w-1))),
+		" " + accent.Render(Truncate(ssid+" ("+v.ConnectIface+")", max(6, w-2))),
 	}
 	if v.Connecting {
-		lines = append(lines, " "+warn.Render(Truncate("Connecting "+ssid+"...", max(6, w-1))))
-		lines = append(lines, " "+muted.Render(Truncate("Interface: "+v.ConnectIface, max(6, w-1))))
+		lines = append(lines, " "+warn.Render(Truncate("Connecting "+ssid+"...", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(Truncate("Interface: "+v.ConnectIface, max(6, w-2))))
 		return SplitLinesPadded(lines, w, h)
 	}
 
-	lines = append(lines, " "+sec.Render(Truncate("Password (blank=saved):", max(6, w-1))))
+	lines = append(lines, " "+sec.Render(Truncate("Password (blank=saved):", max(6, w-2))))
 
 	disp := v.Password
 	if !v.ShowPassword {
 		disp = strings.Repeat("•", utf8.RuneCountInString(v.Password))
 	}
-	fieldW := max(6, w-4)
+	fieldW := max(6, w-5)
 	lines = append(lines, " > "+txt.Render(tailWindow(disp, fieldW-1)+"_"))
-	lines = append(lines, " "+muted.Render(Truncate("Sec: "+net.ShortSecurity(), max(6, w-1))))
+	lines = append(lines, " "+muted.Render(Truncate("Sec: "+net.ShortSecurity(), max(6, w-2))))
 
 	if v.ConnectErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-1))))
+		lines = append(lines, " "+danger.Render(Truncate(v.ConnectErr, max(6, w-2))))
 	}
 
 	if h >= 6 {
@@ -848,7 +859,7 @@ func (v WifiScanView) renderPasswordInput(w, h int, pal theme.Palette) []string 
 		if v.ShowPassword {
 			visLbl = "Tab:hide"
 		}
-		lines = append(lines, " "+muted.Render(Truncate("⏎:conn  "+visLbl+"  Esc:back", max(6, w-1))))
+		lines = append(lines, " "+muted.Render(Truncate("⏎:conn  "+visLbl+"  Esc:back", max(6, w-2))))
 	}
 
 	return SplitLinesPadded(lines, w, h)

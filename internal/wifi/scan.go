@@ -153,11 +153,9 @@ func connectWith(s scanner, req ConnectRequest) error {
 	if iface == "" {
 		iface = "wlan0"
 	}
-	target := strings.TrimSpace(req.SSID)
-	if target == "" {
-		target = strings.TrimSpace(req.BSSID)
-	}
-	if target == "" {
+	ssid := strings.TrimSpace(req.SSID)
+	bssid := strings.TrimSpace(req.BSSID)
+	if ssid == "" && bssid == "" {
 		return errors.New("missing network SSID/BSSID")
 	}
 
@@ -165,20 +163,137 @@ func connectWith(s scanner, req ConnectRequest) error {
 		return errors.New("nmcli not found")
 	}
 
-	args := []string{"dev", "wifi", "connect", target}
-	if req.Password != "" && !strings.EqualFold(strings.TrimSpace(req.Security), "Open") {
-		args = append(args, "password", req.Password)
+	isOpen := strings.EqualFold(strings.TrimSpace(req.Security), "Open") || strings.TrimSpace(req.Security) == "--"
+	if ssid == "" {
+		// Fallback when only BSSID is provided
+		args := []string{"dev", "wifi", "connect", bssid}
+		if req.Password != "" && !isOpen {
+			args = append(args, "password", req.Password)
+		}
+		args = append(args, "ifname", iface)
+		out, err := runPrivileged(s, 25*time.Second, "nmcli", args...)
+		if err != nil {
+			return errors.New(cleanCmdError(out, err))
+		}
+		return nil
 	}
-	if req.Hidden {
-		args = append(args, "hidden", "yes")
-	}
-	args = append(args, "ifname", iface)
 
-	out, err := runPrivileged(s, 25*time.Second, "nmcli", args...)
-	if err != nil {
+	// Blank password on a secured network: activate an existing saved profile directly
+	// without invoking `nmcli dev wifi connect` (which fails on netplan profiles).
+	if req.Password == "" && !isOpen {
+		uuid, err := findSavedWifiUUID(s, iface, ssid)
+		if err != nil {
+			return err
+		}
+		if uuid == "" {
+			return errors.New("no saved profile; enter password")
+		}
+		out, err := runPrivileged(s, 25*time.Second, "nmcli", "con", "up", "uuid", uuid, "ifname", iface)
+		if err != nil {
+			return errors.New(cleanCmdError(out, err))
+		}
+		return nil
+	}
+
+	// Create/replace a clean CZHax profile and activate it (avoids nmcli's
+	// `802-11-wireless-security.key-mgmt: property is missing` bug on netplan profiles).
+	conName := "czhax-" + iface + "-" + ssid
+	deleteConnectionsByName(s, conName)
+
+	addArgs := []string{"con", "add", "type", "wifi", "con-name", conName, "ifname", iface, "ssid", ssid}
+	if req.Hidden {
+		addArgs = append(addArgs, "802-11-wireless.hidden", "yes")
+	}
+	if !isOpen {
+		keyMgmt, secProp := wifiSecParams(req.Security)
+		addArgs = append(addArgs, "wifi-sec.key-mgmt", keyMgmt, secProp, req.Password)
+	}
+
+	if out, err := runPrivileged(s, 10*time.Second, "nmcli", addArgs...); err != nil {
+		return errors.New(cleanCmdError(out, err))
+	}
+
+	if out, err := runPrivileged(s, 25*time.Second, "nmcli", "con", "up", "id", conName, "ifname", iface); err != nil {
+		_, _ = runPrivileged(s, 5*time.Second, "nmcli", "con", "delete", "id", conName)
 		return errors.New(cleanCmdError(out, err))
 	}
 	return nil
+}
+
+func wifiSecParams(security string) (keyMgmt, secretProp string) {
+	sec := strings.ToUpper(strings.TrimSpace(security))
+	switch {
+	case strings.Contains(sec, "WEP"):
+		return "none", "wifi-sec.wep-key0"
+	case strings.Contains(sec, "SAE") && !strings.Contains(sec, "PSK") && !strings.Contains(sec, "WPA2"):
+		return "sae", "wifi-sec.psk"
+	case strings.Contains(sec, "WPA3") && !strings.Contains(sec, "WPA2") && !strings.Contains(sec, "PSK"):
+		return "sae", "wifi-sec.psk"
+	default:
+		return "wpa-psk", "wifi-sec.psk"
+	}
+}
+
+func findSavedWifiUUID(s scanner, iface, ssid string) (string, error) {
+	out, err := runPrivileged(s, 5*time.Second, "nmcli", "-t", "--escape", "yes", "-f", "UUID,NAME,TYPE", "con", "show")
+	if err != nil {
+		return "", errors.New(cleanCmdError(out, err))
+	}
+	fallbackUUID := ""
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		fields := splitNmcliTerseLine(line)
+		if len(fields) < 3 || fields[2] != "802-11-wireless" {
+			continue
+		}
+		uuid := strings.TrimSpace(fields[0])
+		if uuid == "" {
+			continue
+		}
+		fOut, fErr := runPrivileged(s, 5*time.Second, "nmcli", "-g", "802-11-wireless.ssid,connection.interface-name", "con", "show", "uuid", uuid)
+		if fErr != nil {
+			continue
+		}
+		parts := strings.Split(strings.ReplaceAll(fOut, "\r", ""), "\n")
+		profSSID := ""
+		profIface := ""
+		if len(parts) >= 1 {
+			profSSID = parts[0]
+		}
+		if len(parts) >= 2 {
+			profIface = strings.TrimSpace(parts[1])
+		}
+		if profSSID != ssid {
+			continue
+		}
+		if profIface == iface {
+			return uuid, nil
+		}
+		if profIface == "" && fallbackUUID == "" {
+			fallbackUUID = uuid
+		}
+	}
+	return fallbackUUID, nil
+}
+
+func deleteConnectionsByName(s scanner, conName string) {
+	out, err := runPrivileged(s, 5*time.Second, "nmcli", "-t", "--escape", "yes", "-f", "UUID,NAME,TYPE", "con", "show")
+	if err != nil {
+		return
+	}
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		fields := splitNmcliTerseLine(line)
+		if len(fields) >= 2 && fields[1] == conName {
+			_, _ = runPrivileged(s, 5*time.Second, "nmcli", "con", "delete", "uuid", strings.TrimSpace(fields[0]))
+		}
+	}
 }
 
 func runPrivileged(s scanner, timeout time.Duration, bin string, args ...string) (string, error) {
