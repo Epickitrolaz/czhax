@@ -62,6 +62,17 @@ type wifiRefreshedMsg struct {
 	ifaces []wifi.Interface
 }
 
+type wifiNetworksScannedMsg struct {
+	iface string
+	nets  []wifi.Network
+	err   error
+}
+
+type wifiConnectDoneMsg struct {
+	req wifi.ConnectRequest
+	err error
+}
+
 type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
@@ -82,6 +93,7 @@ type AppModel struct {
 	Status    StatusView
 	System    SystemView
 	Wifi      WifiView
+	WifiScan  WifiScanView
 	Bluetooth BluetoothView
 	Help      HelpView
 
@@ -106,6 +118,7 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		Focus:      FocusTabs,
 		System:     NewSystemView(),
 		Wifi:       NewWifiView(),
+		WifiScan:   NewWifiScanView(),
 		Bluetooth:  NewBluetoothView(),
 	}
 }
@@ -123,6 +136,20 @@ func (m AppModel) Init() tea.Cmd {
 func collectWifiCmd() tea.Cmd {
 	return func() tea.Msg {
 		return wifiRefreshedMsg{ifaces: wifi.Collect()}
+	}
+}
+
+func scanWifiNetworksCmd(iface string) tea.Cmd {
+	return func() tea.Msg {
+		nets, err := wifi.ScanNetworks(iface)
+		return wifiNetworksScannedMsg{iface: iface, nets: nets, err: err}
+	}
+}
+
+func connectWifiNetworkCmd(req wifi.ConnectRequest) tea.Cmd {
+	return func() tea.Msg {
+		err := wifi.ConnectNetwork(req)
+		return wifiConnectDoneMsg{req: req, err: err}
 	}
 }
 
@@ -171,7 +198,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wifiRefreshedMsg:
 		m.Wifi.SetInterfaces(msg.ifaces)
+		m.WifiScan.SyncInterfaces(msg.ifaces)
 		return m, nil
+
+	case wifiNetworksScannedMsg:
+		m.WifiScan.SetScanResult(msg.iface, msg.nets, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Scan failed")
+		}
+		return m, m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface))
+
+	case wifiConnectDoneMsg:
+		m.WifiScan.SetConnectResult(msg.req, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Connect failed")
+		}
+		m.Snap = sysinfo.Collect()
+		scanIface := m.WifiScan.EffectiveScanIface()
+		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface))
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
@@ -280,6 +324,20 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
+		if k == "esc" {
+			m.WifiScan.HandleEsc()
+			return m, nil
+		}
+		if submit, handled := m.WifiScan.HandleTextKey(msg); handled {
+			if submit {
+				req := m.WifiScan.BuildConnectRequest()
+				return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
+			}
+			return m, nil
+		}
+	}
+
 	switch k {
 	case "?":
 		m.ShowHelp = true
@@ -294,7 +352,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.Bluetooth.Adapters) == 0 {
 			m.Bluetooth.Scanning = true
 		}
-		return m, tea.Batch(m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd())
+		cmds := []tea.Cmd{m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd()}
+		if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.Mode == scanModeList && !m.WifiScan.Scanning {
+			iface := m.WifiScan.EffectiveScanIface()
+			m.WifiScan.StartScan()
+			cmds = append(cmds, scanWifiNetworksCmd(iface))
+		}
+		return m, tea.Batch(cmds...)
 	case "q":
 		if m.Cfg.ConfirmQuit {
 			m.ConfirmExit = true
@@ -317,6 +381,14 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.Focus = FocusContent
 			if m.ActiveView == ViewSystem {
 				m.System.RefreshBootState()
+			} else if m.ActiveView == ViewWiFi {
+				m.WifiScan.SyncInterfaces(m.Wifi.Interfaces)
+				if !m.WifiScan.HasScanned && !m.WifiScan.Scanning {
+					iface := m.WifiScan.EffectiveScanIface()
+					m.WifiScan.StartScan()
+					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+				}
+				return m, collectWifiCmd()
 			} else if m.ActiveView == ViewStatus {
 				switch m.ActiveTabs[ViewStatus] {
 				case StatusTabWiFi:
@@ -376,11 +448,79 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	}
 
 	if k == "esc" {
+		if m.ActiveView == ViewWiFi && m.WifiScan.HandleEsc() {
+			return m, nil
+		}
 		m.Focus = FocusTabs
 		return m, nil
 	}
 
 	switch m.ActiveView {
+	case ViewWiFi:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		switch m.WifiScan.Mode {
+		case scanModeList:
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveNetwork(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveNetwork(1)
+			case m.isLeft(k):
+				m.WifiScan.CycleScanIface(-1)
+			case m.isRight(k) || k == "i":
+				m.WifiScan.CycleScanIface(1)
+			case k == "s":
+				if !m.WifiScan.Scanning {
+					iface := m.WifiScan.EffectiveScanIface()
+					m.WifiScan.StartScan()
+					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+				}
+			case k == "enter":
+				if len(m.WifiScan.Networks) == 0 {
+					if !m.WifiScan.Scanning {
+						iface := m.WifiScan.EffectiveScanIface()
+						m.WifiScan.StartScan()
+						return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+					}
+				} else {
+					m.WifiScan.OpenDetail()
+				}
+			case k == "c":
+				m.WifiScan.BeginConnect(scanModeList)
+			}
+			return m, nil
+
+		case scanModeDetail:
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveDetailScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.WifiScan.MoveDetailScroll(1, mainW, bodyH, pal)
+			case k == "enter" || k == "c":
+				m.WifiScan.BeginConnect(scanModeDetail)
+			}
+			return m, nil
+
+		case scanModePickIface:
+			if m.WifiScan.Connecting {
+				return m, nil
+			}
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveIfaceCursor(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveIfaceCursor(1)
+			case k == "enter":
+				if m.WifiScan.ConfirmConnectIface() {
+					req := m.WifiScan.BuildConnectRequest()
+					return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
+				}
+			}
+			return m, nil
+		}
+		return m, nil
+
 	case ViewStatus:
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
@@ -610,6 +750,8 @@ func (m AppModel) View() string {
 	switch {
 	case m.ShowHelp:
 		mainLines = m.Help.RenderLines(mainW, bodyH, pal)
+	case m.ActiveView == ViewWiFi:
+		mainLines = m.WifiScan.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewSystem:
 		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
 	default:
@@ -678,6 +820,43 @@ func (m AppModel) currentHints() []Hint {
 			{Key: "r", Desc: "ref"},
 			{Key: "?", Desc: "help"},
 			{Key: "q", Desc: "quit"},
+		}
+	}
+	if m.ActiveView == ViewWiFi {
+		switch m.WifiScan.Mode {
+		case scanModeDetail:
+			return []Hint{
+				{Key: "⏎", Desc: "conn"},
+				{Key: "↑↓", Desc: "scr"},
+				{Key: "Esc", Desc: "back"},
+				{Key: "q", Desc: "quit"},
+			}
+		case scanModePickIface:
+			return []Hint{
+				{Key: "↑↓", Desc: "if"},
+				{Key: "⏎", Desc: "use"},
+				{Key: "Esc", Desc: "back"},
+				{Key: "q", Desc: "quit"},
+			}
+		case scanModeSSID:
+			return []Hint{
+				{Key: "⏎", Desc: "next"},
+				{Key: "Esc", Desc: "back"},
+			}
+		case scanModePassword:
+			return []Hint{
+				{Key: "⏎", Desc: "conn"},
+				{Key: "Tab", Desc: "vis"},
+				{Key: "Esc", Desc: "back"},
+			}
+		default:
+			return []Hint{
+				{Key: "⏎", Desc: "info"},
+				{Key: "s", Desc: "scan"},
+				{Key: "←→", Desc: "if"},
+				{Key: "c", Desc: "conn"},
+				{Key: "Esc", Desc: "tabs"},
+			}
 		}
 	}
 	if m.ActiveView == ViewSystem {

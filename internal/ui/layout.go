@@ -13,6 +13,7 @@ type ViewID int
 
 const (
 	ViewStatus ViewID = iota
+	ViewWiFi
 	ViewSystem
 	viewCount
 )
@@ -21,6 +22,10 @@ const (
 	StatusTabDevice = iota
 	StatusTabWiFi
 	StatusTabBT
+)
+
+const (
+	WiFiTabScan = iota
 )
 
 type ViewDef struct {
@@ -32,6 +37,7 @@ type ViewDef struct {
 
 var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
+	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan"}},
 	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
 }
 

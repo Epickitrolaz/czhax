@@ -25,7 +25,8 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Horizontal tabs"),
 		" " + sec.Render("Enter     ") + txt.Render("Enter tab content"),
 		" " + sec.Render("Esc       ") + txt.Render("Return to tabs"),
-		" " + sec.Render("r         ") + txt.Render("Refresh device status"),
+		" " + sec.Render("r         ") + txt.Render("Refresh / rescan"),
+		" " + sec.Render("s / c     ") + txt.Render("WiFi scan / connect"),
 		" " + sec.Render("?         ") + txt.Render("Toggle help"),
 		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
 	}
