@@ -80,7 +80,7 @@ jobs:
           set -euo pipefail
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libc6:i386 zlib1g:i386 gawk bison flex qpdf xxd zlib1g-dev
+          sudo apt-get install -y -qq libc6:i386 zlib1g:i386 gawk bison flex libfl-dev qpdf xxd zlib1g-dev
           NEXMON_MONITOR=1 ./firmware/nexmon/build-firmware.sh \
             --fw fw-in/cyfmac43439-sdio.bin \
             --clm fw-in/cyfmac43439-sdio.clm_blob \

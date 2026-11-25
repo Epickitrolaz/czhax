@@ -117,6 +117,8 @@ need_apt=0
 for t in git gcc make python3 xxd patch gawk bison flex zlib-flate; do
 	command -v "$t" >/dev/null 2>&1 || need_apt=1
 done
+# nexmon's b43 assembler links -ll, which only libfl-dev provides on Debian
+compgen -G "/usr/lib/*/libl.a" >/dev/null || need_apt=1
 case "$(uname -m)" in
 	x86_64|i686|i386) [ -e /lib/ld-linux.so.2 ] || need_apt=1; libs="libc6:i386 zlib1g:i386"; farch=i386 ;;
 	aarch64|armv7l)
@@ -135,8 +137,8 @@ if [ "$need_apt" = 1 ]; then
 	log "installing build dependencies"
 	$SUDO dpkg --print-foreign-architectures | grep -qx "$farch" || $SUDO dpkg --add-architecture "$farch"
 	$SUDO apt-get update -qq
-	$SUDO apt-get install -y -qq git build-essential python3 xxd patch bison flex gawk \
-		qpdf zlib1g-dev $libs >/dev/null
+	$SUDO apt-get install -y -qq git build-essential python3 xxd patch bison flex libfl-dev \
+		gawk qpdf zlib1g-dev $libs >/dev/null
 fi
 
 # ---------------------------------------------------------- nexmon source ---
