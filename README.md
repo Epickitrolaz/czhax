@@ -6,9 +6,50 @@
 
 ## Install & Update on Your Cardputer Zero
 
+### One installer for everything
+
+[`install.sh`](install.sh) is an interactive installer. Run it on the board and pick what you want:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Epickitrolaz/czhax/main/install.sh | sudo bash
+```
+
+```
+CZHax installer - M5Stack Cardputer Zero
+
+  1) Cardputer setup     display, keyboard, audio, console, services
+  2) Wi-Fi monitor mode  nexmon firmware + patched brcmfmac (injection too)
+  3) CZHax TUI           the terminal UI itself
+  4) Pentest packages    aircrack-ng, hcxdumptool, mdk4, pixiewps, ...
+
+  a) All of the above
+  q) Quit
+```
+
+It then asks only about the options that matter for your selection (tty1 autologin, ACT LED, full upgrade first, `~/.local/bin` vs `/usr/local/bin`, …) and everything else keeps its default. The same choices are available as flags for scripted installs:
+
+```sh
+sudo ./install.sh --all          # cardputer + nexmon + czhax + packages
+sudo ./install.sh --cardputer --no-autologin --disable-leds
+sudo ./install.sh --nexmon --nexmon-host pi@100.64.0.1   # build firmware here, finish on the board
+sudo ./install.sh --czhax --version v0.2.0 --user
+sudo ./install.sh --packages
+```
+
+With no component flag and no terminal (e.g. `curl | bash` in CI) it keeps the old behaviour and installs the CZHax binary only.
+
+What each component does:
+
+| component | contents |
+| --- | --- |
+| **Cardputer setup** | [`scripts/setup-cardputer.sh`](scripts/setup-cardputer.sh): `m5stack-linux-dtoverlays` for the LCD/keyboard/audio/battery/RTC, `fb_load` disabled, `en_US.UTF-8` + Terminus 6×12 console, `cardputer-keymap` and `cardputer-brightness` services, tty1 autologin |
+| **Wi-Fi monitor mode** | [`firmware/nexmon`](firmware/nexmon): patched CYW43439 firmware + nexmon `brcmfmac` — monitor mode with radiotap and frame injection (`airmon-ng`, `aireplay-ng`, `mdk4` all work). Builds the firmware on x86_64, or the driver plus a firmware hand-off on the board itself |
+| **CZHax TUI** | downloads the latest release binary, verifies its SHA256 and installs it to `/usr/local/bin/czhax` |
+| **Pentest packages** | `aircrack-ng`, `hcxtools`, `hcxdumptool`, `mdk4`, `pixiewps`, `reaver`, `tshark`, `nmap`, `macchanger`, `hostapd`, `dnsmasq`, `bettercap`, … (only those available in your repos) |
+
 ### Fresh Raspberry Pi OS Lite Setup (Drivers, Keymap & Console)
 
-If you just flashed a clean **Raspberry Pi OS Lite (Debian Trixie, 64-bit)** SD card, run the hardware setup script first over SSH to build the CardputerZero drivers and configure the display, keyboard, and brightness controls:
+If you prefer the hardware step on its own, run the setup script over SSH to build the CardputerZero drivers and configure the display, keyboard, and brightness controls:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Epickitrolaz/czhax/main/scripts/setup-cardputer.sh | sudo bash
