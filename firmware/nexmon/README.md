@@ -98,6 +98,14 @@ enabled) and `airmon-ng stop wlan0mon` restores the station interface cleanly.
 `airmon-ng check kill` should **not** be used when another interface is carrying
 your network — it kills NetworkManager and would take that link down with it.
 
+### If the chip stops answering
+
+After many `modprobe -r`/`modprobe` cycles on top of monitor-mode use the CYW4349
+can wedge: `brcmf_attach: dongle is not responding: err=-84` with
+`brcmf_sdio_txfail` lines, and no `wlan0`. This is not a bad firmware image —
+reloading does not clear it, a **power cycle does**. Reboot before concluding
+that a newly built image is broken.
+
 ### Building the monitor hook
 
 `monitormode.c` installs a ROM flash patch, so the build keeps it out unless you
@@ -137,32 +145,36 @@ would boot-loop the board because WiFi is auto-loaded; that is what RESTORE.txt
 is for. It cannot brick the chip: no ROM, eFUSE/OTP, calibration or bootloader
 is touched, and the radio/PHY registers are never written by this patch set.
 
-## Build
+## Build and install
 
-Everything at once, on the board:
-
-```sh
-sudo ./provision.sh
-```
-
-It installs the build dependencies, clones nexmon at the pinned commit
-(~2 GB, it bundles three cross toolchains; only the first run pays this),
-builds the patched firmware with the monitor hook, builds `brcmfmac.ko` for the
-running kernel, and installs both via `install.sh`. Useful variants:
+One command, from an x86_64 workstation (recommended — it builds the firmware
+here where nexmon's bundled toolchain runs, then builds the driver and installs
+on the board over SSH):
 
 ```sh
-sudo ./provision.sh --no-install     # build only
-sudo ./provision.sh --driver-only    # kernel module only
-sudo ./provision.sh --fw-only        # firmware only
-sudo ./provision.sh --no-monitor     # firmware without the ROM monitor patch
-NEXMON_SRC=/path/to/nexmon sudo ./provision.sh   # reuse an existing checkout
+./provision.sh --host pi@100.91.72.108
 ```
 
-`provision.sh` always patches a *stock* firmware: it prefers
-`/boot/firmware/nexmon-stock/cyfmac43439-sdio.bin`, refuses a file that already
-contains the `nexmon` version string, and accepts `--fw` to point somewhere else.
+The workstation needs passwordless sudo on the board (`sudo -n true` must work)
+and the vendor blobs are pulled from the board's stock backup automatically.
 
-The individual stages are usable on their own:
+Running it on the board only works when nexmon's bundled `arm-none-eabi`
+toolchain can run there: its `cc1` links against `libisl.so.10`, which Debian 13
+does not ship for armhf, so in practice the workstation path above is the way.
+
+Options:
+
+```sh
+--host USER@HOST   build firmware locally, driver + install on the target
+--no-install       build only
+--fw-only          skip the kernel module
+--driver-only      skip the firmware
+--no-monitor       firmware without the ROM monitor patch
+--fw FILE          vendor firmware to patch
+--clm FILE         CLM blob to embed
+```
+
+The stages are also usable on their own:
 
 ```sh
 # firmware only (needs the vendor blobs)
@@ -174,10 +186,11 @@ sudo apt install linux-source-6.18 git build-essential
 ./driver/build-driver.sh
 ```
 
-The firmware build needs nexmon's bundled 32-bit `arm-none-eabi` toolchain: on
-x86_64 hosts that means `dpkg --add-architecture i386 && apt install libc6:i386
-zlib1g:i386`, on arm64 hosts `dpkg --add-architecture armhf && apt install
-libc6:armhf zlib1g:armhf`. `provision.sh` handles this itself.
+`provision.sh` always patches a *stock* firmware: it prefers
+`/boot/firmware/nexmon-stock/cyfmac43439-sdio.bin`, refuses a file that already
+contains the `nexmon` version string, and accepts `--fw` to point somewhere else.
+Build dependencies (`gawk`, `bison`, `flex`, `qpdf`, `xxd` and the 32-bit loader
+for the toolchain) are installed automatically.
 
 ## Install / rollback
 
