@@ -1,5 +1,5 @@
---- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
-+++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+--- a/brcmfmac/core.c
++++ b/brcmfmac/core.c
 @@ -30,6 +30,24 @@
  #include "pcie.h"
  #include "common.h"
@@ -161,8 +161,8 @@
  	brcmf_sdio_exit();
  	brcmf_usb_exit();
  	brcmf_pcie_exit();
---- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
-+++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+--- a/brcmfmac/cfg80211.c
++++ b/brcmfmac/cfg80211.c
 @@ -5,6 +5,8 @@
  
  /* Toplevel file. Relies on dhd_linux.c to send commands to the dongle. */
