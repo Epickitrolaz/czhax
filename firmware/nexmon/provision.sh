@@ -26,6 +26,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="Epickitrolaz/czhax"
+FW_ASSET="czhax-firmware-bcm43439a0-7.95.75.bin"
 WORK="${WORK:-}"
 NEXMON_SRC="${NEXMON_SRC:-}"
 HOST=""
@@ -58,6 +60,7 @@ if [ -z "$WORK" ]; then
 	if [ "$(id -u)" = 0 ]; then WORK=/root/nexmon-work; else WORK="$HOME/nexmon-work"; fi
 fi
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 # optional: SSH_IDENTITY=/path/to/key
@@ -114,9 +117,18 @@ need_apt=0
 for t in git gcc make python3 xxd patch gawk bison flex zlib-flate; do
 	command -v "$t" >/dev/null 2>&1 || need_apt=1
 done
+# nexmon's b43 assembler links -ll, which only libfl-dev provides on Debian
+compgen -G "/usr/lib/*/libl.a" >/dev/null || need_apt=1
 case "$(uname -m)" in
 	x86_64|i686|i386) [ -e /lib/ld-linux.so.2 ] || need_apt=1; libs="libc6:i386 zlib1g:i386"; farch=i386 ;;
-	aarch64|armv7l) [ -e /lib/ld-linux-armhf.so.3 ] || need_apt=1; libs="libc6:armhf zlib1g:armhf"; farch=armhf ;;
+	aarch64|armv7l)
+		[ -e /lib/ld-linux-armhf.so.3 ] || need_apt=1
+		libs="libc6:armhf zlib1g:armhf"
+		if [ "$DO_FW" = 1 ]; then
+			libs="$libs libgmp10:armhf libmpc3:armhf libstdc++6:armhf"
+		fi
+		farch=armhf
+		;;
 	*) die "unsupported host $(uname -m)" ;;
 esac
 if [ "$need_apt" = 1 ]; then
@@ -125,8 +137,8 @@ if [ "$need_apt" = 1 ]; then
 	log "installing build dependencies"
 	$SUDO dpkg --print-foreign-architectures | grep -qx "$farch" || $SUDO dpkg --add-architecture "$farch"
 	$SUDO apt-get update -qq
-	$SUDO apt-get install -y -qq git build-essential python3 xxd patch bison flex gawk \
-		qpdf zlib1g-dev $libs >/dev/null
+	$SUDO apt-get install -y -qq git build-essential python3 xxd patch bison flex libfl-dev \
+		gawk qpdf zlib1g-dev $libs >/dev/null
 fi
 
 # ---------------------------------------------------------- nexmon source ---
@@ -159,21 +171,85 @@ fi
 
 # -------------------------------------------------------------- firmware ---
 OUT_FW="$WORK/out/43439A0-7.95.75-nexmon.bin"
+# A prebuilt bundle carries only the bytes our patch changes, so the firmware
+# can always be installed even where the toolchain cannot run.
+BUNDLE="$HERE/prebuilt/bcm43439a0-7.95.75-nexmon.json"
+# nexmon's bundled toolchain is a 32-bit ARM host binary on arm64 boards; its
+# cc1 needs mpfr (ABI 4) and isl 0.10, which Debian 13 does not ship. We carry
+# both here so the firmware can still be built natively on the board.
+HOST_LIBS="$HERE/prebuilt/armhf"
+
+case "$(uname -m)" in
+	x86_64|i686|i386) TC=gcc-arm-none-eabi-5_4-2016q2-linux-x86 ;;
+	aarch64|armv7l|armv6l) TC=gcc-arm-none-eabi-5_4-2016q2-linux-armv7l ;;
+	*) TC="" ;;
+esac
+
+toolchain_runs() {
+	[ -n "$TC" ] && [ -x "$NEXMON/buildtools/$TC/bin/arm-none-eabi-gcc" ] || return 1
+	printf 'int x;\n' | "$NEXMON/buildtools/$TC/bin/arm-none-eabi-gcc" -x c -c -o /dev/null - >/dev/null 2>&1
+}
+
+if [ "$DO_FW" = 1 ] && [ -d "$HOST_LIBS" ]; then
+	export LD_LIBRARY_PATH="$HOST_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+# Prebuilt firmware from the GitHub release: no toolchain, no vendor blob of
+# its own. Verified against the release's checksums.txt.
+fetch_release_firmware() {
+	local tag ver base tmp want got
+	tag="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' \
+		"https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+	ver="${tag##*/}"
+	case "$ver" in ""|latest|releases) return 1 ;; esac
+	base="https://github.com/${REPO}/releases/download/${ver}"
+	tmp="$(mktemp -d)"
+	if ! curl -fsSL --retry 3 "${base}/${FW_ASSET}" -o "$tmp/fw.bin" 2>/dev/null; then
+		rm -rf "$tmp"; return 1
+	fi
+	if ! curl -fsSL --retry 3 "${base}/checksums.txt" -o "$tmp/sums" 2>/dev/null; then
+		rm -rf "$tmp"; return 1
+	fi
+	want="$(grep " ${FW_ASSET}\$" "$tmp/sums" | awk '{print $1}')"
+	got="$(sha256sum "$tmp/fw.bin" | awk '{print $1}')"
+	if [ -z "$want" ] || [ "$want" != "$got" ]; then
+		warn "release firmware checksum mismatch, ignoring it"
+		rm -rf "$tmp"; return 1
+	fi
+	mkdir -p "$(dirname "$OUT_FW")"
+	mv "$tmp/fw.bin" "$OUT_FW"
+	rm -rf "$tmp"
+	log "downloaded $FW_ASSET from release $ver (sha256 ${got%${got#????????????}})"
+	return 0
+}
+
 if [ "$DO_FW" = 1 ]; then
-	log "building the patched firmware (monitor hook: $MONITOR)"
-	NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
-		--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
-		--work "$WORK/fw" --out "$OUT_FW" || {
-		cat >&2 <<'EOM'
+	have_fw=0
 
-Building the firmware failed. The usual cause on arm64 boards is nexmon's
-bundled arm-none-eabi toolchain, whose cc1 needs libisl.so.10 (not packaged in
-Debian 13). Build on an x86_64 workstation instead:
+	# Prefer the firmware published with the release (checksum verified); no
+	# toolchain, no vendor blob, nothing compiled. NEXMON_BUILD=1 forces a
+	# source build instead, which is what patch development needs.
+	if [ "${NEXMON_BUILD:-0}" != 1 ] && fetch_release_firmware; then
+		have_fw=1
+	fi
 
-    ./provision.sh --host pi@100.91.72.108
-EOM
-		exit 1
-	}
+	if [ "$have_fw" = 0 ] && [ -n "$NEXMON" ] && toolchain_runs; then
+		log "building the patched firmware on this machine (monitor hook: $MONITOR)"
+		if NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
+			--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
+			--work "$WORK/fw" --out "$OUT_FW"; then
+			have_fw=1
+		else
+			warn "firmware build failed, will try the patch bundle"
+		fi
+	fi
+
+	if [ "$have_fw" = 0 ]; then
+		[ -f "$BUNDLE" ] || die "no release firmware, no toolchain and no $BUNDLE"
+		log "applying the prebuilt patch bundle (no toolchain needed)"
+		mkdir -p "$(dirname "$OUT_FW")"
+		python3 "$HERE/tools/apply-bundle.py" "$FW_IN" "$BUNDLE" "$OUT_FW"
+	fi
 fi
 
 # ------------------------------------------------- native driver + install ---
@@ -185,7 +261,12 @@ if [ -z "$HOST" ]; then
 	fi
 	if [ "$DO_INSTALL" = 1 ]; then
 		[ "$(id -u)" = 0 ] || die "installing needs root (or pass --no-install)"
-		args=(--fw "$OUT_FW")
+		args=()
+		if [ "$DO_FW" = 1 ]; then
+			args+=(--fw "$OUT_FW")
+		else
+			args+=(--module-only)
+		fi
 		if [ "$DO_DRV" = 1 ]; then
 			args+=(--module "$OUT_MOD")
 		fi

@@ -16,7 +16,6 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
 
 # nexmon commit this port was developed against
 NEXMON_URL="https://github.com/seemoo-lab/nexmon.git"
@@ -30,6 +29,7 @@ CLM_PATH="${CLM_PATH:-/lib/firmware/cypress/cyfmac43439-sdio.clm_blob}"
 WORK="${WORK:-$HOME/nexmon-build}"
 OUT="${OUT:-$HERE/build/43439A0-7.95.75-nexmon.bin}"
 NEXMON_OVERRIDE=""
+BUNDLE_OUT=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
 	--work) WORK="$2"; shift 2 ;;
 	--out) OUT="$2"; shift 2 ;;
 	--nexmon) NEXMON_OVERRIDE="$2"; shift 2 ;;
+	--bundle-out) BUNDLE_OUT="$2"; shift 2 ;;
 	-h|--help) sed -n '2,20p' "$0"; exit 0 ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
@@ -115,6 +116,13 @@ echo ">> building the patched firmware (monitor hook: ${NEXMON_MONITOR:-0})"
 
 mkdir -p "$(dirname "$OUT")"
 cp "$NEXMON/patches/bcm43439a0/$FW_VER_DIR/nexmon/43439A0.bin" "$OUT"
+
+# --bundle-out keeps the prebuilt bundle in sync with a source build: it only
+# carries the bytes the patch changes, so the board can apply it to its own
+# stock image without needing this toolchain.
+if [ -n "$BUNDLE_OUT" ]; then
+	python3 "$HERE/tools/mk-bundle.py" "$FW_PATH" "$OUT" "$BUNDLE_OUT"
+fi
 
 echo
 echo "patched firmware: $OUT"

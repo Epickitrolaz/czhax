@@ -101,9 +101,10 @@ need_root() { [[ "$(id -u)" -eq 0 ]] || die "this step needs root, re-run with s
 have() { command -v "$1" >/dev/null 2>&1; }
 
 ask() { # ask <prompt> <default y|n>
-  local prompt="$1" def="$2" ans
+  local prompt="$1" def="$2" ans=""
   local hint="[Y/n]"; [[ "$def" == "n" ]] && hint="[y/N]"
-  read -r -p "$prompt $hint " ans </dev/tty || ans=""
+  printf '%s %s ' "$prompt" "$hint" >/dev/tty
+  read -r ans </dev/tty || ans=""
   ans="${ans:-$def}"
   [[ "${ans,,}" == "y" ]]
 }
@@ -118,15 +119,24 @@ fetch_source() {
   SRC_DIR="$TMP_DIR/src"
   log "fetching $REPO@$SRC_REF"
   mkdir -p "$SRC_DIR"
-  if have curl; then
-    curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
-      tar xz -C "$SRC_DIR" --strip-components=1
-  elif have wget; then
-    wget -qO- "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
-      tar xz -C "$SRC_DIR" --strip-components=1
-  else
-    die "curl or wget is required"
-  fi
+
+  # a branch or a tag: try refs/heads first, then refs/tags
+  local url got=""
+  for kind in heads tags; do
+    url="https://codeload.github.com/${REPO}/tar.gz/refs/${kind}/${SRC_REF}"
+    if have curl; then
+      if curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "$url" |
+        tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+    elif have wget; then
+      if wget -qO- --tries=3 --waitretry=2 "$url" |
+        tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+    else
+      die "curl or wget is required"
+    fi
+    [[ -n "$got" ]] && break
+    rm -rf "$SRC_DIR"; mkdir -p "$SRC_DIR"
+  done
+  [[ -n "$got" ]] || die "could not fetch $REPO@$SRC_REF (try --ref <branch-or-tag>)"
 }
 
 # -------------------------------------------------------------- czhax TUI ---
@@ -149,7 +159,7 @@ install_czhax() {
   if [[ "$version" == "latest" ]]; then
     local url tag
     if have curl; then
-      url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+      url="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
       tag="${url##*/}"
       if [[ -z "$tag" || "$tag" == "latest" ]]; then
         tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
@@ -170,8 +180,8 @@ install_czhax() {
   local tmp; tmp="$(mktemp -d)"
   log "downloading ${asset} (${version})"
   if have curl; then
-    curl -fL --progress-bar "${base}/${asset}" -o "${tmp}/${BIN_NAME}"
-    curl -fsSL "${base}/checksums.txt" -o "${tmp}/checksums.txt"
+    curl -fL --progress-bar --retry 3 --retry-delay 2 "${base}/${asset}" -o "${tmp}/${BIN_NAME}"
+    curl -fsSL --retry 3 --retry-delay 2 "${base}/checksums.txt" -o "${tmp}/checksums.txt"
   else
     wget -q --show-progress "${base}/${asset}" -O "${tmp}/${BIN_NAME}"
     wget -q "${base}/checksums.txt" -O "${tmp}/checksums.txt"
@@ -219,46 +229,16 @@ setup_nexmon() {
   chmod +x "$p" "$SRC_DIR/firmware/nexmon/driver/build-driver.sh" 2>/dev/null || true
 
   if [[ -n "$NEXMON_HOST" ]]; then
+    [[ "$(uname -m)" == "x86_64" ]] || die "--nexmon-host builds the firmware on the x86_64 machine that runs the installer; on the board just run the installer without it"
     log "nexmon: building the firmware here, finishing on $NEXMON_HOST"
     bash "$p" --host "$NEXMON_HOST"
     return
   fi
 
-  # The firmware half needs nexmon's bundled arm-none-eabi toolchain, which on
-  # arm64 needs libisl.so.10 (not in Debian 13). On the board itself we can
-  # still build/install the driver, so do that and explain the rest.
-  if [[ "$(uname -m)" == "x86_64" ]]; then
-    log "nexmon: building firmware and driver"
-    bash "$p"
-    return
-  fi
-
-  local fw="" cand
-  for cand in "$SRC_DIR/firmware/nexmon/build/"*.bin /root/nexmon-work/out/*.bin; do
-    if [[ -f "$cand" ]]; then fw="$cand"; break; fi
-  done
-
-  log "nexmon: building the driver for $(uname -r)"
-  bash "$p" --driver-only
-
-  if [[ -n "$fw" ]]; then
-    log "nexmon: installing firmware image $fw"
-    bash "$SRC_DIR/firmware/nexmon/install.sh" --fw "$fw" --module-only
-  else
-    cat <<EOF
-
-  The driver is installed, but this host cannot build the firmware image:
-  nexmon's bundled toolchain needs libisl.so.10, which Debian 13 does not ship
-  for arm64. Build it once from an x86_64 machine on the same network:
-
-      ./firmware/nexmon/provision.sh --host <user>@<this-board>
-
-  ...or copy a patched image over and run:
-
-      ./firmware/nexmon/install.sh --fw <image>.bin --module-only
-
-EOF
-  fi
+  # provision.sh builds the firmware from source on x86_64 and otherwise applies
+  # the prebuilt patch bundle to the stock image, so this works everywhere.
+  log "nexmon: installing firmware and driver"
+  bash "$p"
 }
 
 # ------------------------------------------------------- pentest packages ---
@@ -295,7 +275,7 @@ CZHax installer - M5Stack Cardputer Zero
   q) Quit
 
 EOF
-  printf 'Select [1-4, a, q]: '
+  printf 'Select [1-4, a, q]: ' >/dev/tty
   read -r choice </dev/tty || choice="q"
 
   case "${choice,,}" in
@@ -322,13 +302,10 @@ EOF
     if ask "  disable the Raspberry Pi ACT LED?" n; then CARD_LEDS=1; fi
     if ! ask "  run a full system upgrade first?" y; then CARD_SKIP_UPGRADE=1; fi
   fi
-  if [[ "$WANT_NEXMON" -eq 1 ]]; then
+  if [[ "$WANT_NEXMON" -eq 1 && "$(uname -m)" == "x86_64" ]]; then
     printf '\nWi-Fi monitor mode\n'
-    if [[ "$(uname -m)" != "x86_64" ]]; then
-      printf '  On this machine only the driver can be built.\n'
-      printf '  Build the firmware from an x86_64 host (user@host, Enter to skip): '
-      read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
-    fi
+    printf '  Push the result to a board over ssh (user@host, Enter to stay local): ' >/dev/tty
+    read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
   fi
   if [[ "$WANT_CZHAX" -eq 1 ]]; then
     if ask "  install czhax for the current user only (~/.local/bin)?" n; then USER_INSTALL=1; fi
@@ -351,7 +328,10 @@ if [[ "$COMPONENTS_GIVEN" -eq 0 ]]; then
   if [[ -t 0 ]]; then
     interactive_menu
   elif [[ -r /dev/tty && -w /dev/tty ]]; then
-    exec </dev/tty
+    # NOTE: do not `exec </dev/tty` here. When this script is piped into bash
+    # (curl ... | bash) the shell reads the script itself from stdin; pointing
+    # stdin at the terminal would make bash wait for the rest of the script on
+    # the keyboard. The interactive reads below explicitly use /dev/tty.
     interactive_menu
   else
     # non-interactive (curl | bash in CI, cron, …): keep the old behaviour

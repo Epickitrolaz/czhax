@@ -72,13 +72,60 @@ if [ "$WITH_DRIVER" = 1 ]; then
 fi
 
 # --- reload -------------------------------------------------------------
-modprobe -r brcmfmac_cyw 2>/dev/null || true
-modprobe -r brcmfmac 2>/dev/null || true
-sleep 1
+# Unloading only works when nothing is using the interface. Doing it half way
+# leaves the old firmware running while the new file sits on disk, and this chip
+# has a habit of wedging when monitor mode is entered on such a driver, so be
+# explicit instead of pretending the swap took effect.
+loaded() { lsmod | grep -qE "^brcmfmac(_cyw)?[[:space:]]"; }
+
+reboot_needed() {
+	cat <<EOM
+
+========================================================================
+ The new firmware/module is installed but NOT active yet.
+
+ $(printf '%s' "$1")
+ Reboot the board to load it:
+
+     sudo systemctl reboot
+
+ (Wi-Fi keeps working on the old firmware until then.)
+========================================================================
+EOM
+}
+
+if loaded; then
+	modprobe -r brcmfmac_cyw 2>/dev/null || true
+	modprobe -r brcmfmac 2>/dev/null || true
+	sleep 1
+	if loaded; then
+		reboot_needed "The driver was in use, so it could not be reloaded."
+		exit 0
+	fi
+fi
+
 modprobe brcmfmac_cyw 2>/dev/null || modprobe brcmfmac
-sleep 3
+sleep 4
+
+# Verify the chip really came up on the image we just installed: the version
+# string is compiled into the patch, so it can be compared.
+want=""
+if [ "$WITH_FW" = 1 ]; then
+	want="$(grep -ao 'nexmon.org: [^)]*' "$FW_DST" 2>/dev/null | head -n1 | sed 's/^nexmon.org: //')"
+fi
+got="$(dmesg | grep -a 'brcmf_c_preinit_dcmds: Firmware:' | tail -1)"
 
 echo
-dmesg | grep -E "brcmf_c_preinit_dcmds: Firmware:" | tail -1
+if [ -z "$got" ]; then
+	reboot_needed "The driver did not report a firmware version after reloading."
+	exit 0
+fi
+echo "$got"
+if [ -n "$want" ] && ! printf '%s' "$got" | grep -qF "$want"; then
+	reboot_needed "The running firmware is not the one just installed (wanted '$want')."
+	exit 0
+fi
+
 echo
+echo "active: $(printf '%s' "$got" | sed 's/.*version //')"
 echo "roll back with: sudo sh $BACKUP/restore.sh"

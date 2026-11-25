@@ -62,6 +62,34 @@ jobs:
           (cd dist && sha256sum czhax-linux-* > checksums.txt)
           ls -lh dist/
 
+      - name: Fetch the vendor CYW43439 firmware
+        run: |
+          set -euo pipefail
+          mkdir -p fw-in
+          # Raspberry Pi's firmware package, pinned: the blob nexmon patches and
+          # the one the board ships with.
+          curl -fsSL --retry 3 -o fw.deb \
+            https://archive.raspberrypi.com/debian/pool/main/f/firmware-nonfree/firmware-brcm80211_20260519-1~bpo13+1+rpt2_all.deb
+          dpkg-deb -x fw.deb fw-x
+          cp fw-x/usr/lib/firmware/cypress/cyfmac43439-sdio.bin fw-in/
+          cp fw-x/usr/lib/firmware/cypress/cyfmac43439-sdio.clm_blob fw-in/
+          echo "09e289c00944d8a50cc38760f9fc29b4  fw-in/cyfmac43439-sdio.bin" | md5sum -c -
+
+      - name: Build the nexmon firmware
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libc6:i386 zlib1g:i386 gawk bison flex libfl-dev qpdf xxd zlib1g-dev
+          NEXMON_MONITOR=1 ./firmware/nexmon/build-firmware.sh \
+            --fw fw-in/cyfmac43439-sdio.bin \
+            --clm fw-in/cyfmac43439-sdio.clm_blob \
+            --out dist/czhax-firmware-bcm43439a0-7.95.75.bin \
+            --bundle-out dist/czhax-firmware-bcm43439a0-7.95.75.json
+          cp fw-x/usr/share/doc/firmware-brcm80211/copyright dist/firmware-LICENCE.txt
+          (cd dist && sha256sum czhax-firmware-* >> checksums.txt)
+          ls -lh dist/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -86,4 +114,7 @@ jobs:
             dist/czhax-linux-arm64
             dist/czhax-linux-armv7
             dist/czhax-linux-amd64
+            dist/czhax-firmware-bcm43439a0-7.95.75.bin
+            dist/czhax-firmware-bcm43439a0-7.95.75.json
+            dist/firmware-LICENCE.txt
             dist/checksums.txt
