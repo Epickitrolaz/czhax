@@ -119,9 +119,9 @@ func RenderSidebarColumn(sideW, bodyH int, pal theme.Palette, cfg config.Config,
 	lines := make([]string, 0, bodyH)
 	for i := start; i < end; i++ {
 		vd := TopViews[i]
-		lbl := vd.Name
+		lbl := SidebarLabel(vd.Name)
 		if sideW < 8 {
-			lbl = vd.Short3
+			lbl = Truncate(vd.Short3, 3)
 		}
 		if ViewID(i) == active {
 			txt := FitLine(marker+lbl, sideW)

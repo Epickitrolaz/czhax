@@ -52,6 +52,7 @@ CZHax follows a **WiFi-Pineapple-inspired two-axis layout**:
 
 1. **Left Vertical Sidebar**: Lists top-level views defined in `TopViews` (`internal/ui/layout.go`).
    - Uses `Name` when `sideW >= 8` (e.g., `Status`), and 3-character `Short3` when `sideW < 8` (e.g., `Sts`).
+   - `Name` labels are capped at **6 visible characters** via `SidebarLabel` (`SidebarLabelMax`); longer names are truncated with `…`.
 2. **Top Horizontal Bar**: Lists horizontal sub-tabs for the active top-level view (`TopViews[activeView].Tabs`), with compact status (`Bat%`, `W`/`N`) right-aligned.
 3. **Right Content Pane**: Renders the active `(ViewID, TabIndex)` inside `(mainW, bodyH)`.
 

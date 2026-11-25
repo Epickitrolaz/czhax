@@ -29,7 +29,31 @@ const (
 
 type tickMsg time.Time
 type clearStatusMsg struct{}
-type startupRedrawMsg struct{}
+type startupRedrawMsg struct{ step int }
+
+// startupRedrawDelays schedules full repaints while the system is still
+// settling after boot. Kernel/systemd console messages write straight to the
+// VT and shift the TUI; a clear+repaint restores it until things go quiet.
+var startupRedrawDelays = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	5 * time.Second,
+	9 * time.Second,
+	14 * time.Second,
+	20 * time.Second,
+	30 * time.Second,
+	45 * time.Second,
+	60 * time.Second,
+}
+
+func scheduleStartupRedraw(step int) tea.Cmd {
+	if step < 0 || step >= len(startupRedrawDelays) {
+		return nil
+	}
+	return tea.Tick(startupRedrawDelays[step], func(time.Time) tea.Msg {
+		return startupRedrawMsg{step: step}
+	})
+}
 
 type updateDoneMsg struct {
 	res updater.Result
@@ -112,12 +136,14 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 
 func (m AppModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd()}
-	if os.Getenv("TERM") == "linux" {
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return startupRedrawMsg{}
-		}))
+	if isLinuxConsole() {
+		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
 	return tea.Batch(cmds...)
+}
+
+func isLinuxConsole() bool {
+	return os.Getenv("TERM") == "linux"
 }
 
 func collectWifiCmd() tea.Cmd {
@@ -182,7 +208,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case startupRedrawMsg:
-		return m, tea.ClearScreen
+		cmds := []tea.Cmd{tea.ClearScreen}
+		if next := scheduleStartupRedraw(msg.step + 1); next != nil {
+			cmds = append(cmds, next)
+		}
+		return m, tea.Batch(cmds...)
 
 	case updateDoneMsg:
 		m.System.Updating = false

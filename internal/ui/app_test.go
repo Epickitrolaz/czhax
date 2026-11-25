@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/wifi"
 )
 
@@ -134,6 +135,9 @@ func TestAllViewsAndSizes(t *testing.T) {
 				t.Fatalf("[%s] expected %q in WiFi view:\n%s", sz.name, want, wifiTabsView)
 			}
 		}
+		if strings.Contains(wifiTabsView, "(mon") {
+			t.Fatalf("[%s] expected bare Mode value, got monitor capability suffix:\n%s", sz.name, wifiTabsView)
+		}
 
 		// Enter WiFi content; right switches to wlan1, left returns to wlan0 (does not exit FocusContent)
 		m = sendKey(m, "enter")
@@ -151,6 +155,9 @@ func TestAllViewsAndSizes(t *testing.T) {
 			if !strings.Contains(wifiContent1, want) {
 				t.Fatalf("[%s] expected %q in wlan1 view:\n%s", sz.name, want, wifiContent1)
 			}
+		}
+		if strings.Contains(wifiContent1, "(mon") {
+			t.Fatalf("[%s] expected bare monitor mode, got capability suffix:\n%s", sz.name, wifiContent1)
 		}
 		m = sendKey(m, "down")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Status/WiFi/ScrollDown")
@@ -297,6 +304,39 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "?")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Help")
 		m = sendKey(m, "esc")
+	}
+}
+
+func TestStartupRedrawSchedule(t *testing.T) {
+	var prev time.Duration
+	for i, d := range startupRedrawDelays {
+		if d <= prev {
+			t.Fatalf("startup redraw delay %d (%s) is not increasing", i, d)
+		}
+		prev = d
+		if scheduleStartupRedraw(i) == nil {
+			t.Fatalf("expected a redraw command for step %d", i)
+		}
+	}
+	if scheduleStartupRedraw(len(startupRedrawDelays)) != nil {
+		t.Fatal("expected no redraw command past the end of the schedule")
+	}
+}
+
+func TestSidebarLabelsMaxSixChars(t *testing.T) {
+	for _, vd := range TopViews {
+		if got := lipgloss.Width(SidebarLabel(vd.Name)); got > SidebarLabelMax {
+			t.Fatalf("sidebar label for %q is %d cells, max is %d", vd.Name, got, SidebarLabelMax)
+		}
+	}
+	if got := SidebarLabel("VeryLongViewName"); got != "Very…" {
+		t.Fatalf("expected truncated sidebar label %q, got %q", "Very…", got)
+	}
+	lines := RenderSidebarColumn(8, 10, theme.HighContrast, config.Default(), ViewStatus, true)
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != 8 {
+			t.Fatalf("sidebar line %d has width %d, want 8: %q", i, got, line)
+		}
 	}
 }
 

@@ -23,11 +23,20 @@ const (
 	StatusTabBT
 )
 
+// SidebarLabelMax is the widest label a left sidebar entry may render.
+// Full names are truncated to this width; compact widths use Short3.
+const SidebarLabelMax = 6
+
 type ViewDef struct {
 	ID     ViewID
 	Name   string
 	Short3 string
 	Tabs   []string
+}
+
+// SidebarLabel returns the name that fits the left sidebar width budget.
+func SidebarLabel(name string) string {
+	return Truncate(strings.TrimSpace(name), SidebarLabelMax)
 }
 
 var TopViews = []ViewDef{
