@@ -33,6 +33,7 @@ internal/
   updater/updater.go       # Self-updater (GitHub Releases API + SHA256 verification + atomic replace)
   wifi/wifi.go             # Interface telemetry collected from /sys, ip, iw and ethtool
   wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
+  wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
   ui/
     layout.go              # TopViews registry, viewport/sidebar sizing, FitLine, SplitLinesPadded, MiniBar
     shell.go               # Top horizontal tab bar, left vertical sidebar, pane divider

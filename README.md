@@ -112,6 +112,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Scan nearby networks on any detected wireless interface (`nmcli`, falling back to `iw`)
   - Signal, security, channel, and in-use state per AP, with a detail view
   - Connect to open, WPA/WPA2/WPA3, or hidden networks; pick the target interface and reveal the passphrase while typing
+  - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax-captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
 - **System Tools (`System → Tools`)**:
   - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
   - **Restart CZHax**: In-place relaunch (`exec`) to load newly installed updates
@@ -122,7 +123,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
-  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `?` toggles help, `q` / `Ctrl+C` quits
+  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `?` toggles help, `q` / `Ctrl+C` quits
 
 ## Build from Source
 

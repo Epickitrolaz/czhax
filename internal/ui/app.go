@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -97,6 +98,13 @@ type wifiConnectDoneMsg struct {
 	err error
 }
 
+type wifiPentestDoneMsg struct {
+	res wifi.PentestResult
+	err error
+}
+
+type wifiPentestTickMsg struct{}
+
 type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
@@ -179,6 +187,19 @@ func connectWifiNetworkCmd(req wifi.ConnectRequest) tea.Cmd {
 	}
 }
 
+func runWifiPentestCmd(ctx context.Context, req wifi.PentestRequest) tea.Cmd {
+	return func() tea.Msg {
+		res, err := wifi.RunPentest(ctx, req)
+		return wifiPentestDoneMsg{res: res, err: err}
+	}
+}
+
+func wifiPentestTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return wifiPentestTickMsg{}
+	})
+}
+
 func collectBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
 		return bluetoothRefreshedMsg{adapters: bluetooth.Collect()}
@@ -242,6 +263,30 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Snap = sysinfo.Collect()
 		scanIface := m.WifiScan.EffectiveScanIface()
 		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface))
+
+	case wifiPentestDoneMsg:
+		m.WifiScan.SetPentestResult(msg.res, msg.err)
+		status := "Pentest done"
+		switch {
+		case msg.err != nil:
+			status = "Pentest failed"
+		case msg.res.HandshakeComplete:
+			status = "Handshake captured"
+		case msg.res.EAPOLFrames > 0:
+			status = fmt.Sprintf("Captured %d EAPOL", msg.res.EAPOLFrames)
+		case msg.res.DeauthFrames > 0:
+			status = fmt.Sprintf("Sent %d deauth", msg.res.DeauthFrames)
+		}
+		return m, tea.Batch(m.setStatus(status), collectWifiCmd())
+
+	case wifiPentestTickMsg:
+		if !m.WifiScan.PentestActive {
+			return m, nil
+		}
+		if !m.WifiScan.PentestStarted.IsZero() {
+			m.WifiScan.PentestElapsed = time.Since(m.WifiScan.PentestStarted)
+		}
+		return m, wifiPentestTickCmd()
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
@@ -354,6 +399,12 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Never leave a monitor interface behind: stop a run before quitting.
+	if m.WifiScan.PentestActive && (k == "ctrl+c" || k == "q") {
+		m.WifiScan.StopPentest()
+		return m, m.setStatus("Stopping pentest...")
+	}
+
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
 			m.WifiScan.HandleEsc()
@@ -374,6 +425,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.Help.Scroll = 0
 		return m, nil
 	case "r":
+		if m.WifiScan.PentestActive {
+			return m, m.setStatus("Pentest running")
+		}
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
 		if len(m.Wifi.Interfaces) == 0 {
@@ -452,6 +506,28 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleContentKey(k)
 }
 
+func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
+	if m.WifiScan.PentestActive {
+		return m, nil
+	}
+	net, ok := m.WifiScan.SelectedNetwork()
+	if !ok {
+		return m, m.setStatus("Select an AP first")
+	}
+	if wifi.ChannelNumber(net) <= 0 {
+		return m, m.setStatus("Unknown AP channel, rescan")
+	}
+	ctx, req, ok := m.WifiScan.StartPentest(mode)
+	if !ok {
+		return m, m.setStatus("Select an AP first")
+	}
+	return m, tea.Batch(
+		m.setStatus(mode.String()+"..."),
+		runWifiPentestCmd(ctx, req),
+		wifiPentestTickCmd(),
+	)
+}
+
 func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	if m.ActiveView == ViewSystem && m.System.Confirm != "" {
 		action := m.System.Confirm
@@ -492,6 +568,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		switch m.WifiScan.Mode {
 		case scanModeList:
 			switch {
+			case k == "w":
+				return m.startWifiPentest(wifi.PentestHandshake)
+			case k == "d":
+				return m.startWifiPentest(wifi.PentestDeauth)
+			case k == "b":
+				return m.startWifiPentest(wifi.PentestBoth)
 			case m.isUp(k):
 				m.WifiScan.MoveNetwork(-1)
 			case m.isDown(k):
@@ -523,6 +605,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 		case scanModeDetail:
 			switch {
+			case k == "w":
+				return m.startWifiPentest(wifi.PentestHandshake)
+			case k == "d":
+				return m.startWifiPentest(wifi.PentestDeauth)
+			case k == "b":
+				return m.startWifiPentest(wifi.PentestBoth)
 			case m.isUp(k):
 				m.WifiScan.MoveDetailScroll(-1, mainW, bodyH, pal)
 			case m.isDown(k):
@@ -857,9 +945,10 @@ func (m AppModel) currentHints() []Hint {
 		case scanModeDetail:
 			return []Hint{
 				{Key: "⏎", Desc: "conn"},
-				{Key: "↑↓", Desc: "scr"},
+				{Key: "b", Desc: "both"},
+				{Key: "w", Desc: "hs"},
+				{Key: "d", Desc: "deauth"},
 				{Key: "Esc", Desc: "back"},
-				{Key: "q", Desc: "quit"},
 			}
 		case scanModePickIface:
 			return []Hint{
@@ -879,12 +968,19 @@ func (m AppModel) currentHints() []Hint {
 				{Key: "Tab", Desc: "vis"},
 				{Key: "Esc", Desc: "back"},
 			}
+		case scanModePentest:
+			if m.WifiScan.PentestActive {
+				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+			}
+			return []Hint{{Key: "Esc", Desc: "back"}, {Key: "q", Desc: "quit"}}
 		default:
 			return []Hint{
 				{Key: "⏎", Desc: "info"},
 				{Key: "s", Desc: "scan"},
-				{Key: "←→", Desc: "if"},
 				{Key: "c", Desc: "conn"},
+				{Key: "b", Desc: "both"},
+				{Key: "w", Desc: "hs"},
+				{Key: "d", Desc: "deauth"},
 				{Key: "Esc", Desc: "tabs"},
 			}
 		}

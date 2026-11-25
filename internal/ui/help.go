@@ -27,6 +27,8 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("Esc       ") + txt.Render("Return to tabs"),
 		" " + sec.Render("r         ") + txt.Render("Refresh / rescan"),
 		" " + sec.Render("s / c     ") + txt.Render("WiFi scan / connect"),
+		" " + sec.Render("w/d/b     ") + txt.Render("Handshake/deauth/both"),
+		" " + sec.Render("pcap      ") + txt.Render("Saved ~/czhax-captures"),
 		" " + sec.Render("?         ") + txt.Render("Toggle help"),
 		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
 	}

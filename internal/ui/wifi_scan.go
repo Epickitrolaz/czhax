@@ -1,8 +1,12 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +23,7 @@ const (
 	scanModePickIface
 	scanModeSSID
 	scanModePassword
+	scanModePentest
 )
 
 type WifiScanView struct {
@@ -40,6 +45,17 @@ type WifiScanView struct {
 	ShowPassword bool
 	Connecting   bool
 	ConnectErr   string
+
+	PentestMode     wifi.PentestMode
+	PentestReturn   WifiScanMode
+	PentestActive   bool
+	PentestStopping bool
+	PentestStarted  time.Time
+	PentestDuration time.Duration
+	PentestElapsed  time.Duration
+	PentestResult   wifi.PentestResult
+	PentestErr      string
+	PentestCancel   context.CancelFunc
 
 	Note      string
 	NoteIsErr bool
@@ -169,6 +185,87 @@ func (v WifiScanView) SelectedNetwork() (wifi.Network, bool) {
 		return wifi.Network{}, false
 	}
 	return v.Networks[v.Cursor], true
+}
+
+// StartPentest begins a handshake capture and/or deauth run against the
+// selected AP. The returned context is cancelled by StopPentest or Esc.
+func (v *WifiScanView) StartPentest(mode wifi.PentestMode) (context.Context, wifi.PentestRequest, bool) {
+	net, ok := v.SelectedNetwork()
+	if !ok || v.PentestActive || strings.TrimSpace(net.BSSID) == "" {
+		return nil, wifi.PentestRequest{}, false
+	}
+	duration := 30 * time.Second
+	if mode == wifi.PentestDeauth {
+		duration = 15 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	v.PentestCancel = cancel
+	v.PentestReturn = v.Mode
+	v.Mode = scanModePentest
+	v.PentestMode = mode
+	v.PentestActive = true
+	v.PentestStopping = false
+	v.PentestStarted = time.Now()
+	v.PentestDuration = duration
+	v.PentestElapsed = 0
+	v.PentestResult = wifi.PentestResult{}
+	v.PentestErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	req := wifi.PentestRequest{
+		ScanIface: v.EffectiveScanIface(),
+		BSSID:     net.BSSID,
+		SSID:      net.SSID,
+		Channel:   wifi.ChannelNumber(net),
+		Mode:      mode,
+		Duration:  duration,
+	}
+	return ctx, req, true
+}
+
+func (v *WifiScanView) StopPentest() {
+	if v.PentestCancel != nil {
+		v.PentestCancel()
+	}
+	v.PentestStopping = true
+}
+
+func (v *WifiScanView) SetPentestResult(res wifi.PentestResult, err error) {
+	v.PentestActive = false
+	v.PentestStopping = false
+	if v.PentestCancel != nil {
+		v.PentestCancel()
+		v.PentestCancel = nil
+	}
+	v.PentestResult = res
+	if !v.PentestStarted.IsZero() {
+		v.PentestElapsed = time.Since(v.PentestStarted)
+	}
+	if v.PentestElapsed > v.PentestDuration && v.PentestDuration > 0 {
+		v.PentestElapsed = v.PentestDuration
+	}
+	switch {
+	case err != nil && errors.Is(err, context.Canceled):
+		v.PentestErr = ""
+		v.Note = "Stopped"
+		v.NoteIsErr = false
+	case err != nil:
+		v.PentestErr = err.Error()
+		v.Note = "Pentest failed"
+		v.NoteIsErr = true
+	case res.HandshakeComplete:
+		v.Note = "Handshake captured"
+		v.NoteIsErr = false
+	case res.EAPOLFrames > 0:
+		v.Note = fmt.Sprintf("Captured %d EAPOL frames", res.EAPOLFrames)
+		v.NoteIsErr = false
+	case res.DeauthFrames > 0:
+		v.Note = fmt.Sprintf("Sent %d deauth frames", res.DeauthFrames)
+		v.NoteIsErr = false
+	default:
+		v.Note = "No handshake captured"
+		v.NoteIsErr = true
+	}
 }
 
 func (v *WifiScanView) OpenDetail() bool {
@@ -392,6 +489,14 @@ func (v *WifiScanView) SetConnectResult(req wifi.ConnectRequest, err error) {
 
 func (v *WifiScanView) HandleEsc() bool {
 	switch v.Mode {
+	case scanModePentest:
+		if v.PentestActive {
+			v.StopPentest()
+			return true
+		}
+		v.PentestErr = ""
+		v.Mode = v.PentestReturn
+		return true
 	case scanModePassword:
 		v.Password = ""
 		v.ConnectErr = ""
@@ -432,6 +537,8 @@ func (v WifiScanView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 		return v.renderSSIDInput(w, h, pal)
 	case scanModePassword:
 		return v.renderPasswordInput(w, h, pal)
+	case scanModePentest:
+		return v.renderPentest(w, h, pal)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -567,7 +674,7 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			}
 			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:info c:conn ←→:if s:scan", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎:info c:conn b:both w:hs d:de", max(6, w-2))))
 		}
 	}
 
@@ -683,7 +790,7 @@ func (v WifiScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []
 			}
 			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎/c:conn  ↑↓:scr  Esc:list", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎:conn b:both w:hs d:de", max(6, w-2))))
 		}
 	}
 
@@ -860,6 +967,100 @@ func (v WifiScanView) renderPasswordInput(w, h int, pal theme.Palette) []string 
 			visLbl = "Tab:hide"
 		}
 		lines = append(lines, " "+muted.Render(Truncate("⏎:conn  "+visLbl+"  Esc:back", max(6, w-2))))
+	}
+
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v WifiScanView) renderPentest(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+
+	net, _ := v.SelectedNetwork()
+	res := v.PentestResult
+
+	lines := []string{
+		" " + accent.Render(Truncate("Pentest · "+v.PentestMode.String(), max(6, w-2))),
+	}
+	ssid := net.DisplaySSID()
+	if strings.TrimSpace(net.SSID) == "" {
+		ssid = "<hidden>"
+	}
+	lines = append(lines, " "+sec.Render("AP     ")+txt.Render(Truncate(ssid, max(6, w-8))))
+
+	if h >= 4 {
+		iface := res.MonitorIface
+		if iface == "" {
+			iface = v.EffectiveScanIface()
+		}
+		ch := res.Channel
+		if ch == 0 {
+			ch = wifi.ChannelNumber(net)
+		}
+		radio := iface
+		if ch > 0 {
+			radio += fmt.Sprintf(" · ch %d", ch)
+		}
+		lines = append(lines, " "+sec.Render("Radio  ")+txt.Render(Truncate(radio, max(6, w-8))))
+	}
+
+	if h >= 5 {
+		state := muted.Render("done")
+		switch {
+		case v.PentestActive && v.PentestStopping:
+			state = warn.Render("stopping…")
+		case v.PentestActive:
+			state = warn.Render("running…")
+		case v.PentestErr != "":
+			state = danger.Render("failed")
+		case res.HandshakeComplete:
+			state = ok.Render("handshake")
+		case res.EAPOLFrames > 0:
+			state = ok.Render("eapol")
+		case v.Note == "Stopped":
+			state = muted.Render("stopped")
+		case v.Note == "No handshake captured":
+			state = warn.Render("no capture")
+		}
+		line := " " + state
+		if v.PentestActive || v.PentestElapsed > 0 {
+			elapsed := v.PentestElapsed
+			if elapsed <= 0 && !v.PentestStarted.IsZero() {
+				elapsed = time.Since(v.PentestStarted)
+			}
+			line += " " + muted.Render(fmt.Sprintf("%ds/%ds", int(elapsed.Seconds()), int(v.PentestDuration.Seconds())))
+		}
+		lines = append(lines, line)
+	}
+
+	if h >= 6 {
+		parts := []string{sec.Render("EAPOL ") + txt.Render(fmt.Sprintf("%d", res.EAPOLFrames))}
+		if v.PentestMode != wifi.PentestHandshake || res.DeauthFrames > 0 {
+			parts = append(parts, sec.Render("Deauth ")+txt.Render(fmt.Sprintf("%d", res.DeauthFrames)))
+		}
+		lines = append(lines, " "+strings.Join(parts, muted.Render(" · ")))
+	}
+
+	if v.PentestErr != "" {
+		lines = append(lines, " "+danger.Render(Truncate(v.PentestErr, max(6, w-2))))
+	} else if res.CapturePath != "" && !v.PentestActive {
+		lines = append(lines, " "+ok.Render("Saved ")+muted.Render(Truncate(filepath.Base(res.CapturePath), max(6, w-8))))
+	}
+
+	if h >= 4 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		hint := "Esc:back"
+		if v.PentestActive {
+			hint = "Esc:stop"
+		}
+		lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
 	}
 
 	return SplitLinesPadded(lines, w, h)
