@@ -117,7 +117,14 @@ for t in git gcc make python3 xxd patch gawk bison flex zlib-flate; do
 done
 case "$(uname -m)" in
 	x86_64|i686|i386) [ -e /lib/ld-linux.so.2 ] || need_apt=1; libs="libc6:i386 zlib1g:i386"; farch=i386 ;;
-	aarch64|armv7l) [ -e /lib/ld-linux-armhf.so.3 ] || need_apt=1; libs="libc6:armhf zlib1g:armhf"; farch=armhf ;;
+	aarch64|armv7l)
+		[ -e /lib/ld-linux-armhf.so.3 ] || need_apt=1
+		libs="libc6:armhf zlib1g:armhf"
+		if [ "$DO_FW" = 1 ]; then
+			libs="$libs libgmp10:armhf libmpc3:armhf libstdc++6:armhf"
+		fi
+		farch=armhf
+		;;
 	*) die "unsupported host $(uname -m)" ;;
 esac
 if [ "$need_apt" = 1 ]; then
@@ -161,19 +168,38 @@ fi
 # -------------------------------------------------------------- firmware ---
 OUT_FW="$WORK/out/43439A0-7.95.75-nexmon.bin"
 # A prebuilt bundle carries only the bytes our patch changes, so the firmware
-# can be installed anywhere (including this board) without nexmon's toolchain.
+# can always be installed even where the toolchain cannot run.
 BUNDLE="$HERE/prebuilt/bcm43439a0-7.95.75-nexmon.json"
+# nexmon's bundled toolchain is a 32-bit ARM host binary on arm64 boards; its
+# cc1 needs mpfr (ABI 4) and isl 0.10, which Debian 13 does not ship. We carry
+# both here so the firmware can still be built natively on the board.
+HOST_LIBS="$HERE/prebuilt/armhf"
+
+case "$(uname -m)" in
+	x86_64|i686|i386) TC=gcc-arm-none-eabi-5_4-2016q2-linux-x86 ;;
+	aarch64|armv7l|armv6l) TC=gcc-arm-none-eabi-5_4-2016q2-linux-armv7l ;;
+	*) TC="" ;;
+esac
+
+toolchain_runs() {
+	[ -n "$TC" ] && [ -x "$NEXMON/buildtools/$TC/bin/arm-none-eabi-gcc" ] || return 1
+	printf 'int x;\n' | "$NEXMON/buildtools/$TC/bin/arm-none-eabi-gcc" -x c -c -o /dev/null - >/dev/null 2>&1
+}
+
+if [ "$DO_FW" = 1 ] && [ -d "$HOST_LIBS" ]; then
+	export LD_LIBRARY_PATH="$HOST_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 if [ "$DO_FW" = 1 ]; then
 	built=0
-	if [ "$(uname -m)" = "x86_64" ] && [ -n "$NEXMON" ]; then
-		log "building the patched firmware (monitor hook: $MONITOR)"
+	if [ -n "$NEXMON" ] && toolchain_runs; then
+		log "building the patched firmware on this machine (monitor hook: $MONITOR)"
 		if NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
 			--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
 			--work "$WORK/fw" --out "$OUT_FW"; then
 			built=1
 		else
-			warn "firmware build failed, falling back to the prebuilt bundle"
+			warn "firmware build failed, falling back to the prebuilt patch bundle"
 		fi
 	fi
 	if [ "$built" = 0 ]; then

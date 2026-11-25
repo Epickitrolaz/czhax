@@ -208,10 +208,19 @@ From a workstation, build from source and finish on the board in one go:
 The workstation needs passwordless sudo on the board (`sudo -n true` must work)
 and the vendor blobs are pulled from the board's stock backup automatically.
 
-Nexmon's bundled `arm-none-eabi` toolchain cannot run on the board itself: its
-`cc1` needs `libisl.so.10` **and** `libmpfr.so.4`, neither of which Debian 13
-ships for armhf (and they cannot be stubbed — MPFR does the constant folding).
-`prebuilt/` exists precisely so that this never blocks an install.
+`prebuilt/` exists so an install never blocks on the toolchain. It holds:
+
+* `bcm43439a0-7.95.75-nexmon.json` — the compiled patch as changed-byte ranges,
+  applied to the stock image the board already has (md5-checked both ways);
+* `armhf/libmpfr.so.4` and `armhf/libisl.so.10` — the two 32-bit ARM host
+  libraries nexmon's bundled `cc1` needs and Debian 13 no longer ships, taken
+  from Debian's own `libmpfr4`/`libisl10` armhf packages (see
+  `prebuilt/armhf/NOTICE`).
+
+With those two libraries in place the bundled compiler runs on the board and the
+firmware is built natively: `provision.sh` probes the toolchain by compiling a
+throwaway file and only falls back to the bundle if that fails. A board build
+differs from an x86_64 build only in the embedded version string (27 bytes).
 
 ### Keeping the bundle in sync
 

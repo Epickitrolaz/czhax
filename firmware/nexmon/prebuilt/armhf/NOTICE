@@ -1,0 +1,24 @@
+These two 32-bit ARM (armhf) shared libraries exist for one reason: nexmon ships
+its *host* cross compiler as a 32-bit ARM binary
+(`buildtools/gcc-arm-none-eabi-5_4-2016q2-linux-armv7l`), and its `cc1` links
+against two libraries that Debian 13 no longer provides for armhf:
+
+  libmpfr.so.4    MPFR 3.1.x ABI (Debian 13 ships libmpfr.so.6)
+  libisl.so.10    ISL 0.10 ABI  (Debian 13 ships libisl.so.23)
+
+They are used only when the firmware is built on the board itself
+(`provision.sh` puts this directory on LD_LIBRARY_PATH). Nothing else needs
+them, and x86_64 hosts ignore this directory entirely.
+
+Both are unmodified Debian packages for armhf, taken from archive.debian.org
+because those are the last builds of the required ABI:
+
+  libmpfr4  3.1.5-1    pool/main/m/mpfr4/libmpfr4_3.1.5-1_armhf.deb
+      MPFR (https://www.mpfr.org) - LGPL-3.0-or-later
+
+  libisl10  0.10-3     pool/main/i/isl/libisl10_0.10-3_armhf.deb
+      ISL (https://repo.or.cz/isl.git) - MIT
+
+Extracted with `dpkg-deb -x`, the versioned soname copied to the plain soname.
+Debian copyright files for both packages are available next to them in the
+archive; they are otherwise unmodified.
