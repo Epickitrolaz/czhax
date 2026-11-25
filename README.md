@@ -101,13 +101,17 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `System`/`Sys`) and top horizontal tab bar.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `System`/`Sys`) and top horizontal tab bar.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
   - RAM & Disk usage bars
   - Battery percentage & **estimated time remaining until battery runs out** (via Linux `power_supply` fuel-gauge `time_to_empty_*` or charge/energy rate)
   - CPU temperature, 1m load, and uptime
+- **WiFi Scan (`WiFi → Scan`)**:
+  - Scan nearby networks on any detected wireless interface (`nmcli`, falling back to `iw`)
+  - Signal, security, channel, and in-use state per AP, with a detail view
+  - Connect to open, WPA/WPA2/WPA3, or hidden networks; pick the target interface and reveal the passphrase while typing
 - **System Tools (`System → Tools`)**:
   - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
   - **Restart CZHax**: In-place relaunch (`exec`) to load newly installed updates
@@ -118,7 +122,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
-  - `r` refreshes status, `?` toggles help, `q` / `Ctrl+C` quits
+  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `?` toggles help, `q` / `Ctrl+C` quits
 
 ## Build from Source
 

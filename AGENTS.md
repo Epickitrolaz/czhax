@@ -31,11 +31,16 @@ internal/
   sysinfo/sysinfo.go       # Linux /proc & /sys telemetry + battery time-to-empty estimation
   theme/theme.go           # High Contrast palette (4-role color hierarchy)
   updater/updater.go       # Self-updater (GitHub Releases API + SHA256 verification + atomic replace)
+  wifi/wifi.go             # Interface telemetry collected from /sys, ip, iw and ethtool
+  wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
   ui/
     layout.go              # TopViews registry, viewport/sidebar sizing, FitLine, SplitLinesPadded, MiniBar
     shell.go               # Top horizontal tab bar, left vertical sidebar, pane divider
     footer.go              # Context-sensitive bottom keyhint bar
     status.go              # Status -> Device view
+    wifi.go                # Status -> WiFi interface detail
+    wifi_scan.go           # WiFi -> Scan list/detail/interface picker/connect flow
+    bluetooth.go           # Status -> Bluetooth view
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)
     help.go                # Help overlay
     app.go                 # Root Bubble Tea model (FocusTabs <-> FocusContent)
