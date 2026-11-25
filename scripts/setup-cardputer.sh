@@ -274,6 +274,46 @@ build_drivers() {
 }
 
 # ------------------------------------------------------------------------------
+# IR overlays: Cardputer Zero uses GPIO13 for the receiver and GPIO12 for the
+# transmitter. The m5stack overlay repository normally configures these, but
+# keep the pins explicit here so a stale config.txt cannot silently lose IR.
+# ------------------------------------------------------------------------------
+ensure_ir_overlays() {
+  local changed=0
+
+  # pwm-ir-tx on GPIO12 conflicts with the gpio-ir-tx driver used by CZHax.
+  if grep -qE '^[[:space:]]*dtoverlay=pwm-ir-tx,gpio_pin=12' "$BOOT_CONFIG"; then
+    sed -i -E '/^[[:space:]]*dtoverlay=pwm-ir-tx,gpio_pin=12/d' "$BOOT_CONFIG"
+    changed=1
+  fi
+  local rx_line='dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up'
+  local tx_line='dtoverlay=gpio-ir-tx,gpio_pin=12'
+  if grep -qE '^[[:space:]]*dtoverlay=gpio-ir,gpio_pin=13' "$BOOT_CONFIG"; then
+    if ! grep -qE "^[[:space:]]*${rx_line}[[:space:]]*$" "$BOOT_CONFIG"; then
+      sed -i -E "s|^[[:space:]]*dtoverlay=gpio-ir,gpio_pin=13.*|${rx_line}|" "$BOOT_CONFIG"
+      changed=1
+    fi
+  else
+    printf '\n# CZHax: Cardputer Zero IR receiver (GPIO13)\n%s\n' "$rx_line" >> "$BOOT_CONFIG"
+    changed=1
+  fi
+  if grep -qE '^[[:space:]]*dtoverlay=gpio-ir-tx,gpio_pin=12' "$BOOT_CONFIG"; then
+    if ! grep -qE "^[[:space:]]*${tx_line}[[:space:]]*$" "$BOOT_CONFIG"; then
+      sed -i -E "s|^[[:space:]]*dtoverlay=gpio-ir-tx,gpio_pin=12.*|${tx_line}|" "$BOOT_CONFIG"
+      changed=1
+    fi
+  else
+    printf '# CZHax: Cardputer Zero IR transmitter (GPIO12)\n%s\n' "$tx_line" >> "$BOOT_CONFIG"
+    changed=1
+  fi
+  if [[ "$changed" -eq 1 ]]; then
+    log "Configured IR overlays: gpio-ir GPIO13 (RX), gpio-ir-tx GPIO12 (TX)."
+  else
+    log "IR overlays already configured (GPIO13 RX, GPIO12 TX)."
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Step 4: Raspberry Pi OS Lite boot, module, and user-group configuration
 # ------------------------------------------------------------------------------
 configure_boot_and_modules() {
@@ -314,6 +354,8 @@ EOF
     joined="$(IFS=,; echo "${groups_to_add[*]}")"
     usermod -aG "$joined" "$TARGET_USER"
   fi
+
+  ensure_ir_overlays
 }
 
 # ------------------------------------------------------------------------------
@@ -571,6 +613,7 @@ main() {
    - Locale: en_US.UTF-8 | Keyboard: us | Console font: Terminus 6x12
    - cardputer-keymap.service enabled (Sym-layer mappings on tty1)
    - cardputer-brightness.service enabled (Fn+U dim / Fn+I brighten)
+   - IR overlays: gpio-ir GPIO13 (receiver), gpio-ir-tx GPIO12 (transmitter)
    - tty1 autologin: $( [[ "$ENABLE_AUTOLOGIN" -eq 1 ]] && echo "enabled (${TARGET_USER})" || echo "disabled" )
    - LEDs: $( [[ "$DISABLE_LEDS" -eq 1 ]] && echo "ACT LED disabled" || echo "default (enabled)" )
 

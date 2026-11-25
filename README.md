@@ -101,7 +101,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `System`/`Sys`) and top horizontal tab bar.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `IR`, `System`/`Sys`) and top horizontal tab bar.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
@@ -113,6 +113,13 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Signal, security, channel, and in-use state per AP, with a detail view
   - Connect to open, WPA/WPA2/WPA3, or hidden networks; pick the target interface and reveal the passphrase while typing
   - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax-captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
+- **IR Remote (`IR → Remote`, `IR → Learn`, `IR → Browse`)**:
+  - **Learn**: copy any physical remote button with the GPIO13 IR receiver and bind it to a Cardputer key. Learned profiles persist in `~/.config/czhax/ir.json`.
+  - **Remote**: the active profile maps buttons to keys (`1` Power, `2` Vol+, `3` Vol−, `4` Mute, `5`/`6` channel, `7`–`0` arrows, `Enter` OK, `Backspace` Back); presses transmit over the GPIO12 IR LED.
+  - **Browse**: load Flipper `.ir` databases (`CZHAX_IR_FLIPPER`; Flipper firmware assets or Flipper-IRDB) or Xiaomi Mi Remote exports (`CZHAX_IR_MI`; `mi_remote_database` Flipper `.ir` output (`db_export -f flipper`) or TVKILL JSON (`db_export -f tvkill`)). The Mi app DB is encrypted, so point this at the exported files rather than the raw `ir_data` SQLite file.
+  - **Probe mode**: repeat `p` (power), `v` (volume) or `m` (mute) to send the next candidate; press `a` to accept and generate a profile for that device.
+  - **Grid mode**: press `g`, then each mapped key sends and cycles that button's candidates, so you can walk every combination before accepting.
+  - Hardware bindings: `dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up` (receiver) and `dtoverlay=gpio-ir-tx,gpio_pin=12` (transmitter); devices appear as `/dev/lirc*` and require membership in the `video` group. Run `czhax ir` to print discovered LIRC devices, capabilities and binding errors.
 - **System Tools (`System → Tools`)**:
   - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
   - **Restart CZHax**: In-place relaunch (`exec`) to load newly installed updates
@@ -124,6 +131,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
   - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `?` toggles help, `q` / `Ctrl+C` quits
+  - IR: `l` learns, `p`/`v`/`m` try power/volume/mute candidates, `a` accepts, `g` toggles grid mode, and `[`/`]` cycle profiles
 
 ## Build from Source
 

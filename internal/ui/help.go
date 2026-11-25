@@ -29,6 +29,9 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("s / c     ") + txt.Render("WiFi scan / connect"),
 		" " + sec.Render("w/d/b     ") + txt.Render("Handshake/deauth/both"),
 		" " + sec.Render("pcap      ") + txt.Render("Saved ~/czhax-captures"),
+		" " + sec.Render("IR Remote ") + txt.Render("keys send signals"),
+		" " + sec.Render("IR Learn  ") + txt.Render("l:capture key:bind"),
+		" " + sec.Render("IR Browse ") + txt.Render("p/v/m:try a:save g:grid"),
 		" " + sec.Render("?         ") + txt.Render("Toggle help"),
 		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
 	}

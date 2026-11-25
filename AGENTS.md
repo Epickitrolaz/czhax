@@ -12,6 +12,7 @@ Never design for a desktop monitor first. Every screen must remain clean and leg
 - **Display**: 1.9" ST7789V3 IPS, `320×170` pixels.
   - Depending on console font, terminal dimensions are **`40×10`**, **`45×10`**, or **`53×14`**.
   - **Every view MUST fit strictly inside `40×10`, `45×10`, and `53×14`** with zero line wrapping and exact row counts (`len(lines) == h`).
+- **IR**: GPIO13 receiver (`dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up`), GPIO12 transmitter (`dtoverlay=gpio-ir-tx,gpio_pin=12`); exposed as `/dev/lirc*` (LIRC_MODE2 capture, LIRC_MODE_PULSE send).
 - **Keyboard**: 46-key TCA8418 matrix keyboard.
   - `Fn + F/X/Z/C` send `Up/Down/Left/Right` arrows.
   - `Fn + 4..8` send `F4..F8`.
@@ -34,6 +35,12 @@ internal/
   wifi/wifi.go             # Interface telemetry collected from /sys, ip, iw and ethtool
   wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
   wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
+  ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
+  ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
+  ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit
+  ir/flipper.go            # Flipper .ir parser (raw + parsed entries)
+  ir/miremote.go           # Xiaomi Mi Remote TVKILL JSON / exported .ir loader
+  ir/library.go            # Provider directory index and remote metadata
   ui/
     layout.go              # TopViews registry, viewport/sidebar sizing, FitLine, SplitLinesPadded, MiniBar
     shell.go               # Top horizontal tab bar, left vertical sidebar, pane divider
@@ -42,6 +49,7 @@ internal/
     wifi.go                # Status -> WiFi interface detail
     wifi_scan.go           # WiFi -> Scan list/detail/interface picker/connect flow
     bluetooth.go           # Status -> Bluetooth view
+    ir.go                  # IR -> Remote/Learn/Browse, probe + grid discovery modes
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)
     help.go                # Help overlay
     app.go                 # Root Bubble Tea model (FocusTabs <-> FocusContent)

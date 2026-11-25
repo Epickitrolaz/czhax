@@ -49,6 +49,8 @@ type Config struct {
 	NavMode        NavKeyMode   `json:"nav_mode"`
 	RefreshSeconds int          `json:"refresh_seconds"`
 	ConfirmQuit    bool         `json:"confirm_quit"`
+	IRFlipperDir   string       `json:"ir_flipper_dir,omitempty"`
+	IRMiDir        string       `json:"ir_mi_dir,omitempty"`
 }
 
 func Default() Config {

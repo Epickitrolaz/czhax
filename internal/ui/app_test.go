@@ -362,7 +362,21 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc from WiFi List")
 		}
 
-		// Down moves to System view
+		// Down moves to IR view, then System view
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewIR {
+			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on IR enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteEmpty")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from IR")
+		}
 		m = sendKey(m, "down")
 		if m.ActiveView != ViewSystem {
 			t.Fatalf("expected ViewSystem on down, got %v", m.ActiveView)
@@ -606,4 +620,3 @@ func TestWifiScanConnectHiddenOpenAndErrors(t *testing.T) {
 		t.Fatalf("unexpected open connect request: %+v", openReq)
 	}
 }
-
