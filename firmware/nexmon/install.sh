@@ -76,7 +76,10 @@ fi
 # leaves the old firmware running while the new file sits on disk, and this chip
 # has a habit of wedging when monitor mode is entered on such a driver, so be
 # explicit instead of pretending the swap took effect.
-loaded() { lsmod | grep -qE "^brcmfmac(_cyw)?[[:space:]]"; }
+# NB: no `lsmod | grep -q` here -- with `set -o pipefail`, grep -q closing the
+# pipe early makes the pipeline report SIGPIPE (141) even on a match, which made
+# this return "not loaded" on a loaded driver and skip the unload entirely.
+loaded() { [ -d /sys/module/brcmfmac ] || [ -d /sys/module/brcmfmac_cyw ]; }
 
 reboot_needed() {
 	cat <<EOM
@@ -105,7 +108,7 @@ if loaded; then
 fi
 
 # count the firmware lines already in the log so a *new* one can be detected
-fwlines() { dmesg | grep -ac 'brcmf_c_preinit_dcmds: Firmware:' 2>/dev/null || true; }
+fwlines() { dmesg 2>/dev/null | grep -ac 'brcmf_c_preinit_dcmds: Firmware:' || true; }
 before="$(fwlines)"
 modprobe brcmfmac_cyw 2>/dev/null || modprobe brcmfmac
 # the download/attach finishes a few seconds after modprobe returns
