@@ -26,6 +26,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="Epickitrolaz/czhax"
+FW_ASSET="czhax-firmware-bcm43439a0-7.95.75.bin"
 WORK="${WORK:-}"
 NEXMON_SRC="${NEXMON_SRC:-}"
 HOST=""
@@ -190,20 +192,58 @@ if [ "$DO_FW" = 1 ] && [ -d "$HOST_LIBS" ]; then
 	export LD_LIBRARY_PATH="$HOST_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
+# Prebuilt firmware from the GitHub release: no toolchain, no vendor blob of
+# its own. Verified against the release's checksums.txt.
+fetch_release_firmware() {
+	local tag ver base tmp want got
+	tag="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' \
+		"https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+	ver="${tag##*/}"
+	case "$ver" in ""|latest|releases) return 1 ;; esac
+	base="https://github.com/${REPO}/releases/download/${ver}"
+	tmp="$(mktemp -d)"
+	if ! curl -fsSL --retry 3 "${base}/${FW_ASSET}" -o "$tmp/fw.bin" 2>/dev/null; then
+		rm -rf "$tmp"; return 1
+	fi
+	if ! curl -fsSL --retry 3 "${base}/checksums.txt" -o "$tmp/sums" 2>/dev/null; then
+		rm -rf "$tmp"; return 1
+	fi
+	want="$(grep " ${FW_ASSET}\$" "$tmp/sums" | awk '{print $1}')"
+	got="$(sha256sum "$tmp/fw.bin" | awk '{print $1}')"
+	if [ -z "$want" ] || [ "$want" != "$got" ]; then
+		warn "release firmware checksum mismatch, ignoring it"
+		rm -rf "$tmp"; return 1
+	fi
+	mkdir -p "$(dirname "$OUT_FW")"
+	mv "$tmp/fw.bin" "$OUT_FW"
+	rm -rf "$tmp"
+	log "downloaded $FW_ASSET from release $ver (sha256 ${got%${got#????????????}})"
+	return 0
+}
+
 if [ "$DO_FW" = 1 ]; then
-	built=0
-	if [ -n "$NEXMON" ] && toolchain_runs; then
+	have_fw=0
+
+	# Prefer the firmware published with the release (checksum verified); no
+	# toolchain, no vendor blob, nothing compiled. NEXMON_BUILD=1 forces a
+	# source build instead, which is what patch development needs.
+	if [ "${NEXMON_BUILD:-0}" != 1 ] && fetch_release_firmware; then
+		have_fw=1
+	fi
+
+	if [ "$have_fw" = 0 ] && [ -n "$NEXMON" ] && toolchain_runs; then
 		log "building the patched firmware on this machine (monitor hook: $MONITOR)"
 		if NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
 			--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
 			--work "$WORK/fw" --out "$OUT_FW"; then
-			built=1
+			have_fw=1
 		else
-			warn "firmware build failed, falling back to the prebuilt patch bundle"
+			warn "firmware build failed, will try the patch bundle"
 		fi
 	fi
-	if [ "$built" = 0 ]; then
-		[ -f "$BUNDLE" ] || die "cannot build the firmware here and $BUNDLE is missing"
+
+	if [ "$have_fw" = 0 ]; then
+		[ -f "$BUNDLE" ] || die "no release firmware, no toolchain and no $BUNDLE"
 		log "applying the prebuilt patch bundle (no toolchain needed)"
 		mkdir -p "$(dirname "$OUT_FW")"
 		python3 "$HERE/tools/apply-bundle.py" "$FW_IN" "$BUNDLE" "$OUT_FW"

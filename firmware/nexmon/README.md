@@ -192,12 +192,20 @@ One command, on the board:
 sudo ./provision.sh
 ```
 
-It builds `brcmfmac.ko` for the running kernel and installs the patched
-firmware. The firmware is either built from source (x86_64, where nexmon's
-bundled toolchain runs) or applied from the prebuilt patch bundle in
-`prebuilt/` — a 44 KB JSON that carries only the bytes the patch changes, so no
-toolchain is needed to install it. It refuses to apply unless the input matches
-the stock image it was built against.
+The firmware comes from the first of these that works, so a normal install never
+needs a compiler or a vendor blob:
+
+1. **the release asset** — `czhax-firmware-bcm43439a0-7.95.75.bin`, published next
+   to the TUI binaries and verified against the release's `checksums.txt`.
+   CI builds it on every tag from the pinned vendor firmware (md5-checked), so
+   what users download is exactly what the repository builds;
+2. **the patch bundle** in `prebuilt/` — applied to the stock image the board
+   already has (md5-checked both ways), for offline installs;
+3. **a source build** — used when `NEXMON_BUILD=1` is set, or when neither of the
+   above is available and the bundled toolchain can run (x86_64 hosts, and the
+   board itself via `prebuilt/armhf/`).
+
+`brcmfmac.ko` is always built on the board, against the running kernel.
 
 From a workstation, build from source and finish on the board in one go:
 
@@ -208,19 +216,16 @@ From a workstation, build from source and finish on the board in one go:
 The workstation needs passwordless sudo on the board (`sudo -n true` must work)
 and the vendor blobs are pulled from the board's stock backup automatically.
 
-`prebuilt/` exists so an install never blocks on the toolchain. It holds:
+### Why the firmware is not always built locally
 
-* `bcm43439a0-7.95.75-nexmon.json` — the compiled patch as changed-byte ranges,
-  applied to the stock image the board already has (md5-checked both ways);
-* `armhf/libmpfr.so.4` and `armhf/libisl.so.10` — the two 32-bit ARM host
-  libraries nexmon's bundled `cc1` needs and Debian 13 no longer ships, taken
-  from Debian's own `libmpfr4`/`libisl10` armhf packages (see
-  `prebuilt/armhf/NOTICE`).
-
-With those two libraries in place the bundled compiler runs on the board and the
-firmware is built natively: `provision.sh` probes the toolchain by compiling a
-throwaway file and only falls back to the bundle if that fails. A board build
-differs from an x86_64 build only in the embedded version string (27 bytes).
+nexmon's bundled toolchain is a 32-bit ARM binary on arm64 boards and its `cc1`
+needs `libmpfr.so.4` and `libisl.so.10`, which Debian 13 no longer ships;
+`prebuilt/armhf/` carries both (see the NOTICE there) so the compiler runs. It
+does compile and link the firmware on the CM0, and the result is byte-identical
+to an x86_64 build apart from the embedded version string — but every
+board-built image we tested wedged the chip on first monitor use, on cold boots
+included, while workstation-built and release-built images work. Hence the
+release asset is the default and the local build is opt-in via `NEXMON_BUILD=1`.
 
 ### Keeping the bundle in sync
 
