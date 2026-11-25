@@ -6,6 +6,22 @@
 
 ## Install & Update on Your Cardputer Zero
 
+### Fresh Raspberry Pi OS Lite Setup (Drivers, Keymap & Console)
+
+If you just flashed a clean **Raspberry Pi OS Lite (Debian Trixie, 64-bit)** SD card, run the hardware setup script first over SSH to build the CardputerZero drivers and configure the display, keyboard, and brightness controls:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Epickitrolaz/czhax/main/scripts/setup-cardputer.sh | sudo bash
+```
+
+What [`scripts/setup-cardputer.sh`](scripts/setup-cardputer.sh) configures:
+- Runs `apt full-upgrade` and installs matching kernel headers + build tools (if a newer kernel is installed, it pauses and asks you to reboot and re-run with `--skip-upgrade`)
+- Cleanly builds and installs [`m5stack-linux-dtoverlays`](https://github.com/m5stack/m5stack-linux-dtoverlays) (`ARCH=arm64`, `CONFIG_CARDPUTERO_V0_5=y`) so the 1.9" LCD, TCA8418 keyboard, M5IOE1 expander (stopping the 3 blinking left-side LEDs), audio, battery gauge, and RTC work
+- Disables `fb_load.service`, sets `cma-64`, and configures `en_US.UTF-8` + `us` layout + **Terminus `6×12`** console font (`53×14` characters)
+- Installs and enables `cardputer-keymap.service` (fixes `Sym`-layer symbols and prevents `Sym+E` from triggering Scroll Lock)
+- Installs and enables `cardputer-brightness.service` (`Fn+U` / `Fn+I` backlight control)
+- Enables `tty1` autologin for your user (pass `--no-autologin` to keep password login, `--disable-leds` to turn off the Pi ACT LED, or `--user <name>` to override the user)
+
 ### First-Time Install
 
 Run directly on your Cardputer Zero:
