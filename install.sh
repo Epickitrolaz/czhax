@@ -1,181 +1,371 @@
 #!/usr/bin/env bash
+#
+# CZHax installer for the M5Stack Cardputer Zero (and any Debian-ish Linux).
+#
+# With no arguments on a terminal this is an interactive menu; with --all (or
+# any component flag) it does exactly what you asked for and nothing else.
+#
+#   sudo ./install.sh                 # interactive
+#   sudo ./install.sh --all           # everything below
+#   sudo ./install.sh --czhax         # just the TUI binary
+#   sudo ./install.sh --nexmon --nexmon-host pi@100.64.0.1
+#
+# Components:
+#   cardputer  hardware setup for Raspberry Pi OS Lite on the Cardputer Zero:
+#              dtoverlays, console font/locale, keymap + brightness services
+#   nexmon     nexmon firmware + brcmfmac for monitor mode and frame injection
+#   czhax      the CZHax TUI (release binary)
+#   packages   pentest/wireless tooling (aircrack-ng, hcxdumptool, mdk4, …)
+#
 set -euo pipefail
 
 REPO="Epickitrolaz/czhax"
 BIN_NAME="czhax"
 VERSION="${CZHAX_VERSION:-latest}"
+SRC_REF="${CZHAX_REF:-main}"
 USER_INSTALL=0
 UNINSTALL=0
 
+WANT_CARDUPTER=0
+WANT_NEXMON=0
+WANT_CZHAX=0
+WANT_PACKAGES=0
+COMPONENTS_GIVEN=0
+
+CARD_USER=""
+CARD_AUTOLOGIN=1
+CARD_LEDS=0
+CARD_SKIP_UPGRADE=0
+NEXMON_HOST=""
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+TMP_DIR=""
+
+log()  { printf '\033[1m>>\033[0m %s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
 usage() {
   cat <<EOF
-CZHax binary installer & updater for M5Stack Cardputer Zero & Linux
+CZHax installer for the M5Stack Cardputer Zero
 
 Usage:
-  install.sh [options]
+  install.sh [component ...] [options]
+
+Components (no component = interactive menu on a terminal):
+  --all             cardputer + nexmon + czhax + packages
+  --cardputer       hardware setup: dtoverlays, console, keymap, brightness
+  --nexmon          nexmon firmware + patched brcmfmac (monitor/injection)
+  --czhax           install the CZHax TUI binary
+  --packages        install wireless/pentest packages
 
 Options:
-  --version <tag>   Install a specific release tag (e.g. v0.2.0). Default: latest
-  --user            Install to \$HOME/.local/bin instead of /usr/local/bin
-  --uninstall       Remove installed czhax binary
-  -h, --help        Show this help
+  --version <tag>   CZHax release tag (default: latest)
+  --user            install czhax to ~/.local/bin
+  --uninstall       remove the czhax binary and exit
+  --user-name <u>   target user for the Cardputer setup (default: autodetect)
+  --no-autologin    Cardputer setup without tty1 autologin
+  --disable-leds    Cardputer setup with the RPi ACT LED disabled
+  --skip-upgrade    Cardputer setup without apt full-upgrade
+  --nexmon-host <u@h>
+                    build the firmware here, then finish on that host over ssh
+  --ref <git-ref>   repo ref to take the setup scripts from (default: main)
+  -h, --help        this help
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version)
-      VERSION="${2:-}"
-      if [[ -z "$VERSION" ]]; then
-        echo "error: --version requires a tag argument" >&2
-        exit 1
-      fi
-      shift 2
-      ;;
-    --user)
-      USER_INSTALL=1
-      shift
-      ;;
-    --uninstall)
-      UNINSTALL=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "error: unknown option: $1" >&2
-      usage >&2
-      exit 1
-      ;;
+    --all) WANT_CARDUPTER=1; WANT_NEXMON=1; WANT_CZHAX=1; WANT_PACKAGES=1; COMPONENTS_GIVEN=1; shift ;;
+    --cardputer|--cardputer-zero) WANT_CARDUPTER=1; COMPONENTS_GIVEN=1; shift ;;
+    --nexmon) WANT_NEXMON=1; COMPONENTS_GIVEN=1; shift ;;
+    --czhax) WANT_CZHAX=1; COMPONENTS_GIVEN=1; shift ;;
+    --packages) WANT_PACKAGES=1; COMPONENTS_GIVEN=1; shift ;;
+    --version) VERSION="${2:-}"; [[ -n "$VERSION" ]] || die "--version needs a tag"; shift 2 ;;
+    --user) USER_INSTALL=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --user-name) CARD_USER="${2:-}"; [[ -n "$CARD_USER" ]] || die "--user-name needs a name"; shift 2 ;;
+    --no-autologin) CARD_AUTOLOGIN=0; shift ;;
+    --disable-leds) CARD_LEDS=1; shift ;;
+    --skip-upgrade) CARD_SKIP_UPGRADE=1; shift ;;
+    --nexmon-host) NEXMON_HOST="${2:-}"; [[ -n "$NEXMON_HOST" ]] || die "--nexmon-host needs user@host"; shift 2 ;;
+    --ref) SRC_REF="${2:-}"; [[ -n "$SRC_REF" ]] || die "--ref needs a git ref"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
   esac
 done
 
-if [[ "$USER_INSTALL" -eq 1 ]]; then
-  INSTALL_DIR="${HOME}/.local/bin"
-else
-  INSTALL_DIR="/usr/local/bin"
-fi
-TARGET_PATH="${INSTALL_DIR}/${BIN_NAME}"
+# ---------------------------------------------------------------- helpers ---
+need_root() { [[ "$(id -u)" -eq 0 ]] || die "this step needs root, re-run with sudo"; }
 
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ask() { # ask <prompt> <default y|n>
+  local prompt="$1" def="$2" ans
+  local hint="[Y/n]"; [[ "$def" == "n" ]] && hint="[y/N]"
+  read -r -p "$prompt $hint " ans </dev/tty || ans=""
+  ans="${ans:-$def}"
+  [[ "${ans,,}" == "y" ]]
+}
+
+fetch_source() {
+  # reuse the local checkout when the installer runs from one
+  if [[ -n "$HERE" && -f "$HERE/scripts/setup-cardputer.sh" && -f "$HERE/firmware/nexmon/provision.sh" ]]; then
+    SRC_DIR="$HERE"
+    return 0
+  fi
+  [[ -n "$TMP_DIR" ]] || { TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT; }
+  SRC_DIR="$TMP_DIR/src"
+  log "fetching $REPO@$SRC_REF"
+  mkdir -p "$SRC_DIR"
+  if have curl; then
+    curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
+      tar xz -C "$SRC_DIR" --strip-components=1
+  elif have wget; then
+    wget -qO- "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
+      tar xz -C "$SRC_DIR" --strip-components=1
+  else
+    die "curl or wget is required"
+  fi
+}
+
+# -------------------------------------------------------------- czhax TUI ---
+install_czhax() {
+  local os arch asset
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  [[ "$os" == "linux" ]] || die "unsupported OS '$os' (CZHax binaries target Linux)"
+  arch="$(uname -m)"
+  case "$arch" in
+    aarch64|arm64) asset="czhax-linux-arm64" ;;
+    armv7l|armv7|armhf) asset="czhax-linux-armv7" ;;
+    x86_64|amd64) asset="czhax-linux-amd64" ;;
+    *) die "unsupported architecture '$arch'" ;;
+  esac
+
+  local install_dir target version="$VERSION"
+  if [[ "$USER_INSTALL" -eq 1 ]]; then install_dir="${HOME}/.local/bin"; else install_dir="/usr/local/bin"; fi
+  target="${install_dir}/${BIN_NAME}"
+
+  if [[ "$version" == "latest" ]]; then
+    local url tag
+    if have curl; then
+      url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+      tag="${url##*/}"
+      if [[ -z "$tag" || "$tag" == "latest" ]]; then
+        tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+          "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+          sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
+      fi
+    else
+      tag="$(wget -q --server-response -O /dev/null --max-redirect=5 \
+        "https://github.com/${REPO}/releases/latest" 2>&1 |
+        awk '/^  Location: /{loc=$2} END{print loc}' | tr -d '\r')"
+      tag="${tag##*/}"
+    fi
+    [[ -n "$tag" && "$tag" != "latest" ]] || die "could not resolve the latest release tag"
+    version="$tag"
+  fi
+
+  local base="https://github.com/${REPO}/releases/download/${version}"
+  local tmp; tmp="$(mktemp -d)"
+  log "downloading ${asset} (${version})"
+  if have curl; then
+    curl -fL --progress-bar "${base}/${asset}" -o "${tmp}/${BIN_NAME}"
+    curl -fsSL "${base}/checksums.txt" -o "${tmp}/checksums.txt"
+  else
+    wget -q --show-progress "${base}/${asset}" -O "${tmp}/${BIN_NAME}"
+    wget -q "${base}/checksums.txt" -O "${tmp}/checksums.txt"
+  fi
+  if have sha256sum; then
+    local expected actual
+    expected="$(grep " ${asset}\$" "${tmp}/checksums.txt" | awk '{print $1}' || true)"
+    [[ -n "$expected" ]] || die "checksum entry for ${asset} missing"
+    actual="$(sha256sum "${tmp}/${BIN_NAME}" | awk '{print $1}')"
+    [[ "$expected" == "$actual" ]] || die "checksum mismatch for ${asset}"
+  fi
+  chmod +x "${tmp}/${BIN_NAME}"
+  if [[ -w "$install_dir" ]]; then
+    install -m 0755 "${tmp}/${BIN_NAME}" "$target"
+  else
+    have sudo || die "cannot write ${install_dir} and sudo is unavailable (try --user)"
+    sudo mkdir -p "$install_dir"
+    sudo install -m 0755 "${tmp}/${BIN_NAME}" "$target"
+  fi
+  rm -rf "$tmp"
+  log "installed ${target}"
+}
+
+# ------------------------------------------------------- cardputer setup ---
+setup_cardputer() {
+  need_root
+  fetch_source
+  local s="$SRC_DIR/scripts/setup-cardputer.sh"
+  [[ -f "$s" ]] || die "setup-cardputer.sh not found in the source tree"
+  local args=()
+  [[ -n "$CARD_USER" ]] && args+=(--user "$CARD_USER")
+  [[ "$CARD_AUTOLOGIN" -eq 0 ]] && args+=(--no-autologin)
+  [[ "$CARD_LEDS" -eq 1 ]] && args+=(--disable-leds)
+  [[ "$CARD_SKIP_UPGRADE" -eq 1 ]] && args+=(--skip-upgrade)
+  log "configuring the Cardputer Zero hardware (dtoverlays, console, services)"
+  bash "$s" "${args[@]}"
+}
+
+# ------------------------------------------------------ nexmon wifi stack ---
+setup_nexmon() {
+  need_root
+  fetch_source
+  local p="$SRC_DIR/firmware/nexmon/provision.sh"
+  [[ -f "$p" ]] || die "firmware/nexmon/provision.sh not found in the source tree"
+  chmod +x "$p" "$SRC_DIR/firmware/nexmon/driver/build-driver.sh" 2>/dev/null || true
+
+  if [[ -n "$NEXMON_HOST" ]]; then
+    log "nexmon: building the firmware here, finishing on $NEXMON_HOST"
+    bash "$p" --host "$NEXMON_HOST"
+    return
+  fi
+
+  # The firmware half needs nexmon's bundled arm-none-eabi toolchain, which on
+  # arm64 needs libisl.so.10 (not in Debian 13). On the board itself we can
+  # still build/install the driver, so do that and explain the rest.
+  if [[ "$(uname -m)" == "x86_64" ]]; then
+    log "nexmon: building firmware and driver"
+    bash "$p"
+    return
+  fi
+
+  local fw="" cand
+  for cand in "$SRC_DIR/firmware/nexmon/build/"*.bin /root/nexmon-work/out/*.bin; do
+    if [[ -f "$cand" ]]; then fw="$cand"; break; fi
+  done
+
+  log "nexmon: building the driver for $(uname -r)"
+  bash "$p" --driver-only
+
+  if [[ -n "$fw" ]]; then
+    log "nexmon: installing firmware image $fw"
+    bash "$SRC_DIR/firmware/nexmon/install.sh" --fw "$fw" --module-only
+  else
+    cat <<EOF
+
+  The driver is installed, but this host cannot build the firmware image:
+  nexmon's bundled toolchain needs libisl.so.10, which Debian 13 does not ship
+  for arm64. Build it once from an x86_64 machine on the same network:
+
+      ./firmware/nexmon/provision.sh --host <user>@<this-board>
+
+  ...or copy a patched image over and run:
+
+      ./firmware/nexmon/install.sh --fw <image>.bin --module-only
+
+EOF
+  fi
+}
+
+# ------------------------------------------------------- pentest packages ---
+setup_packages() {
+  need_root
+  local want=(
+    aircrack-ng hcxtools hcxdumptool mdk4 pixiewps reaver tshark nmap
+    macchanger iw wireless-tools rfkill hostapd dnsmasq bluez bluez-tools
+    bettercap usbutils pciutils
+  )
+  local avail=() p
+  apt-get update -qq
+  for p in "${want[@]}"; do
+    if apt-cache show "$p" >/dev/null 2>&1; then avail+=("$p"); fi
+  done
+  [[ ${#avail[@]} -gt 0 ]] || die "none of the packages are available in your repos"
+  log "installing ${#avail[@]} packages: ${avail[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${avail[@]}"
+}
+
+# ------------------------------------------------------------ interactive ---
+interactive_menu() {
+  local choice
+  cat <<'EOF'
+
+CZHax installer - M5Stack Cardputer Zero
+
+  1) Cardputer setup     display, keyboard, audio, console, services
+  2) Wi-Fi monitor mode  nexmon firmware + patched brcmfmac (injection too)
+  3) CZHax TUI           the terminal UI itself
+  4) Pentest packages    aircrack-ng, hcxdumptool, mdk4, pixiewps, ...
+
+  a) All of the above
+  q) Quit
+
+EOF
+  printf 'Select [1-4, a, q]: '
+  read -r choice </dev/tty || choice="q"
+
+  case "${choice,,}" in
+    q|quit|"") log "nothing to do"; exit 0 ;;
+    a|all) WANT_CARDUPTER=1; WANT_NEXMON=1; WANT_CZHAX=1; WANT_PACKAGES=1 ;;
+    *)
+      local item
+      for item in ${choice//,/ }; do
+        case "$item" in
+          1) WANT_CARDUPTER=1 ;;
+          2) WANT_NEXMON=1 ;;
+          3) WANT_CZHAX=1 ;;
+          4) WANT_PACKAGES=1 ;;
+          *) die "unknown selection: $item" ;;
+        esac
+      done
+      ;;
+  esac
+
+  # per-component customisation, defaults on Enter
+  if [[ "$WANT_CARDUPTER" -eq 1 ]]; then
+    printf '\nCardputer setup options (Enter keeps the default)\n'
+    if ! ask "  configure tty1 autologin?" y; then CARD_AUTOLOGIN=0; fi
+    if ask "  disable the Raspberry Pi ACT LED?" n; then CARD_LEDS=1; fi
+    if ! ask "  run a full system upgrade first?" y; then CARD_SKIP_UPGRADE=1; fi
+  fi
+  if [[ "$WANT_NEXMON" -eq 1 ]]; then
+    printf '\nWi-Fi monitor mode\n'
+    if [[ "$(uname -m)" != "x86_64" ]]; then
+      printf '  On this machine only the driver can be built.\n'
+      printf '  Build the firmware from an x86_64 host (user@host, Enter to skip): '
+      read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
+    fi
+  fi
+  if [[ "$WANT_CZHAX" -eq 1 ]]; then
+    if ask "  install czhax for the current user only (~/.local/bin)?" n; then USER_INSTALL=1; fi
+  fi
+  printf '\n'
+}
+
+# ------------------------------------------------------------------- main ---
 if [[ "$UNINSTALL" -eq 1 ]]; then
   for p in "/usr/local/bin/${BIN_NAME}" "${HOME}/.local/bin/${BIN_NAME}"; do
     if [[ -f "$p" ]]; then
-      if [[ -w "$(dirname "$p")" ]]; then
-        rm -f "$p"
-      else
-        sudo rm -f "$p"
-      fi
+      if [[ -w "$(dirname "$p")" ]]; then rm -f "$p"; else sudo rm -f "$p"; fi
       echo "Removed ${p}"
     fi
   done
   exit 0
 fi
 
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-if [[ "$OS" != "linux" ]]; then
-  echo "error: unsupported OS '$OS' (CZHax prebuilt binaries target Linux)" >&2
-  exit 1
-fi
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-  aarch64|arm64)
-    ASSET="czhax-linux-arm64"
-    ;;
-  armv7l|armv7|armhf)
-    ASSET="czhax-linux-armv7"
-    ;;
-  x86_64|amd64)
-    ASSET="czhax-linux-amd64"
-    ;;
-  *)
-    echo "error: unsupported architecture '$ARCH'" >&2
-    exit 1
-    ;;
-esac
-
-resolve_latest_tag() {
-  local api_url="https://api.github.com/repos/${REPO}/releases/latest"
-  local tag=""
-  if command -v curl >/dev/null 2>&1; then
-    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'Cache-Control: no-cache' "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
-    if [[ -z "$tag" ]]; then
-      local url
-      url="$(curl -fsSL -H 'Cache-Control: no-cache' -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
-      tag="${url##*/}"
-    fi
-  elif command -v wget >/dev/null 2>&1; then
-    tag="$(wget -qO- --header='Accept: application/vnd.github+json' --header='Cache-Control: no-cache' "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
-    if [[ -z "$tag" ]]; then
-      local url
-      url="$(wget -q --max-redirect=5 --server-response "https://github.com/${REPO}/releases/latest" -O /dev/null 2>&1 | awk '/^  Location: /{loc=$2} END{print loc}' | tr -d '\r')"
-      tag="${url##*/}"
-    fi
-  fi
-  printf '%s' "$tag"
-}
-
-if [[ "$VERSION" == "latest" ]]; then
-  RESOLVED="$(resolve_latest_tag)"
-  if [[ -n "$RESOLVED" && "$RESOLVED" != "latest" ]]; then
-    VERSION="$RESOLVED"
+if [[ "$COMPONENTS_GIVEN" -eq 0 ]]; then
+  if [[ -t 0 ]]; then
+    interactive_menu
+  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    exec </dev/tty
+    interactive_menu
+  else
+    # non-interactive (curl | bash in CI, cron, …): keep the old behaviour
+    WANT_CZHAX=1
   fi
 fi
 
-if [[ "$VERSION" == "latest" || -z "$VERSION" ]]; then
-  echo "error: could not resolve latest release tag from GitHub" >&2
-  exit 1
+if [[ "$WANT_CARDUPTER" -eq 1 ]]; then setup_cardputer; fi
+if [[ "$WANT_NEXMON" -eq 1 ]]; then setup_nexmon; fi
+if [[ "$WANT_CZHAX" -eq 1 ]]; then install_czhax; fi
+if [[ "$WANT_PACKAGES" -eq 1 ]]; then setup_packages; fi
+
+echo
+if command -v "$BIN_NAME" >/dev/null 2>&1; then
+  "$BIN_NAME" --version 2>/dev/null || true
+  echo "Run '$BIN_NAME' to start, or 'sudo $BIN_NAME update' to update."
 fi
-
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
-
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-
-echo "Downloading ${ASSET} (${VERSION})..."
-if command -v curl >/dev/null 2>&1; then
-  curl -fL --progress-bar "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${BIN_NAME}"
-  curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt"
-elif command -v wget >/dev/null 2>&1; then
-  wget -q --show-progress "${BASE_URL}/${ASSET}" -O "${TMP_DIR}/${BIN_NAME}"
-  wget -q "${BASE_URL}/checksums.txt" -O "${TMP_DIR}/checksums.txt"
-else
-  echo "error: curl or wget is required" >&2
-  exit 1
-fi
-
-if command -v sha256sum >/dev/null 2>&1; then
-  EXPECTED="$(grep " ${ASSET}\$" "${TMP_DIR}/checksums.txt" | awk '{print $1}' || true)"
-  if [[ -z "$EXPECTED" ]]; then
-    echo "error: checksum entry for ${ASSET} missing in checksums.txt" >&2
-    exit 1
-  fi
-  ACTUAL="$(sha256sum "${TMP_DIR}/${BIN_NAME}" | awk '{print $1}')"
-  if [[ "$EXPECTED" != "$ACTUAL" ]]; then
-    echo "error: checksum mismatch for ${ASSET}" >&2
-    echo "  expected: ${EXPECTED}" >&2
-    echo "  actual:   ${ACTUAL}" >&2
-    exit 1
-  fi
-  echo "SHA256 verified."
-fi
-
-chmod +x "${TMP_DIR}/${BIN_NAME}"
-
-mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-if [[ -w "$INSTALL_DIR" ]]; then
-  install -m 0755 "${TMP_DIR}/${BIN_NAME}" "$TARGET_PATH"
-elif command -v sudo >/dev/null 2>&1; then
-  sudo mkdir -p "$INSTALL_DIR"
-  sudo install -m 0755 "${TMP_DIR}/${BIN_NAME}" "$TARGET_PATH"
-else
-  echo "error: cannot write to ${INSTALL_DIR} and sudo is unavailable (try --user)" >&2
-  exit 1
-fi
-
-echo ""
-echo "Installed ${BIN_NAME} to ${TARGET_PATH}"
-"${TARGET_PATH}" --version || true
-echo "Run 'czhax' to start, or 'sudo czhax update' anytime to update."
