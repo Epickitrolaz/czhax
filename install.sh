@@ -119,15 +119,22 @@ fetch_source() {
   SRC_DIR="$TMP_DIR/src"
   log "fetching $REPO@$SRC_REF"
   mkdir -p "$SRC_DIR"
-  if have curl; then
-    curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
-      tar xz -C "$SRC_DIR" --strip-components=1
-  elif have wget; then
-    wget -qO- "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${SRC_REF}" |
-      tar xz -C "$SRC_DIR" --strip-components=1
-  else
-    die "curl or wget is required"
-  fi
+
+  # a branch or a tag: try refs/heads first, then refs/tags
+  local url got=""
+  for kind in heads tags; do
+    url="https://codeload.github.com/${REPO}/tar.gz/refs/${kind}/${SRC_REF}"
+    if have curl; then
+      if curl -fsSL "$url" | tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+    elif have wget; then
+      if wget -qO- "$url" | tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+    else
+      die "curl or wget is required"
+    fi
+    [[ -n "$got" ]] && break
+    rm -rf "$SRC_DIR"; mkdir -p "$SRC_DIR"
+  done
+  [[ -n "$got" ]] || die "could not fetch $REPO@$SRC_REF (try --ref <branch-or-tag>)"
 }
 
 # -------------------------------------------------------------- czhax TUI ---
