@@ -125,9 +125,11 @@ fetch_source() {
   for kind in heads tags; do
     url="https://codeload.github.com/${REPO}/tar.gz/refs/${kind}/${SRC_REF}"
     if have curl; then
-      if curl -fsSL "$url" | tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+      if curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "$url" |
+        tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
     elif have wget; then
-      if wget -qO- "$url" | tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
+      if wget -qO- --tries=3 --waitretry=2 "$url" |
+        tar xz -C "$SRC_DIR" --strip-components=1 2>/dev/null; then got=1; fi
     else
       die "curl or wget is required"
     fi
@@ -157,7 +159,7 @@ install_czhax() {
   if [[ "$version" == "latest" ]]; then
     local url tag
     if have curl; then
-      url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+      url="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
       tag="${url##*/}"
       if [[ -z "$tag" || "$tag" == "latest" ]]; then
         tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
@@ -178,8 +180,8 @@ install_czhax() {
   local tmp; tmp="$(mktemp -d)"
   log "downloading ${asset} (${version})"
   if have curl; then
-    curl -fL --progress-bar "${base}/${asset}" -o "${tmp}/${BIN_NAME}"
-    curl -fsSL "${base}/checksums.txt" -o "${tmp}/checksums.txt"
+    curl -fL --progress-bar --retry 3 --retry-delay 2 "${base}/${asset}" -o "${tmp}/${BIN_NAME}"
+    curl -fsSL --retry 3 --retry-delay 2 "${base}/checksums.txt" -o "${tmp}/checksums.txt"
   else
     wget -q --show-progress "${base}/${asset}" -O "${tmp}/${BIN_NAME}"
     wget -q "${base}/checksums.txt" -O "${tmp}/checksums.txt"
