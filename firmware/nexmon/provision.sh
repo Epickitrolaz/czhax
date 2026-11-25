@@ -58,6 +58,7 @@ if [ -z "$WORK" ]; then
 	if [ "$(id -u)" = 0 ]; then WORK=/root/nexmon-work; else WORK="$HOME/nexmon-work"; fi
 fi
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 # optional: SSH_IDENTITY=/path/to/key
@@ -159,21 +160,28 @@ fi
 
 # -------------------------------------------------------------- firmware ---
 OUT_FW="$WORK/out/43439A0-7.95.75-nexmon.bin"
+# A prebuilt bundle carries only the bytes our patch changes, so the firmware
+# can be installed anywhere (including this board) without nexmon's toolchain.
+BUNDLE="$HERE/prebuilt/bcm43439a0-7.95.75-nexmon.json"
+
 if [ "$DO_FW" = 1 ]; then
-	log "building the patched firmware (monitor hook: $MONITOR)"
-	NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
-		--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
-		--work "$WORK/fw" --out "$OUT_FW" || {
-		cat >&2 <<'EOM'
-
-Building the firmware failed. The usual cause on arm64 boards is nexmon's
-bundled arm-none-eabi toolchain, whose cc1 needs libisl.so.10 (not packaged in
-Debian 13). Build on an x86_64 workstation instead:
-
-    ./provision.sh --host pi@100.91.72.108
-EOM
-		exit 1
-	}
+	built=0
+	if [ "$(uname -m)" = "x86_64" ] && [ -n "$NEXMON" ]; then
+		log "building the patched firmware (monitor hook: $MONITOR)"
+		if NEXMON_MONITOR="$MONITOR" "$HERE/build-firmware.sh" \
+			--nexmon "$NEXMON" --fw "$FW_IN" --clm "$CLM_IN" \
+			--work "$WORK/fw" --out "$OUT_FW"; then
+			built=1
+		else
+			warn "firmware build failed, falling back to the prebuilt bundle"
+		fi
+	fi
+	if [ "$built" = 0 ]; then
+		[ -f "$BUNDLE" ] || die "cannot build the firmware here and $BUNDLE is missing"
+		log "applying the prebuilt patch bundle (no toolchain needed)"
+		mkdir -p "$(dirname "$OUT_FW")"
+		python3 "$HERE/tools/apply-bundle.py" "$FW_IN" "$BUNDLE" "$OUT_FW"
+	fi
 fi
 
 # ------------------------------------------------- native driver + install ---
@@ -185,7 +193,12 @@ if [ -z "$HOST" ]; then
 	fi
 	if [ "$DO_INSTALL" = 1 ]; then
 		[ "$(id -u)" = 0 ] || die "installing needs root (or pass --no-install)"
-		args=(--fw "$OUT_FW")
+		args=()
+		if [ "$DO_FW" = 1 ]; then
+			args+=(--fw "$OUT_FW")
+		else
+			args+=(--module-only)
+		fi
 		if [ "$DO_DRV" = 1 ]; then
 			args+=(--module "$OUT_MOD")
 		fi

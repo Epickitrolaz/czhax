@@ -186,9 +186,20 @@ is touched, and the radio/PHY registers are never written by this patch set.
 
 ## Build and install
 
-One command, from an x86_64 workstation (recommended — it builds the firmware
-here where nexmon's bundled toolchain runs, then builds the driver and installs
-on the board over SSH):
+One command, on the board:
+
+```sh
+sudo ./provision.sh
+```
+
+It builds `brcmfmac.ko` for the running kernel and installs the patched
+firmware. The firmware is either built from source (x86_64, where nexmon's
+bundled toolchain runs) or applied from the prebuilt patch bundle in
+`prebuilt/` — a 44 KB JSON that carries only the bytes the patch changes, so no
+toolchain is needed to install it. It refuses to apply unless the input matches
+the stock image it was built against.
+
+From a workstation, build from source and finish on the board in one go:
 
 ```sh
 ./provision.sh --host pi@100.91.72.108
@@ -197,9 +208,22 @@ on the board over SSH):
 The workstation needs passwordless sudo on the board (`sudo -n true` must work)
 and the vendor blobs are pulled from the board's stock backup automatically.
 
-Running it on the board only works when nexmon's bundled `arm-none-eabi`
-toolchain can run there: its `cc1` links against `libisl.so.10`, which Debian 13
-does not ship for armhf, so in practice the workstation path above is the way.
+Nexmon's bundled `arm-none-eabi` toolchain cannot run on the board itself: its
+`cc1` needs `libisl.so.10` **and** `libmpfr.so.4`, neither of which Debian 13
+ships for armhf (and they cannot be stubbed — MPFR does the constant folding).
+`prebuilt/` exists precisely so that this never blocks an install.
+
+### Keeping the bundle in sync
+
+`prebuilt/bcm43439a0-7.95.75-nexmon.json` is generated from a source build:
+
+```sh
+NEXMON_MONITOR=1 ./build-firmware.sh --fw <stock>.bin --clm <clm_blob> \
+    --out build/43439A0.bin --bundle-out prebuilt/bcm43439a0-7.95.75-nexmon.json
+```
+
+Regenerate it whenever the patch sources change (the CI-free workflow is: build,
+run the command above, commit the JSON).
 
 Options:
 

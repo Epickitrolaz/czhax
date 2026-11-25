@@ -220,46 +220,16 @@ setup_nexmon() {
   chmod +x "$p" "$SRC_DIR/firmware/nexmon/driver/build-driver.sh" 2>/dev/null || true
 
   if [[ -n "$NEXMON_HOST" ]]; then
+    [[ "$(uname -m)" == "x86_64" ]] || die "--nexmon-host builds the firmware on the x86_64 machine that runs the installer; on the board just run the installer without it"
     log "nexmon: building the firmware here, finishing on $NEXMON_HOST"
     bash "$p" --host "$NEXMON_HOST"
     return
   fi
 
-  # The firmware half needs nexmon's bundled arm-none-eabi toolchain, which on
-  # arm64 needs libisl.so.10 (not in Debian 13). On the board itself we can
-  # still build/install the driver, so do that and explain the rest.
-  if [[ "$(uname -m)" == "x86_64" ]]; then
-    log "nexmon: building firmware and driver"
-    bash "$p"
-    return
-  fi
-
-  local fw="" cand
-  for cand in "$SRC_DIR/firmware/nexmon/build/"*.bin /root/nexmon-work/out/*.bin; do
-    if [[ -f "$cand" ]]; then fw="$cand"; break; fi
-  done
-
-  log "nexmon: building the driver for $(uname -r)"
-  bash "$p" --driver-only
-
-  if [[ -n "$fw" ]]; then
-    log "nexmon: installing firmware image $fw"
-    bash "$SRC_DIR/firmware/nexmon/install.sh" --fw "$fw" --module-only
-  else
-    cat <<EOF
-
-  The driver is installed, but this host cannot build the firmware image:
-  nexmon's bundled toolchain needs libisl.so.10, which Debian 13 does not ship
-  for arm64. Build it once from an x86_64 machine on the same network:
-
-      ./firmware/nexmon/provision.sh --host <user>@<this-board>
-
-  ...or copy a patched image over and run:
-
-      ./firmware/nexmon/install.sh --fw <image>.bin --module-only
-
-EOF
-  fi
+  # provision.sh builds the firmware from source on x86_64 and otherwise applies
+  # the prebuilt patch bundle to the stock image, so this works everywhere.
+  log "nexmon: installing firmware and driver"
+  bash "$p"
 }
 
 # ------------------------------------------------------- pentest packages ---
@@ -323,13 +293,10 @@ EOF
     if ask "  disable the Raspberry Pi ACT LED?" n; then CARD_LEDS=1; fi
     if ! ask "  run a full system upgrade first?" y; then CARD_SKIP_UPGRADE=1; fi
   fi
-  if [[ "$WANT_NEXMON" -eq 1 ]]; then
+  if [[ "$WANT_NEXMON" -eq 1 && "$(uname -m)" == "x86_64" ]]; then
     printf '\nWi-Fi monitor mode\n'
-    if [[ "$(uname -m)" != "x86_64" ]]; then
-      printf '  On this machine only the driver can be built.\n'
-      printf '  Build the firmware from an x86_64 host (user@host, Enter to skip): ' >/dev/tty
-      read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
-    fi
+    printf '  Push the result to a board over ssh (user@host, Enter to stay local): ' >/dev/tty
+    read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
   fi
   if [[ "$WANT_CZHAX" -eq 1 ]]; then
     if ask "  install czhax for the current user only (~/.local/bin)?" n; then USER_INSTALL=1; fi
