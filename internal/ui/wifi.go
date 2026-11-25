@@ -101,13 +101,6 @@ func (v WifiView) BuildRows(w int, pal theme.Palette, inf wifi.Interface) []stri
 	if strings.EqualFold(modeStr, "monitor") {
 		modeStyled = warn.Render(modeStr)
 	}
-	if inf.HasMonCap {
-		if inf.MonitorCapable {
-			modeStyled += " " + ok.Render("(mon: yes)")
-		} else {
-			modeStyled += " " + muted.Render("(mon: no)")
-		}
-	}
 
 	// Vendor / Product line
 	vendorStr := joinNonEmpty(" ", inf.Manufacturer, inf.Product)

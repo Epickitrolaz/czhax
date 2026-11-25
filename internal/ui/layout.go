@@ -13,6 +13,8 @@ type ViewID int
 
 const (
 	ViewStatus ViewID = iota
+	ViewWiFi
+	ViewIR
 	ViewSystem
 	viewCount
 )
@@ -23,6 +25,14 @@ const (
 	StatusTabBT
 )
 
+const (
+	WiFiTabScan = iota
+)
+
+// SidebarLabelMax is the widest label a left sidebar entry may render.
+// Full names are truncated to this width; compact widths use Short3.
+const SidebarLabelMax = 6
+
 type ViewDef struct {
 	ID     ViewID
 	Name   string
@@ -30,8 +40,15 @@ type ViewDef struct {
 	Tabs   []string
 }
 
+// SidebarLabel returns the name that fits the left sidebar width budget.
+func SidebarLabel(name string) string {
+	return Truncate(strings.TrimSpace(name), SidebarLabelMax)
+}
+
 var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
+	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan"}},
+	{ID: ViewIR, Name: "IR", Short3: "IR", Tabs: []string{"Remote", "Learn", "Browse"}},
 	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
 }
 

@@ -10,12 +10,20 @@ import (
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/console"
+	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
 )
 
 var version = "0.2.0"
+
+func valueOrNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "update" {
@@ -76,6 +84,24 @@ func main() {
 		default:
 			st := boot.DetectState(homeDir)
 			fmt.Printf("enabled=%v method=%s\n", st.Enabled, st.Method)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "ir" {
+		hw := ir.DiscoverHardware()
+		fmt.Printf("IR receiver: %s\n", valueOrNone(hw.RXPath))
+		fmt.Printf("IR transmitter: %s\n", valueOrNone(hw.TXPath))
+		for _, d := range hw.Paths {
+			fmt.Printf("  %s features=%#08x rx=%v tx=%v", d.Path, d.Features, d.Receiver, d.Transmitter)
+			if d.Err != "" {
+				fmt.Printf(" error=%s", d.Err)
+			}
+			fmt.Println()
+		}
+		if hw.Err != "" {
+			fmt.Fprintln(os.Stderr, "IR: "+hw.Err)
+			os.Exit(1)
 		}
 		return
 	}

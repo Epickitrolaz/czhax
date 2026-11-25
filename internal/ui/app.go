@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
@@ -29,7 +31,31 @@ const (
 
 type tickMsg time.Time
 type clearStatusMsg struct{}
-type startupRedrawMsg struct{}
+type startupRedrawMsg struct{ step int }
+
+// startupRedrawDelays schedules full repaints while the system is still
+// settling after boot. Kernel/systemd console messages write straight to the
+// VT and shift the TUI; a clear+repaint restores it until things go quiet.
+var startupRedrawDelays = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	5 * time.Second,
+	9 * time.Second,
+	14 * time.Second,
+	20 * time.Second,
+	30 * time.Second,
+	45 * time.Second,
+	60 * time.Second,
+}
+
+func scheduleStartupRedraw(step int) tea.Cmd {
+	if step < 0 || step >= len(startupRedrawDelays) {
+		return nil
+	}
+	return tea.Tick(startupRedrawDelays[step], func(time.Time) tea.Msg {
+		return startupRedrawMsg{step: step}
+	})
+}
 
 type updateDoneMsg struct {
 	res updater.Result
@@ -62,6 +88,47 @@ type wifiRefreshedMsg struct {
 	ifaces []wifi.Interface
 }
 
+type wifiNetworksScannedMsg struct {
+	iface string
+	nets  []wifi.Network
+	err   error
+}
+
+type wifiConnectDoneMsg struct {
+	req wifi.ConnectRequest
+	err error
+}
+
+type wifiPentestDoneMsg struct {
+	res wifi.PentestResult
+	err error
+}
+
+type wifiPentestTickMsg struct{}
+
+type irCaptureDoneMsg struct {
+	seq int
+	sig ir.Signal
+	err error
+}
+
+type irSendDoneMsg struct {
+	name string
+	err  error
+}
+
+type irIndexDoneMsg struct {
+	entries []ir.Entry
+	err     error
+}
+
+type irRemoteLoadedMsg struct {
+	remote ir.Remote
+	err    error
+}
+
+type irLearnTickMsg struct{}
+
 type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
@@ -82,6 +149,8 @@ type AppModel struct {
 	Status    StatusView
 	System    SystemView
 	Wifi      WifiView
+	WifiScan  WifiScanView
+	IR        IRView
 	Bluetooth BluetoothView
 	Help      HelpView
 
@@ -95,7 +164,7 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 	if version == "" {
 		version = "dev"
 	}
-	return AppModel{
+	m := AppModel{
 		Cfg:        cfg,
 		ConfigPath: cfgPath,
 		Version:    version,
@@ -106,24 +175,95 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		Focus:      FocusTabs,
 		System:     NewSystemView(),
 		Wifi:       NewWifiView(),
+		WifiScan:   NewWifiScanView(),
+		IR:         NewIRView(cfgPath),
 		Bluetooth:  NewBluetoothView(),
 	}
+	if cfg.IRFlipperDir != "" {
+		m.IR.Roots.Flipper = cfg.IRFlipperDir
+	}
+	if cfg.IRMiDir != "" {
+		m.IR.Roots.Mi = cfg.IRMiDir
+	}
+	return m
 }
 
 func (m AppModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd()}
-	if os.Getenv("TERM") == "linux" {
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return startupRedrawMsg{}
-		}))
+	if isLinuxConsole() {
+		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
 	return tea.Batch(cmds...)
+}
+
+func isLinuxConsole() bool {
+	return os.Getenv("TERM") == "linux"
 }
 
 func collectWifiCmd() tea.Cmd {
 	return func() tea.Msg {
 		return wifiRefreshedMsg{ifaces: wifi.Collect()}
 	}
+}
+
+func scanWifiNetworksCmd(iface string) tea.Cmd {
+	return func() tea.Msg {
+		nets, err := wifi.ScanNetworks(iface)
+		return wifiNetworksScannedMsg{iface: iface, nets: nets, err: err}
+	}
+}
+
+func connectWifiNetworkCmd(req wifi.ConnectRequest) tea.Cmd {
+	return func() tea.Msg {
+		err := wifi.ConnectNetwork(req)
+		return wifiConnectDoneMsg{req: req, err: err}
+	}
+}
+
+func runWifiPentestCmd(ctx context.Context, req wifi.PentestRequest) tea.Cmd {
+	return func() tea.Msg {
+		res, err := wifi.RunPentest(ctx, req)
+		return wifiPentestDoneMsg{res: res, err: err}
+	}
+}
+
+func wifiPentestTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return wifiPentestTickMsg{}
+	})
+}
+
+func irCaptureCmd(ctx context.Context, path string, timeout time.Duration, seq int) tea.Cmd {
+	return func() tea.Msg {
+		sig, err := ir.CaptureOnce(ctx, path, timeout)
+		return irCaptureDoneMsg{seq: seq, sig: sig, err: err}
+	}
+}
+
+func irSendCmd(path string, sig ir.Signal, name string) tea.Cmd {
+	return func() tea.Msg {
+		return irSendDoneMsg{name: name, err: ir.SendOnce(path, sig)}
+	}
+}
+
+func irIndexCmd(roots ir.Roots) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := ir.LoadIndex(roots)
+		return irIndexDoneMsg{entries: entries, err: err}
+	}
+}
+
+func irLoadCmd(entry ir.Entry) tea.Cmd {
+	return func() tea.Msg {
+		remote, err := ir.LoadEntry(entry)
+		return irRemoteLoadedMsg{remote: remote, err: err}
+	}
+}
+
+func irLearnTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return irLearnTickMsg{}
+	})
 }
 
 func collectBluetoothCmd() tea.Cmd {
@@ -171,7 +311,88 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wifiRefreshedMsg:
 		m.Wifi.SetInterfaces(msg.ifaces)
+		m.WifiScan.SyncInterfaces(msg.ifaces)
 		return m, nil
+
+	case wifiNetworksScannedMsg:
+		m.WifiScan.SetScanResult(msg.iface, msg.nets, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Scan failed")
+		}
+		return m, m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface))
+
+	case wifiConnectDoneMsg:
+		m.WifiScan.SetConnectResult(msg.req, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Connect failed")
+		}
+		m.Snap = sysinfo.Collect()
+		scanIface := m.WifiScan.EffectiveScanIface()
+		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface))
+
+	case wifiPentestDoneMsg:
+		m.WifiScan.SetPentestResult(msg.res, msg.err)
+		status := "Pentest done"
+		switch {
+		case msg.err != nil:
+			status = "Pentest failed"
+		case msg.res.HandshakeComplete:
+			status = "Handshake captured"
+		case msg.res.EAPOLFrames > 0:
+			status = fmt.Sprintf("Captured %d EAPOL", msg.res.EAPOLFrames)
+		case msg.res.DeauthFrames > 0:
+			status = fmt.Sprintf("Sent %d deauth", msg.res.DeauthFrames)
+		}
+		return m, tea.Batch(m.setStatus(status), collectWifiCmd())
+
+	case wifiPentestTickMsg:
+		if !m.WifiScan.PentestActive {
+			return m, nil
+		}
+		if !m.WifiScan.PentestStarted.IsZero() {
+			m.WifiScan.PentestElapsed = time.Since(m.WifiScan.PentestStarted)
+		}
+		return m, wifiPentestTickCmd()
+
+	case irCaptureDoneMsg:
+		m.IR.ApplyCaptureResult(msg.seq, msg.sig, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("IR capture failed")
+		}
+		return m, m.setStatus("IR signal captured")
+
+	case irSendDoneMsg:
+		if msg.err != nil {
+			m.IR.Note = "Send failed: " + msg.err.Error()
+			m.IR.NoteIsErr = true
+			return m, m.setStatus("IR send failed")
+		}
+		m.IR.Note = "Sent " + msg.name
+		m.IR.NoteIsErr = false
+		return m, m.setStatus("IR sent")
+
+	case irIndexDoneMsg:
+		m.IR.SetIndex(msg.entries, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("IR index failed")
+		}
+		return m, m.setStatus(fmt.Sprintf("%d IR remotes", len(msg.entries)))
+
+	case irRemoteLoadedMsg:
+		if msg.err != nil {
+			m.IR.RemoteLoading = false
+			m.IR.RemoteErr = msg.err.Error()
+			return m, m.setStatus("IR load failed")
+		}
+		m.IR.SetRemote(msg.remote)
+		return m, m.setStatus(msg.remote.ProfileName())
+
+	case irLearnTickMsg:
+		if !m.IR.Capturing {
+			return m, nil
+		}
+		m.IR.CaptureElapsed = time.Since(m.IR.CaptureStarted)
+		return m, irLearnTickCmd()
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
@@ -182,7 +403,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case startupRedrawMsg:
-		return m, tea.ClearScreen
+		cmds := []tea.Cmd{tea.ClearScreen}
+		if next := scheduleStartupRedraw(msg.step + 1); next != nil {
+			cmds = append(cmds, next)
+		}
+		return m, tea.Batch(cmds...)
 
 	case updateDoneMsg:
 		m.System.Updating = false
@@ -280,12 +505,53 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Never leave a monitor interface behind: stop a run before quitting.
+	if m.WifiScan.PentestActive && (k == "ctrl+c" || k == "q") {
+		m.WifiScan.StopPentest()
+		return m, m.setStatus("Stopping pentest...")
+	}
+	if m.IR.Capturing && (k == "ctrl+c" || k == "q") {
+		m.IR.StopCapture()
+		return m, m.setStatus("IR capture stopped")
+	}
+
+	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
+		if k == "esc" {
+			m.WifiScan.HandleEsc()
+			return m, nil
+		}
+		if submit, handled := m.WifiScan.HandleTextKey(msg); handled {
+			if submit {
+				req := m.WifiScan.BuildConnectRequest()
+				return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
+			}
+			return m, nil
+		}
+	}
+
 	switch k {
 	case "?":
 		m.ShowHelp = true
 		m.Help.Scroll = 0
 		return m, nil
 	case "r":
+		if m.WifiScan.PentestActive {
+			return m, m.setStatus("Pentest running")
+		}
+		if m.ActiveView == ViewIR && m.Focus == FocusContent {
+			if m.IR.Capturing {
+				return m, m.setStatus("IR capture running")
+			}
+			m.IR.RefreshHardware()
+			if IRTab(m.ActiveTabs[ViewIR]) == IRTabBrowse {
+				m.IR.Remote = nil
+				m.IR.RemoteErr = ""
+				m.IR.IndexLoading = true
+				m.IR.IndexDone = false
+				return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+			}
+			return m, m.setStatus("IR refreshed")
+		}
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
 		if len(m.Wifi.Interfaces) == 0 {
@@ -294,7 +560,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.Bluetooth.Adapters) == 0 {
 			m.Bluetooth.Scanning = true
 		}
-		return m, tea.Batch(m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd())
+		cmds := []tea.Cmd{m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd()}
+		if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.Mode == scanModeList && !m.WifiScan.Scanning {
+			iface := m.WifiScan.EffectiveScanIface()
+			m.WifiScan.StartScan()
+			cmds = append(cmds, scanWifiNetworksCmd(iface))
+		}
+		return m, tea.Batch(cmds...)
 	case "q":
 		if m.Cfg.ConfirmQuit {
 			m.ConfirmExit = true
@@ -317,6 +589,23 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.Focus = FocusContent
 			if m.ActiveView == ViewSystem {
 				m.System.RefreshBootState()
+			} else if m.ActiveView == ViewWiFi {
+				m.WifiScan.SyncInterfaces(m.Wifi.Interfaces)
+				if !m.WifiScan.HasScanned && !m.WifiScan.Scanning {
+					iface := m.WifiScan.EffectiveScanIface()
+					m.WifiScan.StartScan()
+					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+				}
+				return m, collectWifiCmd()
+			} else if m.ActiveView == ViewIR {
+				m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+				m.IR.RefreshHardware()
+				if m.IR.Tab == IRTabBrowse && !m.IR.IndexDone && !m.IR.IndexLoading {
+					m.IR.RemoteErr = ""
+					m.IR.IndexLoading = true
+					return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+				}
+				return m, nil
 			} else if m.ActiveView == ViewStatus {
 				switch m.ActiveTabs[ViewStatus] {
 				case StatusTabWiFi:
@@ -350,7 +639,67 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleContentKey(k)
 }
 
+func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
+	if m.WifiScan.PentestActive {
+		return m, nil
+	}
+	net, ok := m.WifiScan.SelectedNetwork()
+	if !ok {
+		return m, m.setStatus("Select an AP first")
+	}
+	if wifi.ChannelNumber(net) <= 0 {
+		return m, m.setStatus("Unknown AP channel, rescan")
+	}
+	ctx, req, ok := m.WifiScan.StartPentest(mode)
+	if !ok {
+		return m, m.setStatus("Select an AP first")
+	}
+	return m, tea.Batch(
+		m.setStatus(mode.String()+"..."),
+		runWifiPentestCmd(ctx, req),
+		wifiPentestTickCmd(),
+	)
+}
+
+func (m AppModel) sendIR(sig ir.Signal, name string) (tea.Model, tea.Cmd) {
+	if m.IR.HW.TXPath == "" {
+		m.IR.Note = "No IR transmitter: " + m.IR.HW.Err
+		m.IR.NoteIsErr = true
+		return m, m.setStatus("No IR transmitter")
+	}
+	return m, irSendCmd(m.IR.HW.TXPath, sig, name)
+}
+
+func (m AppModel) irProbe(target string) (tea.Model, tea.Cmd) {
+	if m.IR.HW.TXPath == "" {
+		m.IR.Note = "No IR transmitter: " + m.IR.HW.Err
+		m.IR.NoteIsErr = true
+		return m, m.setStatus("No IR transmitter")
+	}
+	sig, ok := m.IR.NextProbe(target)
+	if !ok {
+		m.IR.Note = "No candidates for " + target
+		m.IR.NoteIsErr = true
+		return m, nil
+	}
+	return m.sendIR(sig, target)
+}
+
+func (m AppModel) startIRCapture() (tea.Model, tea.Cmd) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, seq, ok := m.IR.StartCapture(ctx)
+	if !ok {
+		cancel()
+		return m, nil
+	}
+	m.IR.SetCaptureCancel(cancel)
+	return m, tea.Batch(irCaptureCmd(ctx, m.IR.HW.RXPath, 5*time.Second, seq), irLearnTickCmd(), m.setStatus("IR listening..."))
+}
+
 func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
+	if m.ActiveView == ViewIR {
+		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+	}
 	if m.ActiveView == ViewSystem && m.System.Confirm != "" {
 		action := m.System.Confirm
 		switch k {
@@ -376,11 +725,199 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	}
 
 	if k == "esc" {
+		if m.ActiveView == ViewWiFi && m.WifiScan.HandleEsc() {
+			return m, nil
+		}
+		if m.ActiveView == ViewIR && m.IR.HandleEsc() {
+			return m, nil
+		}
 		m.Focus = FocusTabs
 		return m, nil
 	}
 
 	switch m.ActiveView {
+	case ViewWiFi:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		switch m.WifiScan.Mode {
+		case scanModeList:
+			switch {
+			case k == "w":
+				return m.startWifiPentest(wifi.PentestHandshake)
+			case k == "d":
+				return m.startWifiPentest(wifi.PentestDeauth)
+			case k == "b":
+				return m.startWifiPentest(wifi.PentestBoth)
+			case m.isUp(k):
+				m.WifiScan.MoveNetwork(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveNetwork(1)
+			case m.isLeft(k):
+				m.WifiScan.CycleScanIface(-1)
+			case m.isRight(k) || k == "i":
+				m.WifiScan.CycleScanIface(1)
+			case k == "s":
+				if !m.WifiScan.Scanning {
+					iface := m.WifiScan.EffectiveScanIface()
+					m.WifiScan.StartScan()
+					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+				}
+			case k == "enter":
+				if len(m.WifiScan.Networks) == 0 {
+					if !m.WifiScan.Scanning {
+						iface := m.WifiScan.EffectiveScanIface()
+						m.WifiScan.StartScan()
+						return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+					}
+				} else {
+					m.WifiScan.OpenDetail()
+				}
+			case k == "c":
+				m.WifiScan.BeginConnect(scanModeList)
+			}
+			return m, nil
+
+		case scanModeDetail:
+			switch {
+			case k == "w":
+				return m.startWifiPentest(wifi.PentestHandshake)
+			case k == "d":
+				return m.startWifiPentest(wifi.PentestDeauth)
+			case k == "b":
+				return m.startWifiPentest(wifi.PentestBoth)
+			case m.isUp(k):
+				m.WifiScan.MoveDetailScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.WifiScan.MoveDetailScroll(1, mainW, bodyH, pal)
+			case k == "enter" || k == "c":
+				m.WifiScan.BeginConnect(scanModeDetail)
+			}
+			return m, nil
+
+		case scanModePickIface:
+			if m.WifiScan.Connecting {
+				return m, nil
+			}
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveIfaceCursor(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveIfaceCursor(1)
+			case k == "enter":
+				if m.WifiScan.ConfirmConnectIface() {
+					req := m.WifiScan.BuildConnectRequest()
+					return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
+				}
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case ViewIR:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		_ = mainW
+		_ = bodyH
+		_ = pal
+		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+		switch m.IR.Tab {
+		case IRTabRemote:
+			switch {
+			case m.isUp(k):
+				if m.IR.RemoteScroll > 0 {
+					m.IR.RemoteScroll--
+				}
+			case m.isDown(k):
+				m.IR.RemoteScroll++
+			case k == "[":
+				m.IR.CycleProfile(-1)
+			case k == "]":
+				m.IR.CycleProfile(1)
+			default:
+				if b, ok := m.IR.BindingForKey(k); ok {
+					return m.sendIR(b.Signal, b.Name)
+				}
+			}
+			if p := m.IR.Store.ActiveProfile(); p != nil {
+				maxScroll := max(0, len(p.Bindings)-max(1, bodyH-2))
+				if m.IR.RemoteScroll > maxScroll {
+					m.IR.RemoteScroll = maxScroll
+				}
+			}
+			return m, nil
+
+		case IRTabLearn:
+			switch {
+			case k == "l":
+				return m.startIRCapture()
+			case k == "t" && m.IR.Learned != nil:
+				return m.sendIR(*m.IR.Learned, "Learned")
+			default:
+				if m.IR.AwaitBinding && ir.IsBindableKey(k) {
+					if m.IR.BindLearned(k) {
+						if m.IR.NoteIsErr {
+							return m, m.setStatus("IR save failed")
+						}
+						return m, m.setStatus("Bound " + ir.KeyLabel(k))
+					}
+				}
+			}
+			return m, nil
+
+		case IRTabBrowse:
+			if m.IR.Remote == nil {
+				switch {
+				case m.isUp(k):
+					m.IR.MoveBrowse(-1)
+				case m.isDown(k):
+					m.IR.MoveBrowse(1)
+				case m.isLeft(k):
+					m.IR.CycleCategory(-1)
+				case m.isRight(k):
+					m.IR.CycleCategory(1)
+				case k == "p":
+					m.IR.CycleProvider(1)
+				case k == "enter":
+					if e, ok := m.IR.SelectedEntry(); ok {
+						m.IR.RemoteLoading = true
+						return m, irLoadCmd(e)
+					}
+				}
+				return m, nil
+			}
+			switch {
+			case k == "g":
+				m.IR.GridMode = !m.IR.GridMode
+			case k == "a":
+				if m.IR.AcceptRemote() {
+					m.ActiveTabs[ViewIR] = int(IRTabRemote)
+					if m.IR.NoteIsErr {
+						return m, m.setStatus("IR save failed")
+					}
+					return m, m.setStatus("IR profile saved")
+				}
+				return m, m.setStatus("No IR signals to save")
+			case !m.IR.GridMode && k == "p":
+				return m.irProbe("Power")
+			case !m.IR.GridMode && k == "v":
+				return m.irProbe("Vol_up")
+			case !m.IR.GridMode && k == "m":
+				return m.irProbe("Mute")
+			case m.IR.GridMode && ir.IsBindableKey(k):
+				if m.IR.HW.TXPath == "" {
+					m.IR.Note = "No IR transmitter: " + m.IR.HW.Err
+					m.IR.NoteIsErr = true
+					return m, m.setStatus("No IR transmitter")
+				}
+				if sig, name, ok := m.IR.gridSignal(k); ok {
+					m.IR.advanceGrid(k)
+					return m.sendIR(sig, name)
+				}
+			}
+			return m, nil
+		}
+		return m, nil
+
 	case ViewStatus:
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
@@ -537,6 +1074,9 @@ func (m *AppModel) cycleTab(delta int) {
 	}
 	cur := m.ActiveTabs[m.ActiveView]
 	m.ActiveTabs[m.ActiveView] = (cur + delta + len(tabs)) % len(tabs)
+	if m.ActiveView == ViewIR {
+		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+	}
 }
 
 func (m AppModel) isUp(k string) bool {
@@ -610,6 +1150,12 @@ func (m AppModel) View() string {
 	switch {
 	case m.ShowHelp:
 		mainLines = m.Help.RenderLines(mainW, bodyH, pal)
+	case m.ActiveView == ViewWiFi:
+		mainLines = m.WifiScan.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+	case m.ActiveView == ViewIR:
+		irView := m.IR
+		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
+		mainLines = irView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewSystem:
 		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
 	default:
@@ -678,6 +1224,73 @@ func (m AppModel) currentHints() []Hint {
 			{Key: "r", Desc: "ref"},
 			{Key: "?", Desc: "help"},
 			{Key: "q", Desc: "quit"},
+		}
+	}
+	if m.ActiveView == ViewWiFi {
+		switch m.WifiScan.Mode {
+		case scanModeDetail:
+			return []Hint{
+				{Key: "⏎", Desc: "conn"},
+				{Key: "b", Desc: "both"},
+				{Key: "w", Desc: "hs"},
+				{Key: "d", Desc: "deauth"},
+				{Key: "Esc", Desc: "back"},
+			}
+		case scanModePickIface:
+			return []Hint{
+				{Key: "↑↓", Desc: "if"},
+				{Key: "⏎", Desc: "use"},
+				{Key: "Esc", Desc: "back"},
+				{Key: "q", Desc: "quit"},
+			}
+		case scanModeSSID:
+			return []Hint{
+				{Key: "⏎", Desc: "next"},
+				{Key: "Esc", Desc: "back"},
+			}
+		case scanModePassword:
+			return []Hint{
+				{Key: "⏎", Desc: "conn"},
+				{Key: "Tab", Desc: "vis"},
+				{Key: "Esc", Desc: "back"},
+			}
+		case scanModePentest:
+			if m.WifiScan.PentestActive {
+				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+			}
+			return []Hint{{Key: "Esc", Desc: "back"}, {Key: "q", Desc: "quit"}}
+		default:
+			return []Hint{
+				{Key: "⏎", Desc: "info"},
+				{Key: "s", Desc: "scan"},
+				{Key: "c", Desc: "conn"},
+				{Key: "b", Desc: "both"},
+				{Key: "w", Desc: "hs"},
+				{Key: "d", Desc: "deauth"},
+				{Key: "Esc", Desc: "tabs"},
+			}
+		}
+	}
+	if m.ActiveView == ViewIR {
+		switch m.IR.Tab {
+		case IRTabLearn:
+			if m.IR.Capturing {
+				return []Hint{{Key: "Esc", Desc: "cancel"}, {Key: "q", Desc: "stop"}}
+			}
+			if m.IR.AwaitBinding {
+				return []Hint{{Key: "1-0", Desc: "bind"}, {Key: "t", Desc: "test"}, {Key: "Esc", Desc: "cancel"}}
+			}
+			return []Hint{{Key: "l", Desc: "listen"}, {Key: "Esc", Desc: "tabs"}}
+		case IRTabBrowse:
+			if m.IR.Remote != nil {
+				if m.IR.GridMode {
+					return []Hint{{Key: "key", Desc: "send/next"}, {Key: "a", Desc: "accept"}, {Key: "g", Desc: "probe"}, {Key: "Esc", Desc: "back"}}
+				}
+				return []Hint{{Key: "p/v/m", Desc: "try"}, {Key: "a", Desc: "accept"}, {Key: "g", Desc: "grid"}, {Key: "Esc", Desc: "back"}}
+			}
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "type"}, {Key: "p", Desc: "src"}, {Key: "⏎", Desc: "open"}, {Key: "r", Desc: "index"}}
+		default:
+			return []Hint{{Key: "key", Desc: "send"}, {Key: "[ ]", Desc: "profile"}, {Key: "Esc", Desc: "tabs"}}
 		}
 	}
 	if m.ActiveView == ViewSystem {

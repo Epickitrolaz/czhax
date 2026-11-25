@@ -54,9 +54,23 @@ func defaultCollector() collector {
 }
 
 func execCmd(ctx context.Context, name string, args ...string) (string, error) {
-	c := exec.CommandContext(ctx, name, args...)
+	bin := resolveBin(name)
+	c := exec.CommandContext(ctx, bin, args...)
 	out, err := c.CombinedOutput()
 	return string(out), err
+}
+
+func resolveBin(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, dir := range []string{"/sbin", "/usr/sbin", "/usr/bin", "/bin"} {
+		cand := filepath.Join(dir, name)
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			return cand
+		}
+	}
+	return name
 }
 
 func stdNetLookup(name string) ([]string, int, bool, string) {
