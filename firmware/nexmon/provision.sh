@@ -130,7 +130,9 @@ if [ "$need_apt" = 1 ]; then
 fi
 
 # ---------------------------------------------------------- nexmon source ---
-if [ -n "$NEXMON_SRC" ]; then
+if [ "$DO_FW" = 0 ]; then
+	NEXMON=""
+elif [ -n "$NEXMON_SRC" ]; then
 	NEXMON="$NEXMON_SRC"
 	log "using nexmon from $NEXMON"
 else
@@ -200,8 +202,10 @@ log "deploying to $HOST"
 STAGE=/tmp/nexmon-deploy
 ssh "${SSH_OPTS[@]}" "$HOST" "rm -rf $STAGE && mkdir -p $STAGE/stage"
 tar czf - -C "$HERE" . | ssh "${SSH_OPTS[@]}" "$HOST" "tar xzf - -C $STAGE/stage"
-ssh "${SSH_OPTS[@]}" "$HOST" "cat > $STAGE/fw.bin" < "$OUT_FW"
-echo ">> shipped firmware $(md5sum < "$OUT_FW" | cut -d' ' -f1)"
+if [ "$DO_FW" = 1 ]; then
+	ssh "${SSH_OPTS[@]}" "$HOST" "cat > $STAGE/fw.bin" < "$OUT_FW"
+	echo ">> shipped firmware $(md5sum < "$OUT_FW" | cut -d' ' -f1)"
+fi
 
 if [ "$DO_DRV" = 1 ]; then
 	log "building brcmfmac on $HOST"
@@ -211,8 +215,14 @@ fi
 
 if [ "$DO_INSTALL" = 1 ]; then
 	log "installing on $HOST"
-	ssh "${SSH_OPTS[@]}" "$HOST" \
-		"args='--fw $STAGE/fw.bin'; [ $DO_DRV = 1 ] && args=\"\$args --module $STAGE/brcmfmac.ko\"; sudo $STAGE/stage/install.sh \$args"
+	IARGS=""
+	if [ "$DO_FW" = 1 ]; then
+		IARGS="$IARGS --fw $STAGE/fw.bin"
+	else
+		IARGS="$IARGS --module-only"
+	fi
+	if [ "$DO_DRV" = 1 ]; then IARGS="$IARGS --module $STAGE/brcmfmac.ko"; fi
+	ssh "${SSH_OPTS[@]}" "$HOST" "sudo $STAGE/stage/install.sh $IARGS"
 fi
 
 echo

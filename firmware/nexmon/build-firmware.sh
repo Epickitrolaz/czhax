@@ -89,6 +89,12 @@ make -s -C "$NEXMON/buildtools" >/dev/null
 echo ">> overlaying the $FW_VER_DIR port"
 cp -r "$HERE/overlay/." "$NEXMON/"
 
+# the injection path needs corrected struct offsets (sk_buff.scb, wlc_band,
+# wlc_hw_info.up) on top of nexmon's shared structs.common.h
+if ! grep -q "struct wlc_band" "$NEXMON/firmwares/bcm43439a0/structs.common.h"; then
+	( cd "$NEXMON" && patch -p1 --quiet < "$HERE/overlay/firmwares/bcm43439a0/structs.common.h.patch" )
+fi
+
 # register the firmware version id (idempotent)
 if ! grep -q "FW_VER_7_95_75_0a0104c" "$NEXMON/patches/include/firmware_version.h"; then
 	sed -i 's|^#define FW_VER_7_95_49_2271bb6 .*|&\n#define FW_VER_7_95_75_0a0104c             911|' \

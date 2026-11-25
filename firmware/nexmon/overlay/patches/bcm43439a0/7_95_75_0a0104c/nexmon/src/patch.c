@@ -38,7 +38,7 @@
 #include <patcher.h>
 #include <capabilities.h>      // capabilities included in a nexmon patch
 
-int capabilities = NEX_CAP_MONITOR_MODE | NEX_CAP_MONITOR_MODE_RADIOTAP;
+int capabilities = NEX_CAP_MONITOR_MODE | NEX_CAP_MONITOR_MODE_RADIOTAP | NEX_CAP_FRAME_INJECTION;
 
 // Hook the call to wlc_ucode_write in wlc_ucode_download
 __attribute__((at(WLC_UCODE_WRITE_BL_HOOK_ADDR, "", CHIP_VER_BCM43439a0, FW_VER_7_95_75_0a0104c)))

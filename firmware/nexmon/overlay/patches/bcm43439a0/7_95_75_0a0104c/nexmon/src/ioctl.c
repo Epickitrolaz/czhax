@@ -41,9 +41,20 @@
 #include <patcher.h>            // macros used to create patches such as BLPatch, BPatch, ...
 #include <nexioctls.h>          // ioctls added in the nexmon patch
 #include <capabilities.h>       // capabilities included in a nexmon patch
+#include <sendframe.h>          // sendframe functionality
 #include <argprintf.h>
 
-int 
+// Defined in injection.c. Parses the radiotap header off an skb and hands the
+// bare 802.11 frame to sendframe(); consumes (tx) or frees the skb on error.
+int inject_frame(struct wlc_info *wlc, struct sk_buff *p);
+extern int nexmon_tx_stats[8];
+
+// Headroom reserved in front of the injected frame so wlc_d11hdrs() can prepend
+// the d11 TX header without reallocating (the 43439 d11 tx header tops out near
+// 0xb0 bytes).
+#define INJECT_HEADROOM 202
+
+int
 wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 {
     argprintf_init(arg, len);
@@ -61,6 +72,30 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             if (len > 0) {
                 arg[len-1] = 0;
                 printf("ioctl: %s\n", arg);
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case NEX_INJECT_FRAME:
+            // arg holds one radiotap-prefixed 802.11 frame of length len
+            if (len > 0) {
+                struct sk_buff *p = pkt_buf_get_skb(wlc->osh, len + INJECT_HEADROOM);
+
+                if (p != 0) {
+                    skb_pull(p, INJECT_HEADROOM);
+                    memcpy(p->data, arg, len);
+                    // inject_frame() frees the skb on a malformed radiotap
+                    // header, so only report success for a queued frame
+                    ret = inject_frame(wlc, p) == 0 ? IOCTL_SUCCESS : IOCTL_ERROR;
+                } else {
+                    ret = IOCTL_ERROR;
+                }
+            }
+            break;
+
+        case 0x604: // nexmon tx diagnostics
+            if (len >= 32) {
+                memcpy(arg, nexmon_tx_stats, 32);
                 ret = IOCTL_SUCCESS;
             }
             break;

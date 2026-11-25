@@ -120,7 +120,8 @@ static void usage(void)
 		"  get <cmd> <len>      raw ioctl get\n"
 		"  set <cmd> <hexdata>  raw ioctl set\n"
 		"  mem <addr> <len> <file>   read firmware/ROM memory to a local file\n"
-		"  inject <file>        send one radiotap frame to NEX_INJECT_FRAME\n");
+		"  inject <file>        send one radiotap frame to NEX_INJECT_FRAME\n"
+		"  txstat               firmware injection counters\n");
 }
 
 static int parse_num(const char *s, unsigned long *out)
@@ -257,6 +258,16 @@ int main(int argc, char **argv)
 		}
 		fclose(f);
 		fprintf(stderr, "read %lu bytes from 0x%lx -> %s\n", len, addr, path);
+		return 0;
+	}
+
+	if (!strcmp(cmd, "txstat")) {
+		uint32_t st[8] = {0};
+		if (ioctl_xfer(0x604, 0, st, sizeof(st), NULL))
+			return 1;
+		printf("queued %u  no_scb %u  wlc_down %u\n", st[0], st[1], st[2]);
+		printf("wlc 0x%08x  band 0x%08x  hwrs_scb 0x%08x  hw->up %u\n",
+		       st[4], st[5], st[6], st[7]);
 		return 0;
 	}
 

@@ -11,7 +11,7 @@
 #   /boot/firmware/nexmon-stock/restore.sh
 #   /boot/firmware/nexmon-stock/RESTORE.txt
 #
-# Usage: ./install.sh [--fw FILE] [--module FILE] [--no-driver]
+# Usage: ./install.sh [--fw FILE] [--module FILE] [--no-driver|--module-only]
 #
 set -euo pipefail
 
@@ -25,26 +25,30 @@ MOD_DST="$MOD_DIR/brcmfmac.ko"
 FW="${FW:-$HERE/build/43439A0-7.95.75-nexmon.bin}"
 MODULE="${MODULE:-$HERE/../driver/build/brcmfmac.ko}"
 WITH_DRIVER=1
+WITH_FW=1
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fw) FW="$2"; shift 2 ;;
 	--module) MODULE="$2"; shift 2 ;;
 	--no-driver) WITH_DRIVER=0; shift ;;
+	--module-only) WITH_FW=0; shift ;;
 	-h|--help) sed -n '2,20p' "$0"; exit 0 ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
-[ -r "$FW" ] || { echo "missing firmware: $FW" >&2; exit 1; }
+if [ "$WITH_FW" = 1 ]; then
+	[ -r "$FW" ] || { echo "missing firmware: $FW" >&2; exit 1; }
+fi
 if [ "$WITH_DRIVER" = 1 ]; then
 	[ -r "$MODULE" ] || { echo "missing module: $MODULE" >&2; exit 1; }
 fi
 
 # --- stock backup (once, never overwritten) -----------------------------
 mkdir -p "$BACKUP"
-if [ ! -e "$BACKUP/cyfmac43439-sdio.bin" ]; then
+if [ "$WITH_FW" = 1 ] && [ ! -e "$BACKUP/cyfmac43439-sdio.bin" ]; then
 	cp -a "$FW_DST" "$BACKUP/cyfmac43439-sdio.bin"
 	echo ">> stock firmware saved to $BACKUP/cyfmac43439-sdio.bin"
 fi
@@ -55,8 +59,10 @@ fi
 sync
 
 # --- install ------------------------------------------------------------
-install -m 644 "$FW" "$FW_DST"
-echo ">> firmware: $FW"
+if [ "$WITH_FW" = 1 ]; then
+	install -m 644 "$FW" "$FW_DST"
+	echo ">> firmware: $FW"
+fi
 
 if [ "$WITH_DRIVER" = 1 ]; then
 	install -m 644 "$MODULE" "$MOD_DST"

@@ -29,7 +29,7 @@ The RAM layout differs, so the patch had to be re-derived.
 | ROM verification (`wl_monitor` call site at `0x81F6D6`) | **verified against a live ROM dump** — `ldr r0,[r6,#8]; mov r1,sp; mov r2,r8; bl 0x818838` |
 | Firmware monitor dispatch (`wl_monitor` ROM flash patch) | **done** — patch lands, frames flow |
 | Monitor capture with radiotap | **working** — captured beacons/data on ch6 |
-| Frame injection | not started |
+| Frame injection | **working** — `aireplay-ng --test mon0` reports 30/30 (100%) against a real AP |
 
 ### Verified on hardware
 
@@ -43,6 +43,45 @@ capabilities: 0x00000003 monitor radiotap
 
 # capture on mon0
 frame 6 len=244 rtap_ver=0 rtap_len=24 hdr=80000000ffffffffffff7e6ad2f4d41a...
+
+# injection
+#   ./nexctl caps
+capabilities: 0x00000007 monitor radiotap injection
+#   aireplay-ng --test mon0
+15:51:53  46:F7:9F:4E:78:78 - channel: 6 - 'DIRECT-78-HP M207 LaserJet'
+15:51:53  Ping (min/avg/max): 2.077ms/123.826ms/182.393ms Power: -88.63
+15:51:53  30/30: 100%
+```
+
+### How injection is wired
+
+The firmware side is the injection path from upstream PR #688 (written for this
+chip): `NEX_INJECT_FRAME` (408) takes one radiotap-prefixed 802.11 frame,
+`injection.c` parses the radiotap header and `sendframe.c` hands the bare frame
+to `wlc_d11hdrs()`/`wlc_txfifo()`. The struct offsets that needs (`sk_buff.scb`,
+`wlc_band.hwrs_scb`, `wlc_hw_info.up`) are applied by
+`overlay/firmwares/bcm43439a0/structs.common.h.patch`.
+
+On the driver side the stock kernel drops everything written to a monitor
+interface. Here `ndo_start_xmit` copies the frame into a workqueue and issues it
+as the `NEX_INJECT_FRAME` dcmd — a dcmd sleeps, so it cannot run in the transmit
+softirq. That is what makes ordinary tools work:
+
+```sh
+sudo aireplay-ng --deauth 5 -a <BSSID> mon0
+sudo mdk4 mon0 b -c 6
+```
+
+Because every frame is one synchronous SDIO round trip, injection is fine for
+management frames (auth/deauth/probe/beacon floods at a few per second) but not
+a high-rate data injector.
+
+`nexctl txstat` reports the firmware's counters, which is how the path was
+debugged:
+
+```
+queued 30  no_scb 0  wlc_down 0
+wlc 0x00035350  band 0x00034a7c  hwrs_scb 0x000664ac  hw->up 3
 ```
 
 Constraints found while testing:

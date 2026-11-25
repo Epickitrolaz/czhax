@@ -39,16 +39,42 @@ Cross-checks after building the patched image:
   `version 7.95.75 (0a0104c CY nexmon.org: ...)` and a scan still returns
   access points.
 
-## What is still version-dependent and unverified
+## What is still version-dependent
 
 `monitormode.c` hooks ROM at `0x81F6D6` with a flash patch — that address comes
 from the Pico W 7.95.49 port and cannot be checked against the firmware image,
-because it is ROM. Supporting evidence that the ROM is identical:
+because it is ROM. It was verified against a live dump read back from the chip:
+
+```
+81f6d0: ldr r0, [r6, #8]
+81f6d2: mov r1, sp
+81f6d4: mov r2, r8
+81f6d6: bl  0x818838          ; wl_monitor(wl, sts, p)
+```
+
+and after booting the patched image the same address holds a branch into the
+patch region (`16 f4 03 f5`), i.e. the flash patch engine applied it.
+
+Supporting evidence that the ROM is otherwise identical:
 
 * 20+ flash-patch targets in the two vendor tables are exactly the same
   (`0x8117D8`, `0x82141C`, `0x823828`, `0x83666C`, `0x83ADAC`, `0x840808`,
   `0x824C0C`, `0x84E384`, `0x84EC18`, `0x85190C`, `0x86C084`, `0x856644`,
   `0x82A210`, `0x853B00`, `0x85B684`, `0x85B6E8`, …);
-* the `wlc_ioctl` entry point resolves to the same ROM address `0x81A3C9`.
+* the `wlc_ioctl` entry point resolves to the same ROM address `0x81A3C9`;
+* the injection path's ROM symbols (`wlc_d11hdrs` 0x8929FC, `wlc_get_txh_info`
+  0x82B8FC, `wlc_txfifo` 0x834194) work unmodified on this firmware.
 
-Still, dump and disassemble `0x81F6D6` before enabling the patch.
+Still version-specific are only the RAM-side constants in the table above and the
+three struct offsets for injection, which are checked at runtime through
+`nexctl txstat` (they resolve to sane heap pointers, and injected frames reach
+the air).
+
+## Injection specifics
+
+`sendframe()` gates on `wlc->band->hwrs_scb` and `wlc->hw->up`; the counters
+reported by `nexctl txstat` distinguish "queued" from "no scb" and "wlc down".
+A frame only leaves the radio once `wlc_txfifo()` has been reached, so the
+`queued` counter is the useful signal when debugging. The frames are transmitted
+with the radiotap RATE field (500 kbps units) as the ratespec override, so a
+frame without a RATE field is sent with ratespec 0.
