@@ -101,9 +101,10 @@ need_root() { [[ "$(id -u)" -eq 0 ]] || die "this step needs root, re-run with s
 have() { command -v "$1" >/dev/null 2>&1; }
 
 ask() { # ask <prompt> <default y|n>
-  local prompt="$1" def="$2" ans
+  local prompt="$1" def="$2" ans=""
   local hint="[Y/n]"; [[ "$def" == "n" ]] && hint="[y/N]"
-  read -r -p "$prompt $hint " ans </dev/tty || ans=""
+  printf '%s %s ' "$prompt" "$hint" >/dev/tty
+  read -r ans </dev/tty || ans=""
   ans="${ans:-$def}"
   [[ "${ans,,}" == "y" ]]
 }
@@ -295,7 +296,7 @@ CZHax installer - M5Stack Cardputer Zero
   q) Quit
 
 EOF
-  printf 'Select [1-4, a, q]: '
+  printf 'Select [1-4, a, q]: ' >/dev/tty
   read -r choice </dev/tty || choice="q"
 
   case "${choice,,}" in
@@ -326,7 +327,7 @@ EOF
     printf '\nWi-Fi monitor mode\n'
     if [[ "$(uname -m)" != "x86_64" ]]; then
       printf '  On this machine only the driver can be built.\n'
-      printf '  Build the firmware from an x86_64 host (user@host, Enter to skip): '
+      printf '  Build the firmware from an x86_64 host (user@host, Enter to skip): ' >/dev/tty
       read -r NEXMON_HOST </dev/tty || NEXMON_HOST=""
     fi
   fi
@@ -351,7 +352,10 @@ if [[ "$COMPONENTS_GIVEN" -eq 0 ]]; then
   if [[ -t 0 ]]; then
     interactive_menu
   elif [[ -r /dev/tty && -w /dev/tty ]]; then
-    exec </dev/tty
+    # NOTE: do not `exec </dev/tty` here. When this script is piped into bash
+    # (curl ... | bash) the shell reads the script itself from stdin; pointing
+    # stdin at the terminal would make bash wait for the rest of the script on
+    # the keyboard. The interactive reads below explicitly use /dev/tty.
     interactive_menu
   else
     # non-interactive (curl | bash in CI, cron, …): keep the old behaviour
