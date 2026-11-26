@@ -104,6 +104,10 @@ type wifiPentestDoneMsg struct {
 	err error
 }
 
+type wifiPentestProgressMsg struct {
+	res wifi.PentestResult
+}
+
 type wifiPentestTickMsg struct{}
 
 type irCaptureDoneMsg struct {
@@ -220,10 +224,44 @@ func connectWifiNetworkCmd(req wifi.ConnectRequest) tea.Cmd {
 	}
 }
 
-func runWifiPentestCmd(ctx context.Context, req wifi.PentestRequest) tea.Cmd {
+func runWifiPentestCmd(ctx context.Context, req wifi.PentestRequest, progressCh chan wifi.PentestResult) tea.Cmd {
 	return func() tea.Msg {
-		res, err := wifi.RunPentest(ctx, req)
+		defer func() {
+			if progressCh != nil {
+				close(progressCh)
+			}
+		}()
+		res, err := wifi.RunPentestWithProgress(ctx, req, func(prog wifi.PentestResult) {
+			if progressCh == nil {
+				return
+			}
+			select {
+			case progressCh <- prog:
+			default:
+				select {
+				case <-progressCh:
+				default:
+				}
+				select {
+				case progressCh <- prog:
+				default:
+				}
+			}
+		})
 		return wifiPentestDoneMsg{res: res, err: err}
+	}
+}
+
+func waitWifiPentestProgressCmd(ch <-chan wifi.PentestResult) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		res, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return wifiPentestProgressMsg{res: res}
 	}
 }
 
@@ -344,6 +382,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			status = fmt.Sprintf("Sent %d deauth", msg.res.DeauthFrames)
 		}
 		return m, tea.Batch(m.setStatus(status), collectWifiCmd())
+
+	case wifiPentestProgressMsg:
+		if !m.WifiScan.PentestActive {
+			return m, nil
+		}
+		m.WifiScan.SetPentestProgress(msg.res)
+		return m, waitWifiPentestProgressCmd(m.WifiScan.PentestProgressCh)
 
 	case wifiPentestTickMsg:
 		if !m.WifiScan.PentestActive {
@@ -686,7 +731,8 @@ func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
 	}
 	return m, tea.Batch(
 		m.setStatus(mode.String()+"..."),
-		runWifiPentestCmd(ctx, req),
+		runWifiPentestCmd(ctx, req, m.WifiScan.PentestProgressCh),
+		waitWifiPentestProgressCmd(m.WifiScan.PentestProgressCh),
 		wifiPentestTickCmd(),
 	)
 }
