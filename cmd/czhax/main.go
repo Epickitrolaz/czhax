@@ -101,14 +101,21 @@ func main() {
 			fs := flag.NewFlagSet("oneshot run", flag.ExitOnError)
 			iface := fs.String("iface", "wlan0", "Wireless interface")
 			bssid := fs.String("bssid", "", "Target AP BSSID")
-			attack := fs.String("attack", "-P -k -F", "OneShot attack arguments")
+			attack := fs.String("attack", "-P -k", "OneShot attack arguments")
 			_ = fs.Parse(os.Args[3:])
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 			code := oneshot.RunAsRoot(ctx, *iface, *bssid, strings.Fields(*attack), os.Stdout, os.Stderr)
 			os.Exit(code)
 		}
-		fmt.Fprintln(os.Stderr, "usage: czhax oneshot run --iface wlan0 --bssid AA:BB:.. [--attack \"-P -k -F\"]")
+		if len(os.Args) > 2 && os.Args[2] == "restore" {
+			fs := flag.NewFlagSet("oneshot restore", flag.ExitOnError)
+			iface := fs.String("iface", "", "Wireless interface")
+			_ = fs.Parse(os.Args[3:])
+			oneshot.RestoreNetwork(*iface)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "usage: czhax oneshot run --iface wlan0 --bssid AA:BB:.. [--attack \"-P -k\"]")
 		os.Exit(1)
 	}
 
