@@ -108,18 +108,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		_ = exec.Command("hciconfig", hciName, "voice", "0x0060").Run()
 	}
 
-	var rfd int
-	for attempt := 0; attempt < 4; attempt++ {
-		rfd, err = openRFCOMM(local, addr, 1)
-		if err == nil {
-			break
-		}
-		if err != unix.EBUSY && err != unix.ECONNRESET && err != unix.ETIMEDOUT && err != unix.EAGAIN {
-			break
-		}
-		emit("RFCOMM channel busy (%v); retrying...", err)
-		time.Sleep(700 * time.Millisecond)
-	}
+	rfd, err := connectRFCOMMWithPairing(local, addr, address, emit)
 	if err != nil {
 		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered; CZHax needs root)", err)
 	}
@@ -173,6 +162,81 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		return ctx.Err()
 	}
 	return nil
+}
+
+func connectRFCOMMWithPairing(local, remote [6]byte, address string, emit func(string, ...any)) (int, error) {
+	if devicePaired(address) {
+		return openRFCOMM(local, remote, 1)
+	}
+	type attempt struct {
+		capability string
+		pin        string
+	}
+	attempts := []attempt{
+		{capability: "DisplayYesNo"},
+		{capability: "NoInputNoOutput"},
+		{capability: "KeyboardOnly", pin: "0000"},
+		{capability: "KeyboardOnly", pin: "1234"},
+	}
+	var last error
+	for _, a := range attempts {
+		agent, err := startPairingAgent(address, a.capability, a.pin)
+		if err != nil {
+			last = err
+			continue
+		}
+		time.Sleep(350 * time.Millisecond)
+		emit("Trying RFCOMM with %s agent%s", a.capability, pinLabel(a.pin))
+		fd, err := openRFCOMM(local, remote, 1)
+		_ = agent.Process.Kill()
+		_, _ = agent.Process.Wait()
+		if err == nil {
+			if devicePaired(address) {
+				_ = exec.Command("bluetoothctl", "trust", NormalizeAddr(address)).Run()
+			}
+			return fd, nil
+		}
+		last = err
+	}
+	return -1, last
+}
+
+func devicePaired(address string) bool {
+	if _, err := exec.LookPath("bluetoothctl"); err != nil {
+		return false
+	}
+	out, err := exec.Command("bluetoothctl", "info", NormalizeAddr(address)).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Paired: yes")
+}
+
+func startPairingAgent(address, capability, pin string) (*exec.Cmd, error) {
+	if _, err := exec.LookPath("bt-agent"); err != nil {
+		return nil, err
+	}
+	args := []string{"-c", capability}
+	if pin != "" {
+		pinFile := filepath.Join(os.TempDir(), fmt.Sprintf("czhax-bt-pin-%d", os.Getpid()))
+		if err := os.WriteFile(pinFile, []byte(NormalizeAddr(address)+" "+pin+"\n"), 0o600); err != nil {
+			return nil, err
+		}
+		defer os.Remove(pinFile)
+		args = append(args, "-p", pinFile)
+	}
+	cmd := exec.Command("bt-agent", args...)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func pinLabel(pin string) string {
+	if pin == "" {
+		return ""
+	}
+	return " PIN " + pin
 }
 
 func prepareCarwhispererAdapter(hciName string) error {
