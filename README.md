@@ -113,6 +113,8 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Signal, security, channel, and in-use state per AP, with a detail view
   - Connect to open, WPA/WPA2/WPA3, or hidden networks; pick the target interface and reveal the passphrase while typing
   - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax-captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
+  - **WPS attack (OneShot-Extended)**: press `Enter` on an AP and pick **WPS Attack (OneShot)**. Default attack is `-PkF` (Pixie Dust + `--pixie-force` + kill interfering processes); presets also cover Pixie Dust without force, Null PIN, push-button, bruteforce, and a custom PIN. OneShot is auto-detected from `~/OneShot-Extended`, `/opt/OneShot-Extended`, `ose.py` in `PATH`, `CZHAX_ONESHOT_DIR`, or `oneshot_dir` in the config; its `vulnwsc.txt` DB drives the vulnerability colors.
+  - **Network colors**: press `o` to cycle coloring modes — **SEC** (red WPA3, orange WPA2, yellow WPA/WEP, green Open) or **OSE** (green = in OneShot's vulnerable-device DB or WPS 1.0, red = WPS locked, muted = no WPS). The mode is persisted in `~/.config/czhax/config.json` as `wifi_color_mode`.
 - **IR Remote (`IR → Remote`, `IR → Learn`, `IR → Browse`)**:
   - **Learn**: copy any physical remote button with the GPIO13 IR receiver and bind it to a Cardputer key. Learned profiles persist in `~/.config/czhax/ir.json`.
   - **Remote**: the active profile maps buttons to keys (`1` Power, `2` Vol+, `3` Vol−, `4` Mute, `5`/`6` channel, `7`–`0` arrows, `Enter` OK, `Backspace` Back); presses transmit over the GPIO12 IR LED.
@@ -130,7 +132,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
-  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `?` toggles help, `q` / `Ctrl+C` quits
+  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `o` cycles network color modes, `?` toggles help, `q` / `Ctrl+C` quits
   - IR: `l` learns, `p`/`v`/`m` try power/volume/mute candidates, `a` accepts, `g` toggles grid mode, and `[`/`]` cycle profiles
 
 ## Build from Source

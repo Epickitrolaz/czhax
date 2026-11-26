@@ -35,6 +35,7 @@ internal/
   wifi/wifi.go             # Interface telemetry collected from /sys, ip, iw and ethtool
   wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
   wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
+  wifi/oneshot.go          # OneShot-Extended discovery + WPS scan/vulnwsc DB + streaming runner
   ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
   ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
   ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit
@@ -48,6 +49,7 @@ internal/
     status.go              # Status -> Device view
     wifi.go                # Status -> WiFi interface detail
     wifi_scan.go           # WiFi -> Scan list/detail/interface picker/connect flow
+    wifi_wps.go            # WiFi -> WPS/OneShot menu, runner output, color modes
     bluetooth.go           # Status -> Bluetooth view
     ir.go                  # IR -> Remote/Learn/Browse, probe + grid discovery modes
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)

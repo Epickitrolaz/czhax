@@ -51,7 +51,14 @@ type Config struct {
 	ConfirmQuit    bool         `json:"confirm_quit"`
 	IRFlipperDir   string       `json:"ir_flipper_dir,omitempty"`
 	IRMiDir        string       `json:"ir_mi_dir,omitempty"`
+	OneShotDir     string       `json:"oneshot_dir,omitempty"`
+	WiFiColor      string       `json:"wifi_color_mode,omitempty"` // security|oneshot
 }
+
+const (
+	WiFiColorSecurity = "security"
+	WiFiColorOneShot  = "oneshot"
+)
 
 func Default() Config {
 	return Config{
@@ -63,6 +70,7 @@ func Default() Config {
 		NavMode:        NavArrowsVim,
 		RefreshSeconds: 2,
 		ConfirmQuit:    true,
+		WiFiColor:      WiFiColorSecurity,
 	}
 }
 
@@ -140,5 +148,10 @@ func (c *Config) normalize() {
 	}
 	if c.RefreshSeconds > 60 {
 		c.RefreshSeconds = 60
+	}
+	switch c.WiFiColor {
+	case WiFiColorSecurity, WiFiColorOneShot:
+	default:
+		c.WiFiColor = WiFiColorSecurity
 	}
 }

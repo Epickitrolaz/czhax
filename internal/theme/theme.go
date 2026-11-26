@@ -10,6 +10,7 @@ type Palette struct {
 	Secondary lipgloss.Color
 	Success   lipgloss.Color
 	Warning   lipgloss.Color
+	Orange    lipgloss.Color
 	Danger    lipgloss.Color
 	Text      lipgloss.Color
 	Muted     lipgloss.Color
@@ -29,6 +30,7 @@ var HighContrast = Palette{
 	Secondary: lipgloss.Color("#E5E7EB"),
 	Success:   lipgloss.Color("#86EFAC"),
 	Warning:   lipgloss.Color("#FEF08A"),
+	Orange:    lipgloss.Color("#FB923C"),
 	Danger:    lipgloss.Color("#FCA5A5"),
 	Text:      lipgloss.Color("#FFFFFF"),
 	Muted:     lipgloss.Color("#9CA3AF"),
@@ -48,6 +50,7 @@ func Resolve(_ string, stealth bool) Palette {
 		p.Secondary = lipgloss.Color("#D1D5DB")
 		p.Success = lipgloss.Color("#D1D5DB")
 		p.Warning = lipgloss.Color("#9CA3AF")
+		p.Orange = lipgloss.Color("#9CA3AF")
 		p.Danger = lipgloss.Color("#9CA3AF")
 		p.Border = lipgloss.Color("#4B5563")
 		p.SelectBg = lipgloss.Color("#4B5563")
