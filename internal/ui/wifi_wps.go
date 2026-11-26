@@ -22,8 +22,7 @@ type wpsMethod struct {
 
 var wpsMethods = []wpsMethod{
 	{Label: "Pixie Dust", Args: wifi.SplitAttackArgs(wifi.OneShotDefaultAttack)},
-	{Label: "Pixie (no force)", Args: []string{"-P", "-k"}},
-	{Label: "Pixie force only", Args: []string{"-P", "-F"}},
+	{Label: "Pixie force", Args: []string{"-P", "-k", "-F"}},
 	{Label: "Null PIN", Args: []string{"-N", "-k"}},
 	{Label: "Push button", Args: []string{"--pbc", "-k"}},
 	{Label: "Bruteforce", Args: []string{"-B", "-k"}},

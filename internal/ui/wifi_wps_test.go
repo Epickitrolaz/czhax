@@ -49,16 +49,16 @@ func TestWPSMenuAndRunFlow(t *testing.T) {
 			t.Fatalf("[%s] expected WPS menu details:\n%s", sz.name, menuView)
 		}
 
-		// Default method must be Pixie Dust with -P -k -F.
+		// Default method must be Pixie Dust with -P -k (no force).
 		method, ok := m.WifiScan.SelectedWPSMethod()
-		if !ok || method.Label != "Pixie Dust" || strings.Join(method.Args, " ") != "-P -k -F" {
+		if !ok || method.Label != "Pixie Dust" || strings.Join(method.Args, " ") != "-P -k" {
 			t.Fatalf("[%s] default method = %+v", sz.name, method)
 		}
 		m = sendKey(m, "enter")
 		if !m.WifiScan.WPSActive || m.WifiScan.Mode != scanModeWPSRun {
 			t.Fatalf("[%s] expected running OneShot, active=%v mode=%v", sz.name, m.WifiScan.WPSActive, m.WifiScan.Mode)
 		}
-		if strings.Join(m.WifiScan.WPSArgs, " ") != "-P -k -F" {
+		if strings.Join(m.WifiScan.WPSArgs, " ") != "-P -k" {
 			t.Fatalf("[%s] run args = %v", sz.name, m.WifiScan.WPSArgs)
 		}
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/WPSRun")
@@ -98,8 +98,8 @@ func TestWPSMenuAndRunFlow(t *testing.T) {
 func TestWPSRunStopAndCustomPin(t *testing.T) {
 	m := newWPSTestModel(t, 53, 14)
 	m.WifiScan.Mode = scanModeWPSMenu
-	// Custom PIN option is the 7th entry.
-	for i := 0; i < 6; i++ {
+	// Custom PIN option is the 6th entry.
+	for i := 0; i < 5; i++ {
 		m = sendKey(m, "down")
 	}
 	m = sendKey(m, "enter")

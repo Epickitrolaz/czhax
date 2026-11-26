@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // FindPython returns the python3/python interpreter path (with python3
@@ -55,13 +56,48 @@ func RunAsRoot(ctx context.Context, iface, bssid string, attackArgs []string, st
 	cmd.Dir = src.Dir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	restoreNetwork(iface)
+	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(runErr, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "run oneshot: %v\n", err)
+		fmt.Fprintf(stderr, "run oneshot: %v\n", runErr)
 		return 1
 	}
 	return 0
+}
+
+// RestoreNetwork restores networking after OneShot's --kill. It is used by the
+// privileged `czhax oneshot restore` helper.
+func RestoreNetwork(iface string) { restoreNetwork(iface) }
+
+// restoreNetwork runs with root privileges from the helper and undoes the
+// effects of OneShot's --kill.
+func restoreNetwork(iface string) {
+	run := func(timeout time.Duration, name string, args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		c := exec.CommandContext(ctx, name, args...)
+		return c.Run()
+	}
+	_ = run(20*time.Second, "systemctl", "start", "NetworkManager")
+	if _, err := exec.LookPath("nmcli"); err == nil {
+		deadline := time.Now().Add(6 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := run(2*time.Second, "nmcli", "-t", "general", "status"); err == nil {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		_ = run(10*time.Second, "nmcli", "networking", "on")
+		if iface != "" {
+			_ = run(10*time.Second, "nmcli", "device", "set", iface, "managed", "yes")
+		}
+	}
+	if iface != "" {
+		_ = run(10*time.Second, "ip", "link", "set", iface, "up")
+	}
+	_ = run(10*time.Second, "rfkill", "unblock", "wifi")
 }

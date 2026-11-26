@@ -18,8 +18,8 @@ import (
 )
 
 // OneShotDefaultAttack is the default OneShot-Extended argument set:
-// Pixie Dust + kill interfering processes + pixie force.
-const OneShotDefaultAttack = "-P -k -F"
+// Pixie Dust + kill interfering processes.
+const OneShotDefaultAttack = "-P -k"
 
 // WPSInfo is the WPS information element data parsed from an iw scan.
 type WPSInfo struct {
@@ -436,6 +436,10 @@ func RunOneShot(ctx context.Context, o OneShot, iface, bssid string, attackArgs 
 	go stream(errPipe)
 	waitErr := cmd.Wait()
 	wg.Wait()
+	if onLine != nil {
+		onLine("[czhax] restoring NetworkManager…")
+	}
+	restoreViaHelper(iface)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -451,6 +455,66 @@ func RunOneShot(ctx context.Context, o OneShot, iface, bssid string, attackArgs 
 		return waitErr
 	}
 	return nil
+}
+
+// RestoreAfterOneShot undoes the side effects of OneShot's --kill: starts
+// NetworkManager again, re-enables networking, re-adopts the interface and
+// unblocks rfkill so the next CZHax scan succeeds.
+func RestoreAfterOneShot(iface string) {
+	restoreAfterOneShot(defaultScanner(), iface)
+}
+
+func restoreAfterOneShot(s scanner, iface string) {
+	iface = strings.TrimSpace(iface)
+	hasNM := s.hasBin == nil || s.hasBin("nmcli")
+	if hasNM {
+		// --kill may have terminated NetworkManager; starting an active unit is
+		// a no-op, so always ask systemd to ensure it runs.
+		_, _ = runPrivileged(s, 20*time.Second, "systemctl", "start", "NetworkManager")
+		deadline := time.Now().Add(6 * time.Second)
+		for time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, err := s.runCmd(ctx, "nmcli", "-t", "general", "status")
+			cancel()
+			if err == nil {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		_, _ = runPrivileged(s, 10*time.Second, "nmcli", "networking", "on")
+		if iface != "" {
+			_, _ = runPrivileged(s, 10*time.Second, "nmcli", "device", "set", iface, "managed", "yes")
+		}
+	}
+	if iface != "" {
+		_, _ = runPrivileged(s, 10*time.Second, "ip", "link", "set", iface, "up")
+	}
+	_, _ = runPrivileged(s, 10*time.Second, "rfkill", "unblock", "wifi")
+}
+
+// restoreViaHelper restores networking through `czhax oneshot restore`, which
+// works under the same sudo rule as the WPS run and also covers canceled runs
+// where the privileged helper was killed. Falls back to best-effort commands.
+func restoreViaHelper(iface string) {
+	exe, err := os.Executable()
+	if err != nil {
+		RestoreAfterOneShot(iface)
+		return
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+		exe = resolved
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	args := []string{"oneshot", "restore", "--iface", iface}
+	bin := exe
+	if os.Geteuid() != 0 {
+		bin = "sudo"
+		args = append([]string{"-n", exe}, args...)
+	}
+	if err := exec.CommandContext(ctx, bin, args...).Run(); err != nil {
+		RestoreAfterOneShot(iface)
+	}
 }
 
 func cleanOneShotLine(s string) string {

@@ -617,11 +617,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.WifiScan.FinishWPSRun(msg.seq, msg.err)
 		switch {
 		case msg.err == nil:
-			return m, tea.Batch(m.setStatus("OneShot finished"), m.resetMarquee())
+			return m, tea.Batch(m.setStatus("OneShot finished"), m.resetMarquee(), collectWifiCmd())
 		case strings.Contains(msg.err.Error(), "canceled"):
-			return m, tea.Batch(m.setStatus("OneShot stopped"), m.resetMarquee())
+			return m, tea.Batch(m.setStatus("OneShot stopped"), m.resetMarquee(), collectWifiCmd())
 		default:
-			return m, tea.Batch(m.setStatus("OneShot failed"), m.resetMarquee())
+			return m, tea.Batch(m.setStatus("OneShot failed"), m.resetMarquee(), collectWifiCmd())
 		}
 
 	case irCaptureDoneMsg:

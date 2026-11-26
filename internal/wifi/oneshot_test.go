@@ -1,6 +1,7 @@
 package wifi
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,8 +115,11 @@ func TestSplitAttackArgs(t *testing.T) {
 }
 
 func TestDefaultOneShotAttack(t *testing.T) {
-	if OneShotDefaultAttack != "-P -k -F" {
-		t.Fatalf("default OneShot attack = %q, want -P -k -F", OneShotDefaultAttack)
+	if OneShotDefaultAttack != "-P -k" {
+		t.Fatalf("default OneShot attack = %q, want -P -k", OneShotDefaultAttack)
+	}
+	if strings.Contains(OneShotDefaultAttack, "-F") {
+		t.Fatal("plain Pixie Dust must not force pixiewps by default")
 	}
 }
 
@@ -159,5 +163,38 @@ func TestOneShotOverrideWins(t *testing.T) {
 	bad := FindOneShot(filepath.Join(dir, "missing"))
 	if bad.Found() || !strings.Contains(bad.Err, "unset oneshot_dir") {
 		t.Fatalf("expected explicit-path error, got %+v", bad)
+	}
+}
+
+func TestRestoreAfterOneShot(t *testing.T) {
+	var calls []string
+	s := scanner{
+		euid:   func() int { return 0 },
+		hasBin: func(string) bool { return true },
+		runCmd: func(_ context.Context, name string, args ...string) (string, error) {
+			calls = append(calls, name+" "+strings.Join(args, " "))
+			return "connected\n", nil
+		},
+	}
+	restoreAfterOneShot(s, "wlan0")
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"systemctl start NetworkManager",
+		"nmcli networking on",
+		"nmcli device set wlan0 managed yes",
+		"ip link set wlan0 up",
+		"rfkill unblock wifi",
+		"nmcli -t general status",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing restore command %q in:\n%s", want, joined)
+		}
+	}
+
+	calls = nil
+	restoreAfterOneShot(s, "")
+	joined = strings.Join(calls, "\n")
+	if strings.Contains(joined, "device set") || strings.Contains(joined, "ip link set") {
+		t.Fatalf("empty iface must skip interface-specific restore:\n%s", joined)
 	}
 }
