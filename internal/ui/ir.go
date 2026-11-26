@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/theme"
@@ -20,11 +21,20 @@ const (
 	IRTabBrowse
 )
 
+type irRemoteMode int
+
+const (
+	remoteModeUse irRemoteMode = iota
+	remoteModeList
+	remoteModeNew
+)
+
 type learnMenuOption int
 
 const (
 	learnOptListen learnMenuOption = iota
 	learnOptProfile
+	learnOptNewRemote
 	learnOptCount
 )
 
@@ -56,29 +66,40 @@ type IRView struct {
 	Note      string
 	NoteIsErr bool
 
-	RemoteScroll int
+	RemoteMode       irRemoteMode
+	RemoteScroll     int
+	RemoteListCursor int
+	EmptyMenuCursor  int
+	NewRemoteName    string
+	NewRemoteErr     string
+	NewRemoteInput   bool // when creating a remote from Learn tab
 
-	Capturing      bool
-	CaptureSeq     int
-	CaptureCancel  context.CancelFunc
-	CaptureStarted time.Time
-	CaptureElapsed time.Duration
-	Learned        *ir.Signal
-	AwaitBinding   bool
-	AwaitKeyPress  bool
-	LearnCursor    int
-	CapturedCursor int
-	LearnErr       string
+	Capturing       bool
+	CaptureSeq      int
+	CaptureCancel   context.CancelFunc
+	CaptureStarted  time.Time
+	CaptureElapsed  time.Duration
+	Learned         *ir.Signal
+	AwaitBinding    bool
+	AwaitKeyPress   bool
+	AwaitBindLabel  bool
+	PendingBindKey  string
+	PendingBindName string
+	LearnCursor     int
+	CapturedCursor  int
+	LearnErr        string
 
-	Index        []ir.Entry
-	IndexLoading bool
-	IndexDone    bool
-	IndexErr     string
-	ProviderIdx  int
-	CategoryIdx  int
-	Categories   []string
-	Filtered     []ir.Entry
-	BrowseCursor int
+	Index           []ir.Entry
+	IndexLoading    bool
+	IndexDone       bool
+	IndexErr        string
+	ProviderIdx     int
+	CategoryIdx     int
+	Categories      []string
+	BrowseQuery     string
+	BrowseSearching bool
+	Filtered        []ir.Entry
+	BrowseCursor    int
 
 	Remote          *ir.Remote
 	RemoteLoading   bool
@@ -142,12 +163,31 @@ func (v IRView) CategoryLabel() string {
 }
 
 func (v *IRView) refilter() {
-	v.Filtered = ir.FilterEntries(v.Index, v.ProviderID(), v.categoryID())
+	v.Filtered = ir.SearchEntries(v.Index, v.ProviderID(), v.categoryID(), v.BrowseQuery)
 	if v.BrowseCursor >= len(v.Filtered) {
 		v.BrowseCursor = max(0, len(v.Filtered)-1)
 	}
 	if v.BrowseCursor < 0 {
 		v.BrowseCursor = 0
+	}
+}
+
+func (v *IRView) JumpBrand(delta int) {
+	if len(v.Filtered) <= 1 || delta == 0 {
+		return
+	}
+	curBrand := v.Filtered[v.BrowseCursor].Brand
+	n := len(v.Filtered)
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for off := 1; off < n; off++ {
+		idx := (v.BrowseCursor + off*step + n) % n
+		if v.Filtered[idx].Brand != curBrand {
+			v.BrowseCursor = idx
+			return
+		}
 	}
 }
 
@@ -420,8 +460,187 @@ func (v *IRView) saveStore() error {
 	return nil
 }
 
+func (v IRView) IsTextInput() bool {
+	switch v.Tab {
+	case IRTabRemote:
+		return v.RemoteMode == remoteModeNew
+	case IRTabLearn:
+		return v.NewRemoteInput || v.AwaitBindLabel
+	case IRTabBrowse:
+		return v.Remote == nil && v.BrowseSearching
+	}
+	return false
+}
+
 func (v IRView) IsKeyCaptureActive() bool {
-	return v.Tab == IRTabLearn && v.AwaitKeyPress && v.Learned != nil
+	return v.Tab == IRTabLearn && v.AwaitKeyPress && !v.AwaitBindLabel && v.Learned != nil
+}
+
+func (v *IRView) MoveRemoteList(delta int) {
+	total := len(v.Store.Profiles) + 1 // +1 for "+ New remote"
+	v.RemoteListCursor = (v.RemoteListCursor + delta + total) % total
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *IRView) MoveEmptyMenu(delta int) {
+	v.EmptyMenuCursor = (v.EmptyMenuCursor + delta + 3) % 3
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *IRView) OpenRemoteList() {
+	v.RemoteMode = remoteModeList
+	v.RemoteListCursor = clampIndex(v.Store.Active, len(v.Store.Profiles))
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *IRView) BeginNewRemote(fromLearn bool) {
+	v.NewRemoteName = ""
+	v.NewRemoteErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	if fromLearn {
+		v.NewRemoteInput = true
+	} else {
+		v.RemoteMode = remoteModeNew
+	}
+}
+
+func (v *IRView) SelectRemoteFromList(idx int) bool {
+	if !v.Store.SelectProfile(idx) {
+		return false
+	}
+	v.RemoteScroll = 0
+	v.RemoteMode = remoteModeUse
+	if v.saveStore() == nil {
+		if p := v.Store.ActiveProfile(); p != nil {
+			v.Note = "Selected " + p.Name
+			v.NoteIsErr = false
+		}
+	}
+	return true
+}
+
+func (v *IRView) DeleteRemoteFromList(idx int) bool {
+	if idx < 0 || idx >= len(v.Store.Profiles) {
+		return false
+	}
+	name := v.Store.Profiles[idx].Name
+	if !v.Store.DeleteProfile(idx) {
+		return false
+	}
+	v.RemoteScroll = 0
+	if v.RemoteListCursor > len(v.Store.Profiles) {
+		v.RemoteListCursor = len(v.Store.Profiles)
+	}
+	if len(v.Store.Profiles) == 0 {
+		v.RemoteMode = remoteModeUse
+	}
+	if v.saveStore() == nil {
+		v.Note = "Deleted " + name
+		v.NoteIsErr = false
+	}
+	return true
+}
+
+func (v *IRView) HandleTextKey(msg tea.KeyMsg) (handled bool) {
+	if !v.IsTextInput() {
+		return false
+	}
+	switch {
+	case v.Tab == IRTabBrowse && v.BrowseSearching:
+		switch msg.Type {
+		case tea.KeyEnter:
+			v.BrowseSearching = false
+			return true
+		case tea.KeyBackspace, tea.KeyDelete:
+			v.BrowseQuery = dropLastRune(v.BrowseQuery)
+			v.refilter()
+			v.BrowseCursor = 0
+			return true
+		case tea.KeyCtrlU:
+			v.BrowseQuery = ""
+			v.refilter()
+			v.BrowseCursor = 0
+			return true
+		case tea.KeySpace:
+			v.BrowseQuery += " "
+			v.refilter()
+			v.BrowseCursor = 0
+			return true
+		case tea.KeyRunes:
+			v.BrowseQuery += string(msg.Runes)
+			v.refilter()
+			v.BrowseCursor = 0
+			return true
+		}
+		return true
+
+	case v.Tab == IRTabLearn && v.AwaitBindLabel:
+		switch msg.Type {
+		case tea.KeyEnter:
+			v.ConfirmBindLabel()
+			return true
+		case tea.KeyBackspace, tea.KeyDelete:
+			v.PendingBindName = dropLastRune(v.PendingBindName)
+			v.LearnErr = ""
+			return true
+		case tea.KeyCtrlU:
+			v.PendingBindName = ""
+			v.LearnErr = ""
+			return true
+		case tea.KeySpace:
+			v.PendingBindName += " "
+			v.LearnErr = ""
+			return true
+		case tea.KeyRunes:
+			v.PendingBindName += string(msg.Runes)
+			v.LearnErr = ""
+			return true
+		}
+		return true
+
+	default: // remoteModeNew or NewRemoteInput
+		switch msg.Type {
+		case tea.KeyEnter:
+			idx, err := v.Store.CreateProfile(v.NewRemoteName, "custom")
+			if err != nil {
+				v.NewRemoteErr = err.Error()
+				return true
+			}
+			_ = idx
+			created := strings.TrimSpace(v.NewRemoteName)
+			v.NewRemoteName = ""
+			v.NewRemoteErr = ""
+			v.RemoteScroll = 0
+			v.RemoteMode = remoteModeUse
+			v.NewRemoteInput = false
+			if v.saveStore() == nil {
+				v.Note = "Created " + created
+				v.NoteIsErr = false
+			}
+			return true
+		case tea.KeyBackspace, tea.KeyDelete:
+			v.NewRemoteName = dropLastRune(v.NewRemoteName)
+			v.NewRemoteErr = ""
+			return true
+		case tea.KeyCtrlU:
+			v.NewRemoteName = ""
+			v.NewRemoteErr = ""
+			return true
+		case tea.KeySpace:
+			v.NewRemoteName += " "
+			v.NewRemoteErr = ""
+			return true
+		case tea.KeyRunes:
+			v.NewRemoteName += string(msg.Runes)
+			v.NewRemoteErr = ""
+			return true
+		}
+		return true
+	}
 }
 
 func (v *IRView) MoveLearnMenu(delta int) {
@@ -442,16 +661,46 @@ func (v *IRView) BeginBindKey() bool {
 	}
 	v.AwaitBinding = true
 	v.AwaitKeyPress = true
+	v.AwaitBindLabel = false
+	v.PendingBindKey = ""
+	v.PendingBindName = ""
 	v.LearnErr = ""
 	v.Note = ""
 	v.NoteIsErr = false
 	return true
 }
 
+func (v *IRView) StartBindLabel(key string) bool {
+	key = ir.NormalizeBindKey(key)
+	if v.Learned == nil || !ir.IsBindableKey(key) {
+		return false
+	}
+	v.PendingBindKey = key
+	v.PendingBindName = ""
+	v.AwaitKeyPress = false
+	v.AwaitBindLabel = true
+	v.LearnErr = ""
+	return true
+}
+
+func (v *IRView) ConfirmBindLabel() bool {
+	if v.Learned == nil || !ir.IsBindableKey(v.PendingBindKey) {
+		return false
+	}
+	label := strings.TrimSpace(v.PendingBindName)
+	if label == "" {
+		label = "Key " + ir.KeyLabel(v.PendingBindKey)
+	}
+	return v.bindLearnedNamed(v.PendingBindKey, label)
+}
+
 func (v *IRView) DiscardLearned() {
 	v.Learned = nil
 	v.AwaitBinding = false
 	v.AwaitKeyPress = false
+	v.AwaitBindLabel = false
+	v.PendingBindKey = ""
+	v.PendingBindName = ""
 	v.CapturedCursor = 0
 	v.LearnErr = ""
 	v.Note = ""
@@ -532,25 +781,32 @@ func (v *IRView) applyCaptureResult(sig ir.Signal, err error) {
 }
 
 func (v *IRView) BindLearned(key string) bool {
+	return v.bindLearnedNamed(key, "Learned")
+}
+
+func (v *IRView) bindLearnedNamed(key, label string) bool {
 	key = ir.NormalizeBindKey(key)
 	if v.Learned == nil || !ir.IsBindableKey(key) {
 		return false
 	}
-	name := "My remote"
-	if p := v.Store.ActiveProfile(); p != nil && strings.TrimSpace(p.Name) != "" {
-		name = p.Name
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "Learned"
 	}
 	sig := v.Learned.Normalized()
-	sig.Name = "Learned"
+	sig.Name = label
 	sig.Saved = time.Now()
-	v.Store.AddBinding(name, ir.Binding{Key: key, Name: "Learned", Signal: sig})
+	v.Store.AddBindingToActive(ir.Binding{Key: key, Name: label, Signal: sig})
 	v.AwaitBinding = false
 	v.AwaitKeyPress = false
+	v.AwaitBindLabel = false
+	v.PendingBindKey = ""
+	v.PendingBindName = ""
 	v.CapturedCursor = 0
 	v.Learned = nil
 	v.LearnErr = ""
 	if v.saveStore() == nil {
-		v.Note = "Bound to " + ir.KeyLabel(key)
+		v.Note = "Bound " + ir.KeyLabel(key) + " (" + label + ")"
 		v.NoteIsErr = false
 	}
 	return true
@@ -589,9 +845,37 @@ func (v IRView) BindingForKey(key string) (ir.Binding, bool) {
 
 func (v *IRView) HandleEsc() bool {
 	switch v.Tab {
+	case IRTabRemote:
+		if v.RemoteMode == remoteModeNew {
+			v.NewRemoteName = ""
+			v.NewRemoteErr = ""
+			if len(v.Store.Profiles) > 0 {
+				v.RemoteMode = remoteModeList
+			} else {
+				v.RemoteMode = remoteModeUse
+			}
+			return true
+		}
+		if v.RemoteMode == remoteModeList {
+			v.RemoteMode = remoteModeUse
+			return true
+		}
+		return false
 	case IRTabLearn:
+		if v.NewRemoteInput {
+			v.NewRemoteInput = false
+			v.NewRemoteName = ""
+			v.NewRemoteErr = ""
+			return true
+		}
 		if v.Capturing {
 			v.StopCapture()
+			return true
+		}
+		if v.AwaitBindLabel {
+			v.AwaitBindLabel = false
+			v.PendingBindName = ""
+			v.AwaitKeyPress = true
 			return true
 		}
 		if v.AwaitKeyPress {
@@ -609,6 +893,19 @@ func (v *IRView) HandleEsc() bool {
 			v.Remote = nil
 			v.RemoteErr = ""
 			v.GridMode = false
+			return true
+		}
+		if v.BrowseSearching {
+			v.BrowseSearching = false
+			v.BrowseQuery = ""
+			v.refilter()
+			v.BrowseCursor = 0
+			return true
+		}
+		if v.BrowseQuery != "" {
+			v.BrowseQuery = ""
+			v.refilter()
+			v.BrowseCursor = 0
 			return true
 		}
 		return false
@@ -643,24 +940,189 @@ func irHardwareLine(v IRView) string {
 	return "RX " + rx + " · TX " + tx
 }
 
+func (v IRView) renderNewRemote(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+
+	lines := []string{
+		" " + accent.Render("New Remote"),
+		" " + sec.Render("Enter remote name:"),
+	}
+	fieldW := max(6, w-5)
+	lines = append(lines, " > "+txt.Render(tailWindow(v.NewRemoteName, fieldW-1)+"_"))
+	if v.NewRemoteErr != "" {
+		lines = append(lines, " "+danger.Render(Truncate(v.NewRemoteErr, max(6, w-2))))
+	}
+	if h >= 5 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+muted.Render(Truncate("⏎:create  Esc:cancel", max(6, w-2))))
+	}
+	return SplitLinesPadded(lines, w, h)
+}
+
 func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string {
+	if v.RemoteMode == remoteModeNew {
+		return v.renderNewRemote(w, h, pal)
+	}
+
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
 	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	if v.RemoteMode == remoteModeList {
+		lines := []string{
+			" " + accent.Render(fmt.Sprintf("IR Remotes (%d)", len(v.Store.Profiles))),
+		}
+		type remItem struct {
+			name   string
+			val    string
+			active bool
+			isNew  bool
+		}
+		items := make([]remItem, 0, len(v.Store.Profiles)+1)
+		for i, prof := range v.Store.Profiles {
+			items = append(items, remItem{
+				name:   prof.Name,
+				val:    fmt.Sprintf("%dk", len(prof.Bindings)),
+				active: i == v.Store.Active,
+			})
+		}
+		items = append(items, remItem{name: "+ New remote", val: "create", isNew: true})
+
+		listH := max(1, h-2)
+		cursor := clampIndex(v.RemoteListCursor, len(items))
+		start, end := ScrollWindow(len(items), cursor, listH)
+		for i := start; i < end; i++ {
+			it := items[i]
+			selected := i == cursor
+			mark := " "
+			if it.active {
+				mark = "*"
+			}
+			nameW := max(8, w-len(it.val)-5)
+			if selected && focused {
+				row := fmt.Sprintf("▸%s%s %s", mark, FitLine(it.name, nameW), it.val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := " "
+				if selected {
+					pfx = accent.Render("▸")
+				}
+				mSty := muted
+				if it.active {
+					mSty = ok
+				}
+				vSty := muted
+				if it.isNew {
+					vSty = ok
+				}
+				lines = append(lines, pfx+mSty.Render(mark)+txt.Render(FitLine(it.name, nameW))+" "+vSty.Render(it.val))
+			}
+		}
+		if h >= 3 {
+			for len(lines) < h-1 {
+				lines = append(lines, "")
+			}
+			if v.Note != "" {
+				st := ok
+				if v.NoteIsErr {
+					st = danger
+				}
+				lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+			} else {
+				lines = append(lines, " "+muted.Render(Truncate("↑↓:sel ⏎:use l:learn x:del", max(6, w-2))))
+			}
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+
+	if len(v.Store.Profiles) == 0 {
+		lines := []string{
+			" " + accent.Render("IR Remotes"),
+			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+		}
+		type emptyItem struct {
+			name string
+			val  string
+			ok   bool
+		}
+		items := []emptyItem{
+			{name: "+ New remote", val: "create", ok: true},
+			{name: "Learn signal", val: "capture"},
+			{name: "Browse library", val: "FX/Mi"},
+		}
+		cursor := clampIndex(v.EmptyMenuCursor, len(items))
+		for i, it := range items {
+			selected := i == cursor
+			nameW := max(8, w-len(it.val)-5)
+			if selected && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if selected {
+					pfx = accent.Render(" ▸ ")
+				}
+				vSty := muted
+				if it.ok {
+					vSty = ok
+				}
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), vSty.Render(it.val)))
+			}
+		}
+		if h >= 4 {
+			for len(lines) < h-1 {
+				lines = append(lines, "")
+			}
+			if v.Note != "" {
+				st := ok
+				if v.NoteIsErr {
+					st = danger
+				}
+				lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+			} else {
+				lines = append(lines, " "+muted.Render(Truncate("↑↓:sel  ⏎:open  Esc:tabs", max(6, w-2))))
+			}
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
 
 	p := v.Store.ActiveProfile()
-	if p == nil || len(p.Bindings) == 0 {
-		lines := []string{
-			" " + accent.Render("IR Remote"),
-			" " + muted.Render("No profile yet"),
-			"",
-			" " + txt.Render("Learn a signal in Learn"),
-			" " + txt.Render("or open Browse → device"),
-			"",
-			" " + muted.Render(irHardwareLine(v)),
+	counter := fmt.Sprintf("%d/%d", v.Store.Active+1, len(v.Store.Profiles))
+	titleW := max(6, w-len(counter)-3)
+	title := p.Name
+	if p.Source != "" && len([]rune(title))+len([]rune(p.Source))+3 <= titleW {
+		title += " · " + p.Source
+	}
+	lines := []string{
+		" " + accent.Render(FitLine(Truncate(title, titleW), titleW)) + " " + muted.Render(counter),
+	}
+	if len(p.Bindings) == 0 {
+		lines = append(lines, " "+muted.Render("No keys bound yet"))
+		lines = append(lines, " "+txt.Render(Truncate("Press ⏎ to learn keys", max(6, w-2))))
+	} else {
+		visible := max(1, h-2)
+		maxScroll := max(0, len(p.Bindings)-visible)
+		sc := min(v.RemoteScroll, maxScroll)
+		end := min(len(p.Bindings), sc+visible)
+		for _, b := range p.Bindings[sc:end] {
+			key := ir.KeyLabel(b.Key)
+			line := " " + sec.Render(FitLine(key, 6)) + txt.Render(Truncate(b.Name, max(6, w-9)))
+			lines = append(lines, line)
+		}
+	}
+	if h >= 3 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
 		}
 		if v.Note != "" {
 			st := ok
@@ -668,40 +1130,18 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 				st = danger
 			}
 			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(Truncate("key:send ←→:rem Tab:manage", max(6, w-2))))
 		}
-		return SplitLinesPadded(lines, w, h)
-	}
-
-	title := p.Name
-	if p.Source != "" {
-		title += " · " + p.Source
-	}
-	lines := []string{
-		" " + accent.Render(Truncate(title, max(6, w-2))),
-	}
-	visible := max(1, h-2)
-	maxScroll := max(0, len(p.Bindings)-visible)
-	sc := min(v.RemoteScroll, maxScroll)
-	end := min(len(p.Bindings), sc+visible)
-	for _, b := range p.Bindings[sc:end] {
-		key := ir.KeyLabel(b.Key)
-		line := " " + sec.Render(FitLine(key, 6)) + txt.Render(Truncate(b.Name, max(6, w-9)))
-		lines = append(lines, line)
-	}
-	if v.Note != "" {
-		st := ok
-		if v.NoteIsErr {
-			st = danger
-		}
-		lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
-	}
-	if h >= 3 && v.Note == "" {
-		lines = append(lines, " "+muted.Render(Truncate("[ ]:profile  Esc:tabs", max(6, w-2))))
 	}
 	return SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string {
+	if v.NewRemoteInput {
+		return v.renderNewRemote(w, h, pal)
+	}
+
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
@@ -710,6 +1150,15 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	profName := "My remote"
+	keyCount := 0
+	if p := v.Store.ActiveProfile(); p != nil {
+		if strings.TrimSpace(p.Name) != "" {
+			profName = p.Name
+		}
+		keyCount = len(p.Bindings)
+	}
 
 	var lines []string
 	var hint string
@@ -725,10 +1174,20 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 		}
 		hint = "Esc:cancel"
 
+	case v.AwaitBindLabel && v.Learned != nil:
+		defLbl := "Key " + ir.KeyLabel(v.PendingBindKey)
+		lines = []string{
+			" " + accent.Render(Truncate("Bind ["+ir.KeyLabel(v.PendingBindKey)+"] → "+profName, max(6, w-2))),
+			" " + sec.Render(Truncate("Label (Enter="+defLbl+"):", max(6, w-2))),
+		}
+		fieldW := max(6, w-5)
+		lines = append(lines, " > "+txt.Render(tailWindow(v.PendingBindName, fieldW-1)+"_"))
+		hint = "⏎:save  Esc:back"
+
 	case v.AwaitKeyPress && v.Learned != nil:
 		sig := v.Learned
 		lines = []string{
-			" " + accent.Render("Bind Captured Signal"),
+			" " + accent.Render(Truncate("Bind → "+profName, max(6, w-2))),
 			" " + muted.Render(Truncate(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency), max(6, w-2))),
 		}
 		if h >= 7 {
@@ -749,7 +1208,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 			ok   bool
 		}
 		items := []capItem{
-			{name: "Bind to key", val: "save", ok: true},
+			{name: "Bind to key", val: Truncate(profName, 8), ok: true},
 			{name: "Test signal", val: "send"},
 			{name: "Listen again", val: "5s"},
 			{name: "Discard", val: "cancel"},
@@ -764,7 +1223,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 		for i := start; i < end; i++ {
 			it := items[i]
 			selected := i == cursor
-			nameW := max(8, w-len(it.val)-5)
+			nameW := max(8, w-len([]rune(it.val))-5)
 			if selected && focused {
 				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
@@ -787,15 +1246,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 			" " + accent.Render("IR Learn"),
 			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
 		}
-		profName := "My remote"
-		keyCount := 0
-		if p := v.Store.ActiveProfile(); p != nil {
-			if strings.TrimSpace(p.Name) != "" {
-				profName = p.Name
-			}
-			keyCount = len(p.Bindings)
-		}
-		profVal := fmt.Sprintf("%d keys", keyCount)
+		profVal := fmt.Sprintf("%dk", keyCount)
 		if len(v.Store.Profiles) > 1 {
 			profVal += "◂▸"
 		}
@@ -806,7 +1257,8 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 		}
 		items := []learnItem{
 			{name: "Listen for IR", val: "5s", ok: v.HW.RXPath != ""},
-			{name: "Save to: " + profName, val: profVal},
+			{name: "Remote: " + profName, val: profVal},
+			{name: "+ New remote", val: "create", ok: true},
 		}
 		cursor := clampIndex(v.LearnCursor, len(items))
 		for i, it := range items {
@@ -871,8 +1323,13 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		return v.renderRemoteDetail(w, h, pal, focused)
 	}
 
+	countStr := fmt.Sprintf("%d", len(v.Filtered))
+	if len(v.Filtered) != len(v.Index) {
+		countStr = fmt.Sprintf("%d/%d", len(v.Filtered), len(v.Index))
+	}
+	titleW := max(6, w-len(countStr)-3)
 	lines := []string{
-		" " + accent.Render("IR Browse"),
+		" " + accent.Render(FitLine("IR Browse", titleW)) + " " + muted.Render(countStr),
 	}
 	if v.RemoteLoading {
 		lines = append(lines, " "+warn.Render("Loading remote…"))
@@ -884,9 +1341,6 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 	}
 	if v.IndexLoading {
 		lines = append(lines, " "+warn.Render("Indexing databases…"))
-		if v.Roots.Flipper == "" && v.Roots.Mi == "" {
-			lines = append(lines, " "+muted.Render("No IR database directories configured"))
-		}
 		return SplitLinesPadded(lines, w, h)
 	}
 	if v.IndexErr != "" {
@@ -901,9 +1355,25 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		return SplitLinesPadded(lines, w, h)
 	}
 
-	lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 9))+sec.Render("Type ")+txt.Render(Truncate(v.CategoryLabel(), max(4, w-19))))
+	switch {
+	case v.BrowseSearching:
+		fieldW := max(6, w-8)
+		lines = append(lines, " "+sec.Render("Find: ")+txt.Render(tailWindow(v.BrowseQuery, fieldW-1)+"_"))
+	case v.BrowseQuery != "":
+		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 8))+sec.Render("Find ")+warn.Render(Truncate(v.BrowseQuery, max(4, w-19))))
+	default:
+		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 9))+sec.Render("Type ")+txt.Render(Truncate(v.CategoryLabel(), max(4, w-19))))
+	}
 	if len(v.Filtered) == 0 {
-		lines = append(lines, " "+muted.Render("No remotes in this filter"))
+		lines = append(lines, " "+muted.Render("No remotes match filter"))
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.BrowseSearching {
+			lines = append(lines, " "+muted.Render(Truncate("⏎:done  Esc:clear", max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(Truncate("←→:type p:src /:find Esc:clear", max(6, w-2))))
+		}
 		return SplitLinesPadded(lines, w, h)
 	}
 	visible := max(1, h-3)
@@ -918,13 +1388,17 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		if i == v.BrowseCursor && focused {
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
-			lines = append(lines, " "+txt.Render(Truncate(e.Display(), max(6, w-2))))
+			lines = append(lines, " "+muted.Render(mark)+" "+txt.Render(Truncate(e.Display(), max(6, w-4))))
 		}
 	}
 	for len(lines) < h-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, " "+muted.Render(Truncate("↑↓:sel ←→:type p:src ⏎:open r:index", max(6, w-2))))
+	if v.BrowseSearching {
+		lines = append(lines, " "+muted.Render(Truncate("⏎:done  Esc:clear", max(6, w-2))))
+	} else {
+		lines = append(lines, " "+muted.Render(Truncate("↑↓:sel ←→:type /:find ⏎:open", max(6, w-2))))
+	}
 	return SplitLinesPadded(lines, w, h)
 }
 

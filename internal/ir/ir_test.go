@@ -290,3 +290,79 @@ func TestTrimCapturedTimings(t *testing.T) {
 		t.Fatalf("even trailing gap = %v", out)
 	}
 }
+
+func TestBundledDatabasesAndSearch(t *testing.T) {
+	roots := DefaultRoots()
+	if !roots.Bundled {
+		t.Fatal("expected DefaultRoots().Bundled to be true")
+	}
+	entries, err := LoadIndex(roots)
+	if err != nil {
+		t.Fatalf("LoadIndex(bundled): %v", err)
+	}
+	var flipperSample, miSample *Entry
+	for i := range entries {
+		e := &entries[i]
+		if e.Archive == "flipper" && flipperSample == nil {
+			flipperSample = e
+		}
+		if e.Archive == "mi" && miSample == nil {
+			miSample = e
+		}
+		if flipperSample != nil && miSample != nil {
+			break
+		}
+	}
+	if flipperSample == nil || miSample == nil {
+		t.Fatalf("expected both bundled flipper and mi entries (flipper=%v mi=%v, total=%d)", flipperSample != nil, miSample != nil, len(entries))
+	}
+	for _, e := range []*Entry{flipperSample, miSample} {
+		r, err := LoadEntry(*e)
+		if err != nil {
+			t.Fatalf("LoadEntry(%s %s): %v", e.Provider, e.Path, err)
+		}
+		if len(r.Signals) == 0 {
+			t.Fatalf("expected signals in %s", e.Path)
+		}
+		if err := r.Signals[0].Validate(); err != nil {
+			t.Fatalf("bundled signal %s invalid: %v", e.Path, err)
+		}
+	}
+	filtered := SearchEntries(entries, "mi", "", miSample.Brand)
+	if len(filtered) == 0 {
+		t.Fatalf("expected SearchEntries to match brand %q", miSample.Brand)
+	}
+}
+
+func TestStoreMultipleRemotes(t *testing.T) {
+	s := NewStore()
+	idx0, err := s.CreateProfile("Living TV", "custom")
+	if err != nil || idx0 != 0 {
+		t.Fatalf("CreateProfile 0 = %d, %v", idx0, err)
+	}
+	if _, err := s.CreateProfile("living tv", "custom"); err == nil {
+		t.Fatal("expected duplicate profile name error")
+	}
+	idx1, err := s.CreateProfile("Bedroom AC", "custom")
+	if err != nil || idx1 != 1 || s.Active != 1 {
+		t.Fatalf("CreateProfile 1 = %d, active=%d, err=%v", idx1, s.Active, err)
+	}
+	sig, _ := EncodeProtocol("NEC", 0x08, 0x05)
+	s.AddBindingToActive(Binding{Key: "p", Name: "Power", Signal: sig})
+	if p := s.ActiveProfile(); p == nil || p.Name != "Bedroom AC" || len(p.Bindings) != 1 {
+		t.Fatalf("active profile = %+v", p)
+	}
+	if !s.SelectProfile(0) || s.Active != 0 {
+		t.Fatal("expected SelectProfile(0) to succeed")
+	}
+	s.AddBindingToActive(Binding{Key: "1", Name: "Mute", Signal: sig})
+	if p := s.ActiveProfile(); p == nil || p.Name != "Living TV" || len(p.Bindings) != 1 {
+		t.Fatalf("living tv = %+v", p)
+	}
+	if !s.DeleteBinding(0, "1") || len(s.Profiles[0].Bindings) != 0 {
+		t.Fatal("expected DeleteBinding to remove binding")
+	}
+	if !s.DeleteProfile(0) || len(s.Profiles) != 1 || s.ActiveProfile().Name != "Bedroom AC" {
+		t.Fatalf("after DeleteProfile: %+v", s)
+	}
+}

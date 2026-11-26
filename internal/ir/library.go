@@ -7,11 +7,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/czhax/czhax/internal/ir/bundled"
 )
 
 type Roots struct {
 	Flipper string
 	Mi      string
+	Bundled bool
 }
 
 type Entry struct {
@@ -20,6 +23,7 @@ type Entry struct {
 	Brand    string
 	Model    string
 	Path     string
+	Archive  string // "", "flipper", or "mi" when loaded from bundled zip
 }
 
 func (e Entry) Display() string {
@@ -31,6 +35,7 @@ func (e Entry) Display() string {
 
 func DefaultRoots() Roots {
 	return Roots{
+		Bundled: true,
 		Flipper: firstExisting(
 			os.Getenv("CZHAX_IR_FLIPPER"),
 			filepath.Join(homeDir(), "flipper-ir"),
@@ -71,11 +76,32 @@ func homeDir() string {
 	return h
 }
 
-// LoadIndex walks provider directories and returns lightweight entries.
+// LoadIndex walks bundled archives (when roots.Bundled is true) and provider
+// directories and returns lightweight entries.
 // Parsing every .ir file happens only when a device is opened.
 func LoadIndex(roots Roots) ([]Entry, error) {
 	var entries []Entry
 	var errs []string
+	if roots.Bundled {
+		for _, provider := range []string{"flipper", "mi"} {
+			zr, err := bundled.Reader(provider)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("bundled %s: %v", provider, err))
+				continue
+			}
+			for _, f := range zr.File {
+				if f.FileInfo().IsDir() {
+					continue
+				}
+				if strings.ToLower(filepath.Ext(f.Name)) != ".ir" {
+					continue
+				}
+				entry := entryFromPath(provider, provider, f.Name, f.Name)
+				entry.Archive = provider
+				entries = append(entries, entry)
+			}
+		}
+	}
 	for _, root := range []struct {
 		provider string
 		path     string
@@ -186,55 +212,80 @@ func isWrapperDir(s string) bool {
 func normalizeCategory(s string) string {
 	s = strings.TrimSpace(s)
 	switch strings.ToLower(s) {
-	case "tvs", "tv", "xiaomi_tv":
+	case "tvs", "tv", "xiaomi_tv", "universal_tv_remotes", "tv_tuner", "monitors", "touchscreen_displays", "digital_signs":
 		return "TV"
 	case "acs", "ac", "air conditioners", "air_conditioner", "xiaomi_ac":
 		return "AC"
-	case "audio", "audio/video", "a_v receiver", "av", "xiaomi_audio":
+	case "audio", "audio/video", "a_v receiver", "av", "xiaomi_audio",
+		"audio_and_video_receivers", "soundbars", "speakers", "head_units", "cd_players", "minidisc", "car_multimedia", "multimedia":
 		return "Audio"
-	case "dvds", "dvd", "xiaomi_dvd":
+	case "dvds", "dvd", "xiaomi_dvd", "dvd_players", "blu-ray", "vcr", "laserdisc":
 		return "DVD"
 	case "projectors", "projector", "xiaomi_projector":
 		return "Projector"
-	case "set top boxes", "set-top box", "set top box", "stb", "cable _ satellite box", "xiaomi_stb":
+	case "set top boxes", "set-top box", "set top box", "set_top_boxes", "cable_boxes", "dvb-t", "stb", "cable _ satellite box", "xiaomi_stb":
 		return "Set-top"
-	case "cameras", "camera", "xiaomi_camera":
+	case "streaming_devices":
+		return "Stream"
+	case "cameras", "camera", "xiaomi_camera", "cctv":
 		return "Camera"
 	case "fans", "fan", "xiaomi_fan":
 		return "Fan"
-	case "networking", "internet box", "xiaomi_box":
+	case "led_lighting":
+		return "Lights"
+	case "air_purifiers", "humidifiers":
+		return "Air"
+	case "vacuum_cleaners", "window_cleaners", "dust_collectors":
+		return "Vacuum"
+	case "networking", "internet box", "xiaomi_box", "converters", "kvm":
 		return "Box"
+	case "_converted_", "miscellaneous", "flipper", "mi":
+		return "Other"
 	}
 	if s == "" {
 		return "Other"
 	}
-	return s
+	return strings.ReplaceAll(s, "_", " ")
 }
 
 func LoadEntry(e Entry) (Remote, error) {
 	var r Remote
 	var err error
-	switch strings.ToLower(filepath.Ext(e.Path)) {
-	case ".ir":
-		r, err = ParseFlipperFile(e.Path)
-	case ".json":
-		r, err = ParseMiRemoteJSON(e.Path)
-	default:
-		return Remote{}, fmt.Errorf("unsupported IR database file %s", e.Path)
+	if e.Archive != "" {
+		zr, zerr := bundled.Reader(e.Archive)
+		if zerr != nil {
+			return Remote{}, zerr
+		}
+		zf, zerr := zr.Open(e.Path)
+		if zerr != nil {
+			return Remote{}, zerr
+		}
+		defer zf.Close()
+		r, err = ParseFlipperReader(e.Model, e.Path, zf)
+	} else {
+		switch strings.ToLower(filepath.Ext(e.Path)) {
+		case ".ir":
+			r, err = ParseFlipperFile(e.Path)
+		case ".json":
+			r, err = ParseMiRemoteJSON(e.Path)
+		default:
+			return Remote{}, fmt.Errorf("unsupported IR database file %s", e.Path)
+		}
 	}
 	if err != nil {
 		return r, err
 	}
-	provider := e.Provider
-	if provider == "mi" {
-		provider = "mi"
-	}
-	r = r.WithMeta(provider, e.Category, e.Brand, e.Model)
+	r = r.WithMeta(e.Provider, e.Category, e.Brand, e.Model)
 	r.Name = e.Display()
 	return r, nil
 }
 
 func FilterEntries(entries []Entry, provider, category string) []Entry {
+	return SearchEntries(entries, provider, category, "")
+}
+
+func SearchEntries(entries []Entry, provider, category, query string) []Entry {
+	q := strings.ToLower(strings.TrimSpace(query))
 	out := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		if provider != "" && e.Provider != provider {
@@ -242,6 +293,13 @@ func FilterEntries(entries []Entry, provider, category string) []Entry {
 		}
 		if category != "" && e.Category != category {
 			continue
+		}
+		if q != "" {
+			if !strings.Contains(strings.ToLower(e.Brand), q) &&
+				!strings.Contains(strings.ToLower(e.Model), q) &&
+				!strings.Contains(strings.ToLower(e.Category), q) {
+				continue
+			}
 		}
 		out = append(out, e)
 	}

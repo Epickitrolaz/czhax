@@ -86,22 +86,31 @@ func TestIRLearnBind(t *testing.T) {
 		t.Fatalf("expected ? to be blocked cleanly in key capture, showHelp=%v active=%v", m.ShowHelp, m.IR.IsKeyCaptureActive())
 	}
 
-	// Pressing a letter key ('p') binds cleanly!
+	// Pressing a letter key ('p') enters the optional label prompt, then 'Power' + Enter binds!
 	m = sendKey(m, "p")
+	if !m.IR.AwaitBindLabel || m.IR.PendingBindKey != "p" {
+		t.Fatalf("expected AwaitBindLabel for 'p', got label=%v key=%q", m.IR.AwaitBindLabel, m.IR.PendingBindKey)
+	}
+	assertFitsBounds(t, m.View(), 53, 14, "IR/Learn/BindLabelPrompt")
+	for _, ch := range []string{"P", "o", "w", "e", "r"} {
+		m = sendKey(m, ch)
+	}
+	m = sendKey(m, "enter")
 	p := m.IR.Store.ActiveProfile()
-	if p == nil || len(p.Bindings) != 1 || p.Bindings[0].Key != "p" {
+	if p == nil || len(p.Bindings) != 1 || p.Bindings[0].Key != "p" || p.Bindings[0].Name != "Power" {
 		t.Fatalf("binding = %+v", p)
 	}
-	if m.IR.AwaitBinding || m.IR.AwaitKeyPress || m.IR.Learned != nil {
+	if m.IR.AwaitBinding || m.IR.AwaitKeyPress || m.IR.AwaitBindLabel || m.IR.Learned != nil {
 		t.Fatal("expected binding state to clear")
 	}
 	assertFitsBounds(t, m.View(), 53, 14, "IR/Learn/Bound")
 
-	// Also verify 'r' can be bound without triggering global refresh, and works in Remote tab.
+	// Also verify 'r' can be bound with blank label (default "Key R") and works in Remote tab.
 	m.IR.SetCaptureResult(sig, nil)
 	m = sendKey(m, "enter") // Bind to key
-	m = sendKey(m, "r")     // bind 'r'
-	if b, ok := m.IR.BindingForKey("r"); !ok || b.Key != "r" {
+	m = sendKey(m, "r")     // select 'r'
+	m = sendKey(m, "enter") // accept default label
+	if b, ok := m.IR.BindingForKey("r"); !ok || b.Key != "r" || b.Name != "Key R" {
 		t.Fatalf("expected 'r' binding, got ok=%v b=%+v", ok, b)
 	}
 	m.ActiveTabs[ViewIR] = int(IRTabRemote)
@@ -265,5 +274,124 @@ func TestIRModesFitSmallScreens(t *testing.T) {
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Probe")
 		m.IR.GridMode = true
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Grid")
+	}
+}
+
+func TestIRMultipleRemotesFlow(t *testing.T) {
+	sig := irTestSignal(t)
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}} {
+		m := newIRTestModel(t, sz.w, sz.h)
+
+		// Empty Remote tab -> Enter on "+ New remote" -> type "Living" + Enter
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteEmptyMenu")
+		m = sendKey(m, "enter")
+		if m.IR.RemoteMode != remoteModeNew {
+			t.Fatalf("[%s] expected remoteModeNew, got %v", sz.name, m.IR.RemoteMode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/NewRemote")
+		for _, ch := range []string{"L", "i", "v", "i", "n", "g"} {
+			m = sendKey(m, ch)
+		}
+		m = sendKey(m, "enter")
+		if len(m.IR.Store.Profiles) != 1 || m.IR.Store.ActiveProfile().Name != "Living" {
+			t.Fatalf("[%s] expected created 'Living' profile, got %+v", sz.name, m.IR.Store.Profiles)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteEmptyBindings")
+
+		// Switch to Learn tab and create a second remote "RoomAC" from Learn menu
+		m.ActiveTabs[ViewIR] = int(IRTabLearn)
+		m.IR.Tab = IRTabLearn
+		m = sendKey(m, "down") // Remote: Living
+		m = sendKey(m, "down") // + New remote
+		m = sendKey(m, "enter")
+		if !m.IR.NewRemoteInput {
+			t.Fatalf("[%s] expected NewRemoteInput in Learn", sz.name)
+		}
+		for _, ch := range []string{"R", "o", "o", "m", "A", "C"} {
+			m = sendKey(m, ch)
+		}
+		m = sendKey(m, "enter")
+		if len(m.IR.Store.Profiles) != 2 || m.IR.Store.ActiveProfile().Name != "RoomAC" {
+			t.Fatalf("[%s] expected 'RoomAC' active, got %+v", sz.name, m.IR.Store.Profiles)
+		}
+
+		// Capture and bind key '1' ("Cool") onto RoomAC
+		m.IR.SetCaptureResult(sig, nil)
+		m = sendKey(m, "enter") // Bind to key
+		m = sendKey(m, "1")     // key '1'
+		for _, ch := range []string{"C", "o", "o", "l"} {
+			m = sendKey(m, ch)
+		}
+		m = sendKey(m, "enter")
+		if got := len(m.IR.Store.Profiles[1].Bindings); got != 1 {
+			t.Fatalf("[%s] expected 1 binding on RoomAC, got %d", sz.name, got)
+		}
+
+		// Switch back to Remote tab, open Remotes Manager via Tab, select Living, learn a key on it
+		m.ActiveTabs[ViewIR] = int(IRTabRemote)
+		m.IR.Tab = IRTabRemote
+		m = sendKey(m, "tab")
+		if m.IR.RemoteMode != remoteModeList {
+			t.Fatalf("[%s] expected remoteModeList on Tab, got %v", sz.name, m.IR.RemoteMode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteList")
+		m = sendKey(m, "up") // Living (index 0)
+		m = sendKey(m, "enter")
+		if m.IR.Store.ActiveProfile().Name != "Living" || m.IR.RemoteMode != remoteModeUse {
+			t.Fatalf("[%s] expected Living selected in use mode", sz.name)
+		}
+
+		// Cycle remotes with right arrow, then delete RoomAC in manager
+		m = sendKey(m, "right")
+		if m.IR.Store.ActiveProfile().Name != "RoomAC" {
+			t.Fatalf("[%s] expected RoomAC on right arrow", sz.name)
+		}
+		m = sendKey(m, "tab")
+		m = sendKey(m, "x")
+		if len(m.IR.Store.Profiles) != 1 || m.IR.Store.ActiveProfile().Name != "Living" {
+			t.Fatalf("[%s] expected RoomAC deleted, remaining=%+v", sz.name, m.IR.Store.Profiles)
+		}
+	}
+}
+
+func TestIRBrowseSearchAndBrandJump(t *testing.T) {
+	m := newIRTestModel(t, 40, 10)
+	m.ActiveTabs[ViewIR] = int(IRTabBrowse)
+	m.IR.Tab = IRTabBrowse
+	m.IR.SetIndex([]ir.Entry{
+		{Provider: "flipper", Category: "TV", Brand: "LG", Model: "OLED_C1", Path: "a.ir"},
+		{Provider: "mi", Category: "TV", Brand: "Samsung", Model: "QN90", Path: "b.ir"},
+		{Provider: "flipper", Category: "TV", Brand: "Sony", Model: "Bravia", Path: "c.ir"},
+	}, nil)
+
+	// Brand jump ']' moves LG -> Samsung -> Sony
+	m = sendKey(m, "]")
+	if e, ok := m.IR.SelectedEntry(); !ok || e.Brand != "Samsung" {
+		t.Fatalf("expected Samsung on brand jump, got %+v", e)
+	}
+
+	// Search '/' -> "sony" narrows to 1 entry; Enter locks, Esc clears
+	m = sendKey(m, "/")
+	if !m.IR.BrowseSearching {
+		t.Fatal("expected BrowseSearching on '/'")
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "IR/Browse/SearchInput")
+	for _, ch := range []string{"s", "o", "n", "y"} {
+		m = sendKey(m, ch)
+	}
+	if len(m.IR.Filtered) != 1 || m.IR.Filtered[0].Brand != "Sony" {
+		t.Fatalf("expected filtered Sony entry, got %+v", m.IR.Filtered)
+	}
+	m = sendKey(m, "enter")
+	if m.IR.BrowseSearching {
+		t.Fatal("expected Enter to exit search input while keeping filter")
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "IR/Browse/SearchLocked")
+	m = sendKey(m, "esc")
+	if m.IR.BrowseQuery != "" || len(m.IR.Filtered) != 3 {
+		t.Fatalf("expected Esc to clear query, got query=%q len=%d", m.IR.BrowseQuery, len(m.IR.Filtered))
 	}
 }

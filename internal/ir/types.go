@@ -198,6 +198,69 @@ func (s *Store) AddProfile(p Profile) int {
 	return s.Active
 }
 
+func (s *Store) CreateProfile(name, source string) (int, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return s.Active, errors.New("remote name cannot be empty")
+	}
+	for _, p := range s.Profiles {
+		if strings.EqualFold(strings.TrimSpace(p.Name), trimmed) {
+			return s.Active, errors.New("remote already exists")
+		}
+	}
+	if strings.TrimSpace(source) == "" {
+		source = "custom"
+	}
+	s.Profiles = append(s.Profiles, Profile{Name: trimmed, Source: source})
+	s.Active = len(s.Profiles) - 1
+	return s.Active, nil
+}
+
+func (s *Store) SelectProfile(idx int) bool {
+	if idx < 0 || idx >= len(s.Profiles) {
+		return false
+	}
+	s.Active = idx
+	return true
+}
+
+func (s *Store) DeleteProfile(idx int) bool {
+	if idx < 0 || idx >= len(s.Profiles) {
+		return false
+	}
+	s.Profiles = append(s.Profiles[:idx], s.Profiles[idx+1:]...)
+	if len(s.Profiles) == 0 {
+		s.Active = 0
+	} else if s.Active >= len(s.Profiles) {
+		s.Active = len(s.Profiles) - 1
+	} else if s.Active > idx {
+		s.Active--
+	}
+	return true
+}
+
+func (s *Store) AddBindingToActive(b Binding) int {
+	if p := s.ActiveProfile(); p != nil && strings.TrimSpace(p.Name) != "" {
+		return s.AddBinding(p.Name, b)
+	}
+	return s.AddBinding("My remote", b)
+}
+
+func (s *Store) DeleteBinding(profileIdx int, key string) bool {
+	if profileIdx < 0 || profileIdx >= len(s.Profiles) {
+		return false
+	}
+	key = NormalizeBindKey(key)
+	bs := s.Profiles[profileIdx].Bindings
+	for i := range bs {
+		if bs[i].Key == key {
+			s.Profiles[profileIdx].Bindings = append(bs[:i], bs[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) AddBinding(profileName string, b Binding) int {
 	name := strings.TrimSpace(profileName)
 	if name == "" {
