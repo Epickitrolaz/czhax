@@ -191,6 +191,16 @@ func (v *BluetoothScanView) SyncAdapters(adapters []bluetooth.Adapter) {
 		}
 	}
 	if found < 0 {
+		// Prefer a USB Bluetooth card for SCO/Carwhisperer; the onboard UART
+		// controller on the Cardputer often cannot establish eSCO.
+		for i, a := range adapters {
+			if strings.EqualFold(a.Bus, "USB") && a.Up {
+				found = i
+				break
+			}
+		}
+	}
+	if found < 0 {
 		for i, a := range adapters {
 			if a.Name == "hci0" {
 				found = i
