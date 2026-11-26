@@ -235,6 +235,12 @@ type btConvertDoneMsg struct {
 	err  error
 }
 
+type btSudoAuthMsg struct {
+	kind BTActionKind
+	opts BTActionOptions
+	err  error
+}
+
 type localIfacesMsg struct {
 	ifaces []localscan.Interface
 }
@@ -1105,6 +1111,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			PlayPath: msg.path,
 		})
 
+	case btSudoAuthMsg:
+		if msg.err != nil {
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("sudo cancelled"), m.resetMarquee())
+		}
+		if bluetooth.NeedsSudo() {
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("sudo unavailable"), m.resetMarquee())
+		}
+		next, cmd := m.startBluetoothActionWithOptions(msg.kind, msg.opts)
+		return next, tea.Batch(tea.ClearScreen, cmd)
+
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
 		return m, nil
@@ -1674,6 +1690,12 @@ func (m AppModel) startBluetoothActionWithPlay(kind BTActionKind, playPath strin
 }
 
 func (m AppModel) startBluetoothActionWithOptions(kind BTActionKind, opts BTActionOptions) (tea.Model, tea.Cmd) {
+	if (kind == btActCarwhisperer || kind == btActL2Flood) && bluetooth.NeedsSudo() {
+		c := exec.Command("sudo", "-v")
+		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return btSudoAuthMsg{kind: kind, opts: opts, err: err}
+		})
+	}
 	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind, opts)
 	if !ok {
 		return m, m.setStatus("Select a device first")
