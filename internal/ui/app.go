@@ -15,6 +15,7 @@ import (
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/ir"
+	"github.com/czhax/czhax/internal/localscan"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
@@ -180,6 +181,23 @@ type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
 
+type localIfacesMsg struct {
+	ifaces []localscan.Interface
+}
+
+type localScanProgressMsg struct {
+	seq  int
+	prog localscan.ScanProgress
+}
+
+type localScanDoneMsg struct {
+	seq int
+	res localscan.ScanResult
+	err error
+}
+
+type localScanTickMsg struct{}
+
 type AppModel struct {
 	Cfg        config.Config
 	ConfigPath string
@@ -197,6 +215,7 @@ type AppModel struct {
 	System    SystemView
 	Wifi      WifiView
 	WifiScan  WifiScanView
+	Local     LocalView
 	IR        IRView
 	Bluetooth BluetoothView
 	Help      HelpView
@@ -226,6 +245,7 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		System:     NewSystemView(),
 		Wifi:       NewWifiView(),
 		WifiScan:   NewWifiScanView(),
+		Local:      NewLocalView(),
 		IR:         NewIRView(cfgPath),
 		Bluetooth:  NewBluetoothView(),
 	}
@@ -259,7 +279,7 @@ func (m *AppModel) resetMarquee() tea.Cmd {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), marqueeStartCmd(m.MarqueeGen)}
+	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), marqueeStartCmd(m.MarqueeGen)}
 	if isLinuxConsole() {
 		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
@@ -493,6 +513,59 @@ func collectBluetoothCmd() tea.Cmd {
 	}
 }
 
+func collectLocalIfacesCmd() tea.Cmd {
+	return func() tea.Msg {
+		return localIfacesMsg{ifaces: localscan.CollectInterfaces()}
+	}
+}
+
+func runLocalScanCmd(ctx context.Context, seq int, req localscan.ScanRequest, ch chan localscan.ScanProgress) tea.Cmd {
+	return func() tea.Msg {
+		defer func() {
+			if ch != nil {
+				close(ch)
+			}
+		}()
+		res, err := localscan.RunScan(ctx, req, func(prog localscan.ScanProgress) {
+			if ch == nil {
+				return
+			}
+			select {
+			case ch <- prog:
+			default:
+				select {
+				case <-ch:
+				default:
+				}
+				select {
+				case ch <- prog:
+				default:
+				}
+			}
+		})
+		return localScanDoneMsg{seq: seq, res: res, err: err}
+	}
+}
+
+func waitLocalScanProgressCmd(seq int, ch <-chan localscan.ScanProgress) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		prog, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return localScanProgressMsg{seq: seq, prog: prog}
+	}
+}
+
+func localScanTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return localScanTickMsg{}
+	})
+}
+
 func (m AppModel) scheduleTick() tea.Cmd {
 	if m.Cfg.RefreshSeconds <= 0 {
 		return nil
@@ -568,7 +641,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.Snap = sysinfo.Collect()
 		scanIface := m.WifiScan.EffectiveScanIface()
-		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface), m.resetMarquee())
+		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), collectLocalIfacesCmd(), scanWifiNetworksCmd(scanIface), m.resetMarquee())
 
 	case wifiPentestDoneMsg:
 		m.WifiScan.SetPentestResult(msg.res, msg.err)
@@ -617,11 +690,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.WifiScan.FinishWPSRun(msg.seq, msg.err)
 		switch {
 		case msg.err == nil:
-			return m, tea.Batch(m.setStatus("OneShot finished"), m.resetMarquee(), collectWifiCmd())
+			return m, tea.Batch(m.setStatus("OneShot finished"), m.resetMarquee(), collectWifiCmd(), collectLocalIfacesCmd())
 		case strings.Contains(msg.err.Error(), "canceled"):
-			return m, tea.Batch(m.setStatus("OneShot stopped"), m.resetMarquee(), collectWifiCmd())
+			return m, tea.Batch(m.setStatus("OneShot stopped"), m.resetMarquee(), collectWifiCmd(), collectLocalIfacesCmd())
 		default:
-			return m, tea.Batch(m.setStatus("OneShot failed"), m.resetMarquee(), collectWifiCmd())
+			return m, tea.Batch(m.setStatus("OneShot failed"), m.resetMarquee(), collectWifiCmd(), collectLocalIfacesCmd())
 		}
 
 	case irCaptureDoneMsg:
@@ -707,6 +780,37 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
 		return m, nil
+
+	case localIfacesMsg:
+		m.Local.SyncInterfaces(msg.ifaces)
+		return m, nil
+
+	case localScanProgressMsg:
+		if !m.Local.Scanning || msg.seq != m.Local.ScanSeq {
+			return m, nil
+		}
+		m.Local.ApplyProgress(msg.seq, msg.prog)
+		return m, waitLocalScanProgressCmd(msg.seq, m.Local.ScanProgressCh)
+
+	case localScanDoneMsg:
+		m.Local.FinishScan(msg.seq, msg.res, msg.err)
+		switch {
+		case msg.err != nil && !m.Local.Result.Canceled:
+			return m, tea.Batch(m.setStatus("Nmap failed"), m.resetMarquee())
+		case m.Local.Result.Canceled:
+			return m, tea.Batch(m.setStatus("Nmap stopped"), m.resetMarquee())
+		default:
+			return m, tea.Batch(m.setStatus(fmt.Sprintf("Nmap: %d hosts", len(m.Local.Result.Hosts))), m.resetMarquee())
+		}
+
+	case localScanTickMsg:
+		if !m.Local.Scanning {
+			return m, nil
+		}
+		if !m.Local.ScanStarted.IsZero() {
+			m.Local.ScanElapsed = time.Since(m.Local.ScanStarted)
+		}
+		return m, localScanTickCmd()
 
 	case clearStatusMsg:
 		m.StatusMsg = ""
@@ -840,6 +944,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.WifiScan.StopWPSRun()
 		return m, m.setStatus("OneShot stopped")
 	}
+	if m.Local.Scanning && (k == "ctrl+c" || k == "q") {
+		m.Local.StopScan()
+		return m, m.setStatus("Stopping nmap...")
+	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
@@ -908,6 +1016,22 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.WifiScan.PentestActive {
 			return m, m.setStatus("Pentest running")
 		}
+		if m.Local.Scanning {
+			return m, m.setStatus("Nmap scan running")
+		}
+		if m.ActiveView == ViewLocal && m.Focus == FocusContent {
+			switch m.Local.Mode {
+			case localModeResults:
+				for _, opt := range localscan.ScanOptions {
+					if opt.Mode == m.Local.RunMode {
+						return m.launchLocalScan(opt)
+					}
+				}
+			case localModeIfaces:
+				m.Local.LoadingIfaces = true
+				return m, tea.Batch(m.setStatus("Refreshing interfaces..."), collectLocalIfacesCmd())
+			}
+		}
 		if m.ActiveView == ViewIR && m.Focus == FocusContent {
 			if m.IR.Capturing {
 				return m, m.setStatus("IR capture running")
@@ -953,7 +1077,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.Bluetooth.Adapters) == 0 {
 			m.Bluetooth.Scanning = true
 		}
-		cmds := []tea.Cmd{m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd()}
+		cmds := []tea.Cmd{m.setStatus("Refreshed"), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd()}
 		if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.Mode == scanModeList && !m.WifiScan.Scanning {
 			iface := m.WifiScan.EffectiveScanIface()
 			m.WifiScan.StartScan()
@@ -990,6 +1114,11 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."), m.maybeWPSScanCmd())
 				}
 				return m, tea.Batch(collectWifiCmd(), m.maybeWPSScanCmd())
+			} else if m.ActiveView == ViewLocal {
+				if len(m.Local.Interfaces) == 0 {
+					m.Local.LoadingIfaces = true
+				}
+				return m, collectLocalIfacesCmd()
 			} else if m.ActiveView == ViewIR {
 				m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 				m.IR.RefreshHardware()
@@ -1022,6 +1151,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.IR.RemoteErr = ""
 			m.IR.IndexLoading = true
 			return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+		}
+		if m.ActiveView == ViewLocal {
+			return m, collectLocalIfacesCmd()
 		}
 		if m.ActiveView == ViewStatus {
 			switch m.ActiveTabs[ViewStatus] {
@@ -1083,6 +1215,30 @@ func (m AppModel) launchWPSRetry(label string, args []string, pin string) (tea.M
 		return nm, cmd
 	}
 	return next, cmd
+}
+
+func (m AppModel) launchLocalScan(opt localscan.ScanOption) (tea.Model, tea.Cmd) {
+	if m.Local.NmapPath == "" {
+		m.Local.NmapPath = localscan.FindNmap()
+	}
+	if m.Local.NmapPath == "" {
+		m.Local.ScanErr = "nmap not installed (install nmap)"
+		return m, m.setStatus("nmap not found")
+	}
+	ctx, seq, req, ch, ok := m.Local.StartScan(opt)
+	if !ok {
+		msg := m.Local.ScanErr
+		if msg == "" {
+			msg = "Scan unavailable"
+		}
+		return m, m.setStatus(msg)
+	}
+	return m, tea.Batch(
+		m.setStatus("Nmap: "+opt.Name),
+		runLocalScanCmd(ctx, seq, req, ch),
+		waitLocalScanProgressCmd(seq, ch),
+		localScanTickCmd(),
+	)
 }
 
 func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
@@ -1194,6 +1350,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 	if k == "esc" {
 		if m.ActiveView == ViewWiFi && m.WifiScan.HandleEsc() {
+			return m, nil
+		}
+		if m.ActiveView == ViewLocal && m.Local.HandleEsc() {
 			return m, nil
 		}
 		if m.ActiveView == ViewIR && m.IR.HandleEsc() {
@@ -1357,6 +1516,75 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					req := m.WifiScan.BuildConnectRequest()
 					return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
 				}
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case ViewLocal:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		switch m.Local.Mode {
+		case localModeIfaces:
+			switch {
+			case m.isUp(k):
+				m.Local.MoveIface(-1)
+			case m.isDown(k):
+				m.Local.MoveIface(1)
+			case k == "enter" || k == " ":
+				if !m.Local.ConfirmIface() {
+					return m, m.setStatus("No connected interface")
+				}
+			}
+			return m, nil
+
+		case localModeOptions:
+			switch {
+			case m.isUp(k):
+				m.Local.MoveOption(-1)
+			case m.isDown(k):
+				m.Local.MoveOption(1)
+			case k == "enter" || k == " ":
+				if m.Local.IsBackOption() {
+					m.Local.HandleEsc()
+					return m, nil
+				}
+				if opt, ok := m.Local.SelectedOption(); ok {
+					return m.launchLocalScan(opt)
+				}
+			}
+			return m, nil
+
+		case localModeRunning:
+			return m, nil
+
+		case localModeResults:
+			switch {
+			case m.isUp(k):
+				m.Local.MoveHost(-1)
+			case m.isDown(k):
+				m.Local.MoveHost(1)
+			case k == "enter" || k == " ":
+				if len(m.Local.Result.Hosts) > 0 {
+					m.Local.OpenHostDetail()
+					return m, nil
+				}
+				for _, opt := range localscan.ScanOptions {
+					if opt.Mode == m.Local.RunMode {
+						return m.launchLocalScan(opt)
+					}
+				}
+			}
+			return m, nil
+
+		case localModeHostDetail:
+			switch {
+			case m.isUp(k):
+				m.Local.MoveHostDetailScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.Local.MoveHostDetailScroll(1, mainW, bodyH, pal)
+			case k == "s" || k == "enter":
+				m.Local.ScanSelectedHost()
 			}
 			return m, nil
 		}
@@ -1983,6 +2211,10 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		scanView := m.WifiScan
 		scanView.Marquee = mq
 		mainLines = scanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+	case m.ActiveView == ViewLocal:
+		localView := m.Local
+		localView.Marquee = mq
+		mainLines = localView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewIR:
 		irView := m.IR
 		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
@@ -2131,6 +2363,23 @@ func (m AppModel) currentHints() []Hint {
 				{Key: "⏎", Desc: "act"},
 				{Key: "Esc", Desc: "tabs"},
 			}
+		}
+	}
+	if m.ActiveView == ViewLocal {
+		switch m.Local.Mode {
+		case localModeOptions:
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "scan"}, {Key: "Esc", Desc: "back"}}
+		case localModeRunning:
+			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+		case localModeResults:
+			if len(m.Local.Result.Hosts) > 0 {
+				return []Hint{{Key: "↑↓", Desc: "host"}, {Key: "⏎", Desc: "info"}, {Key: "r", Desc: "rescan"}, {Key: "Esc", Desc: "back"}}
+			}
+			return []Hint{{Key: "⏎", Desc: "rescan"}, {Key: "Esc", Desc: "back"}}
+		case localModeHostDetail:
+			return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "s", Desc: "scan"}, {Key: "Esc", Desc: "back"}}
+		default:
+			return []Hint{{Key: "↑↓", Desc: "if"}, {Key: "⏎", Desc: "next"}, {Key: "r", Desc: "ref"}, {Key: "Esc", Desc: "tabs"}}
 		}
 	}
 	if m.ActiveView == ViewIR {
