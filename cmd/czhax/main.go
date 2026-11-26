@@ -234,6 +234,46 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "bt" {
+		if len(os.Args) > 2 && os.Args[2] == "scan" {
+			fs := flag.NewFlagSet("bt scan", flag.ExitOnError)
+			hci := fs.String("hci", "hci0", "HCI device (hci0)")
+			controller := fs.String("controller", "", "Controller address")
+			modeStr := fs.String("mode", "both", "Scan mode: both|le|classic")
+			timeout := fs.Duration("timeout", 10*time.Second, "Scan duration")
+			raw := fs.Bool("raw", false, "Print raw bluetoothctl output")
+			_ = fs.Parse(os.Args[3:])
+			mode := bluetooth.ScanBoth
+			switch strings.ToLower(*modeStr) {
+			case "le", "ble":
+				mode = bluetooth.ScanLE
+			case "classic", "bredr":
+				mode = bluetooth.ScanClassic
+			}
+			req := bluetooth.ScanRequest{HCI: *hci, Controller: *controller, Mode: mode, Timeout: *timeout}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			var devices []bluetooth.Device
+			if *raw {
+				out, err := bluetooth.ScanRaw(ctx, req)
+				fmt.Print(out)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "raw scan error: %v\n", err)
+				}
+				devices = bluetooth.ParseScanOutput(out, mode)
+			} else {
+				var err error
+				devices, err = bluetooth.ScanDevices(ctx, req)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "scan error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+			fmt.Printf("%d devices\n", len(devices))
+			for _, d := range devices {
+				fmt.Printf("%s  %-16s  %-16s  %s\n", d.Address, d.SignalLabel(), d.Kind, d.DisplayName())
+			}
+			return
+		}
 		if len(os.Args) > 2 && os.Args[2] == "carwhisperer" {
 			fs := flag.NewFlagSet("bt carwhisperer", flag.ExitOnError)
 			hci := fs.String("hci", "hci0", "HCI device (hci0)")
@@ -256,7 +296,8 @@ func main() {
 			}
 			return
 		}
-		fmt.Fprintln(os.Stderr, "usage: czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.raw")
+		fmt.Fprintln(os.Stderr, "usage: czhax bt scan [--hci hci0] [--mode both|le|classic] [--raw]")
+		fmt.Fprintln(os.Stderr, "       czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.raw")
 		os.Exit(1)
 	}
 

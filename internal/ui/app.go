@@ -553,7 +553,7 @@ func collectBluetoothCmd() tea.Cmd {
 
 func scanBluetoothDevicesCmd(hci, controller string, mode bluetooth.ScanMode) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		devices, err := bluetooth.ScanDevices(ctx, bluetooth.ScanRequest{
 			HCI:        hci,

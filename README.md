@@ -121,6 +121,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Select any discovered host to view its details or press `s` to run a targeted `nmap` scan on that host alone.
 - **Bluetooth Scan (`BT → Scan`)**:
   - Scans nearby Bluetooth peers on any `hci*` adapter, with `m` cycling **BLE+Classic**, **BLE**, and **Classic** discovery (`bluetoothctl`, falling back to `hcitool`).
+  - Discovery keeps an interactive `bluetoothctl` session open (with a PTY fallback) because BlueZ 5.75+ exits immediately from non-interactive `scan on`; it also unblocks/powers the adapter automatically. Run `czhax bt scan --raw` to print the raw session for troubleshooting.
   - Shows device name, address, RSSI, Classic/BLE kind, Fast Pair (`FP`) advertisements with Model ID, and paired/connected state. Press `←→` to switch adapters and `⏎` for per-device actions.
   - **Carwhisperer**: opens the hands-free RFCOMM channel and SCO audio link, sends a fake `RING`, injects silence and records raw 8 kHz audio to `~/.local/share/czhax/bt/carwhisperer-*.raw` (native implementation, requires root or passwordless sudo).
   - **WhisperPair**: runs the reference `whisperpair` CLI when installed (`verify <addr> --authorized`); otherwise performs a built-in Fast Pair audit that detects the `0xFE2C` service and Model ID and explains that the active predicate test needs the model's Google anti-spoofing key.
