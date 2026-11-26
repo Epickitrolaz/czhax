@@ -21,6 +21,12 @@ func resolveBin(name string) string {
 	return name
 }
 
+// NeedsSudo reports whether a privileged action would currently need an
+// interactive sudo password (no root and no cached passwordless sudo).
+func NeedsSudo() bool {
+	return os.Geteuid() != 0 && !canSudo()
+}
+
 // canSudo reports whether passwordless sudo is usable without prompting.
 func canSudo() bool {
 	if os.Geteuid() == 0 {
