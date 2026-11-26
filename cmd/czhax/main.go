@@ -297,7 +297,7 @@ func main() {
 			return
 		}
 		fmt.Fprintln(os.Stderr, "usage: czhax bt scan [--hci hci0] [--mode both|le|classic] [--raw]")
-		fmt.Fprintln(os.Stderr, "       czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.raw")
+		fmt.Fprintln(os.Stderr, "       czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.wav [--play playback.raw]")
 		os.Exit(1)
 	}
 

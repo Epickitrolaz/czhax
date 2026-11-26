@@ -410,6 +410,21 @@ func TestAllViewsAndSizes(t *testing.T) {
 		}
 
 		m = sendKey(m, "down")
+		if m.ActiveView != ViewFiles {
+			t.Fatalf("expected ViewFiles on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Files/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on Files enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Files/Content")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from Files")
+		}
+
+		m = sendKey(m, "down")
 		if m.ActiveView != ViewIR {
 			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
 		}

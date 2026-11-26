@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/bluetooth"
+	"github.com/czhax/czhax/internal/files"
 	"github.com/czhax/czhax/internal/theme"
+	"github.com/czhax/czhax/internal/workdir"
 )
 
 type BTViewMode int
@@ -19,6 +22,9 @@ const (
 	btModeActions
 	btModeDetail
 	btModeRunning
+	btModeCWMenu
+	btModeCWAudio
+	btModeCWRecord
 )
 
 type BTActionKind int
@@ -38,6 +44,30 @@ type btActionItem struct {
 	ok   bool
 }
 
+type cwActionKind int
+
+const (
+	cwTap cwActionKind = iota
+	cwRecordMessage
+	cwPlayAudio
+	cwBack
+)
+
+type cwActionItem struct {
+	kind cwActionKind
+	name string
+	val  string
+	warn bool
+	ok   bool
+}
+
+var cwActions = []cwActionItem{
+	{kind: cwTap, name: "Tap", val: "record"},
+	{kind: cwRecordMessage, name: "Record message", val: "mic→play", warn: true},
+	{kind: cwPlayAudio, name: "Play audio", val: "file"},
+	{kind: cwBack, name: "Back", val: "esc", ok: true},
+}
+
 var btActions = []btActionItem{
 	{kind: btActCarwhisperer, name: "Carwhisperer", val: "audio", warn: true},
 	{kind: btActWhisperPair, name: "WhisperPair", val: "fast pair"},
@@ -53,6 +83,8 @@ type BluetoothScanView struct {
 	PrevMode     BTViewMode
 	DetailReturn BTViewMode
 
+	WorkDir string
+
 	Adapters   []bluetooth.Adapter
 	AdapterIdx int
 	ScanMode   bluetooth.ScanMode
@@ -67,6 +99,19 @@ type BluetoothScanView struct {
 	DetailScroll   int
 	PendingInfoFor string
 
+	CWReturn       BTViewMode
+	CWCursor       int
+	CWAudio        []files.Entry
+	CWAudioCur     int
+	CWPlayPath     string
+	CWRecord       bool
+	CWRecordSeq    int
+	CWRecordAt     time.Time
+	CWRecordFor    time.Duration
+	CWRecordPath   string
+	CWRecordCancel context.CancelFunc
+	CWRecordErr    string
+
 	RunKind       BTActionKind
 	RunDevice     bluetooth.Device
 	RunActive     bool
@@ -77,6 +122,7 @@ type BluetoothScanView struct {
 	RunLines      []string
 	RunErr        string
 	RunRecordPath string
+	RunPlayPath   string
 	RunProgressCh chan string
 	RunCancel     context.CancelFunc
 
@@ -266,6 +312,118 @@ func (v BluetoothScanView) SelectedAction() (BTActionKind, bool) {
 	return btActions[v.ActionCursor].kind, true
 }
 
+func (v *BluetoothScanView) OpenCWMenu() bool {
+	if _, ok := v.SelectedDevice(); !ok {
+		return false
+	}
+	v.CWReturn = v.Mode
+	v.Mode = btModeCWMenu
+	v.CWCursor = 0
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *BluetoothScanView) MoveCW(delta int) {
+	v.CWCursor = (v.CWCursor + delta + len(cwActions)) % len(cwActions)
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v BluetoothScanView) SelectedCW() (cwActionKind, bool) {
+	if v.CWCursor < 0 || v.CWCursor >= len(cwActions) {
+		return 0, false
+	}
+	return cwActions[v.CWCursor].kind, true
+}
+
+func (v *BluetoothScanView) OpenCWAudio() bool {
+	root := v.WorkDir
+	if strings.TrimSpace(root) == "" {
+		root = workdir.Resolve("")
+	}
+	entries, err := files.ListAudio(root)
+	if err != nil {
+		v.Note = err.Error()
+		v.NoteIsErr = true
+		return false
+	}
+	v.CWAudio = entries
+	v.CWAudioCur = 0
+	v.Mode = btModeCWAudio
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *BluetoothScanView) MoveCWAudio(delta int) {
+	if len(v.CWAudio) == 0 {
+		v.CWAudioCur = 0
+		return
+	}
+	v.CWAudioCur = (v.CWAudioCur + delta + len(v.CWAudio)) % len(v.CWAudio)
+}
+
+func (v BluetoothScanView) SelectedCWAudio() (files.Entry, bool) {
+	if v.CWAudioCur < 0 || v.CWAudioCur >= len(v.CWAudio) {
+		return files.Entry{}, false
+	}
+	return v.CWAudio[v.CWAudioCur], true
+}
+
+func (v *BluetoothScanView) StartCWRecord() (context.Context, int, string, bool) {
+	if v.CWRecord {
+		return nil, 0, "", false
+	}
+	root := v.WorkDir
+	if strings.TrimSpace(root) == "" {
+		root = workdir.Resolve("")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	v.CWRecordSeq++
+	v.CWRecordPath = filepath.Join(workdir.Recordings(root), fmt.Sprintf("message-%s.wav", time.Now().Format("20060102-150405")))
+	v.CWRecord = true
+	v.CWRecordAt = time.Now()
+	v.CWRecordFor = 0
+	v.CWRecordErr = ""
+	v.CWRecordCancel = cancel
+	v.Mode = btModeCWRecord
+	return ctx, v.CWRecordSeq, v.CWRecordPath, true
+}
+
+func (v *BluetoothScanView) StopCWRecord() {
+	if v.CWRecordCancel != nil {
+		v.CWRecordCancel()
+	}
+}
+
+func (v *BluetoothScanView) FinishCWRecord(seq int, err error) {
+	if seq != v.CWRecordSeq {
+		return
+	}
+	v.CWRecord = false
+	v.CWRecordCancel = nil
+	if !v.CWRecordAt.IsZero() {
+		v.CWRecordFor = time.Since(v.CWRecordAt)
+	}
+	if err != nil {
+		v.CWRecordErr = err.Error()
+		v.Note = "Mic recording failed"
+		v.NoteIsErr = true
+		v.Mode = btModeCWMenu
+		return
+	}
+	v.Mode = btModeCWMenu
+}
+
+func (v *BluetoothScanView) ConvertPath() string {
+	root := v.WorkDir
+	if strings.TrimSpace(root) == "" {
+		root = workdir.Resolve("")
+	}
+	return filepath.Join(workdir.BT(root), "playback.raw")
+}
+
 func (v *BluetoothScanView) OpenDetail(fromMode BTViewMode) bool {
 	dev, ok := v.SelectedDevice()
 	if !ok {
@@ -341,7 +499,7 @@ func (v *BluetoothScanView) MergeDeviceInfo(info bluetooth.Device) {
 	}
 }
 
-func (v *BluetoothScanView) StartAttack(kind BTActionKind) (context.Context, bluetooth.AttackRequest, int, chan string, bool) {
+func (v *BluetoothScanView) StartAttack(kind BTActionKind, playPath ...string) (context.Context, bluetooth.AttackRequest, int, chan string, bool) {
 	dev, ok := v.SelectedDevice()
 	if !ok || v.RunActive {
 		return nil, bluetooth.AttackRequest{}, 0, nil, false
@@ -371,8 +529,16 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind) (context.Context, blu
 	v.RunLines = nil
 	v.RunErr = ""
 	v.RunRecordPath = ""
+	v.RunPlayPath = ""
 	if kind == btActCarwhisperer {
-		v.RunRecordPath = bluetooth.CarwhispererRecordPath(dev.Address)
+		root := v.WorkDir
+		if strings.TrimSpace(root) == "" {
+			root = workdir.Resolve("")
+		}
+		v.RunRecordPath = bluetooth.CarwhispererRecordPathIn(root, dev.Address)
+		if len(playPath) > 0 {
+			v.RunPlayPath = playPath[0]
+		}
 	}
 	v.RunProgressCh = make(chan string, 64)
 	v.RunCancel = cancel
@@ -383,8 +549,10 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind) (context.Context, blu
 		Kind:       backendKind,
 		HCI:        v.EffectiveHCI(),
 		Address:    dev.Address,
+		AddrType:   dev.AddrType,
 		Name:       dev.DisplayName(),
 		RecordPath: v.RunRecordPath,
+		PlayPath:   v.RunPlayPath,
 		FastPair:   dev.FastPair,
 		ModelID:    dev.ModelID,
 	}
@@ -472,6 +640,19 @@ func (v BluetoothScanView) attackLabel() string {
 
 func (v *BluetoothScanView) HandleEsc() bool {
 	switch v.Mode {
+	case btModeCWRecord:
+		if v.CWRecord {
+			v.StopCWRecord()
+			return true
+		}
+		v.Mode = btModeCWMenu
+		return true
+	case btModeCWAudio:
+		v.Mode = btModeCWMenu
+		return true
+	case btModeCWMenu:
+		v.Mode = v.CWReturn
+		return true
 	case btModeRunning:
 		if v.RunActive {
 			v.StopAttack()
@@ -505,6 +686,12 @@ func (v BluetoothScanView) RenderLines(w, h int, pal theme.Palette, focused bool
 		return v.renderDetail(w, h, pal, focused)
 	case btModeRunning:
 		return v.renderRunning(w, h, pal)
+	case btModeCWMenu:
+		return v.renderCWMenu(w, h, pal, focused)
+	case btModeCWAudio:
+		return v.renderCWAudio(w, h, pal, focused)
+	case btModeCWRecord:
+		return v.renderCWRecord(w, h, pal)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -810,6 +997,148 @@ func (v BluetoothScanView) buildDetailRows(w int, pal theme.Palette, d bluetooth
 	return rows
 }
 
+func (v BluetoothScanView) renderCWMenu(w, h int, pal theme.Palette, focused bool) []string {
+	dev, okDev := v.SelectedDevice()
+	if !okDev {
+		return v.renderList(w, h, pal, focused)
+	}
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	header := " " + muted.Render("◂ ") + accent.Render(v.Marquee.Truncate("Carwhisperer · "+dev.DisplayName(), max(6, w-4)))
+	if h <= 1 {
+		return v.Marquee.SplitLinesPadded([]string{header}, w, h)
+	}
+	lines := []string{header}
+	if h >= 8 {
+		lines = append(lines, " "+sec.Render("Target ")+txt.Render(v.Marquee.Truncate(dev.Address, max(6, w-9))))
+	}
+	showBottom := (h >= 8 || v.Note != "") && h >= 4
+	listH := h - len(lines)
+	if showBottom {
+		listH--
+	}
+	if listH < 1 {
+		listH = 1
+	}
+	cursor := clampIndex(v.CWCursor, len(cwActions))
+	start, end := ScrollWindow(len(cwActions), cursor, listH)
+	for i := start; i < end; i++ {
+		it := cwActions[i]
+		selected := i == cursor
+		nameW := max(8, w-len(it.val)-5)
+		if selected && focused {
+			lines = append(lines, sel.Width(w).Render(Truncate(fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val), w)))
+		} else {
+			pfx := "   "
+			if selected {
+				pfx = accent.Render(" ▸ ")
+			}
+			valStyle := muted
+			if it.ok {
+				valStyle = ok
+			} else if it.warn {
+				valStyle = warn
+			}
+			lines = append(lines, pfx+txt.Render(v.Marquee.FitLine(it.name, nameW))+" "+valStyle.Render(it.val))
+		}
+	}
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render("↑↓:sel  ⏎:run  Esc:back"))
+		}
+	}
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) renderCWAudio(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	lines := []string{" " + accent.Render("Play audio")}
+	if h <= 1 {
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+	showBottom := (h >= 8 || v.Note != "") && h >= 4
+	listH := h - 1
+	if showBottom {
+		listH--
+	}
+	if len(v.CWAudio) == 0 {
+		lines = append(lines, " "+muted.Render("No audio files in the workdir"))
+		lines = append(lines, " "+muted.Render("Put .wav/.mp3 in "+v.WorkDir))
+	} else {
+		cursor := clampIndex(v.CWAudioCur, len(v.CWAudio))
+		start, end := ScrollWindow(len(v.CWAudio), cursor, max(1, listH))
+		for i := start; i < end; i++ {
+			e := v.CWAudio[i]
+			selected := i == cursor
+			right := files.HumanSize(e.Size)
+			nameW := max(4, w-2-len(right)-1)
+			name := v.Marquee.FitLine(e.Rel, nameW)
+			if selected && focused {
+				lines = append(lines, sel.Width(w).Render(Truncate(fmt.Sprintf(" ▸ %s %s", name, right), w)))
+			} else {
+				pfx := "   "
+				if selected {
+					pfx = accent.Render(" ▸ ")
+				}
+				lines = append(lines, pfx+txt.Render(name)+" "+muted.Render(right))
+			}
+		}
+	}
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render("↑↓:sel  ⏎:play  Esc:back"))
+		}
+	}
+	_ = sec
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) renderCWRecord(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	lines := []string{" " + accent.Render("Record message")}
+	lines = append(lines, " "+sec.Render("File  ")+txt.Render(v.Marquee.Truncate(filepath.Base(v.CWRecordPath), max(6, w-8))))
+	lines = append(lines, " "+warn.Render(fmt.Sprintf("● %ds", int(v.CWRecordFor.Seconds()))))
+	if v.CWRecordErr != "" {
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.CWRecordErr, max(6, w-2))))
+	}
+	for len(lines) < h-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, " "+muted.Render("Esc/⏎:stop"))
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
 func (v BluetoothScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []string {
 	dev, ok := v.SelectedDevice()
 	if !ok {
@@ -902,6 +1231,9 @@ func (v BluetoothScanView) renderRunning(w, h int, pal theme.Palette) []string {
 
 	if v.RunRecordPath != "" && h >= 5 {
 		lines = append(lines, " "+sec.Render("Record ")+muted.Render(v.Marquee.Truncate(v.RunRecordPath, max(6, w-9))))
+	}
+	if v.RunPlayPath != "" && h >= 6 {
+		lines = append(lines, " "+sec.Render("Play   ")+muted.Render(v.Marquee.Truncate(filepath.Base(v.RunPlayPath), max(6, w-9))))
 	}
 	if v.RunErr != "" {
 		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.RunErr, max(6, w-2))))
