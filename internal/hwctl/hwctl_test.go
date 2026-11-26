@@ -10,33 +10,24 @@ import (
 )
 
 func TestBrightness10Levels(t *testing.T) {
-	// Cardputer-brightness.py values (MIN=5, STEP=10, MAX=100) and clean 10s.
-	cases := []struct {
-		raw  int
-		max  int
-		want int
-	}{
-		{0, 100, 0},
-		{5, 100, 1},
-		{10, 100, 1},
-		{15, 100, 2},
-		{20, 100, 2},
-		{25, 100, 3},
-		{35, 100, 4},
-		{45, 100, 5},
-		{55, 100, 6},
-		{65, 100, 7},
-		{75, 100, 8},
-		{85, 100, 9},
-		{90, 100, 9},
-		{95, 100, 10},
-		{100, 100, 10},
-	}
-	for _, tc := range cases {
-		got := BrightnessLevel(tc.raw, tc.max)
-		if got != tc.want {
-			t.Fatalf("BrightnessLevel(%d, %d) = %d, want %d", tc.raw, tc.max, got, tc.want)
+	// Perceptual CIE 1931 curve over 0..100: 0 is black, 100 is max, and
+	// each 10% selector step maps monotonically onto raw PWM duty.
+	wantRaw := []int{0, 1, 3, 6, 11, 18, 28, 41, 57, 76, 100}
+	for lvl, raw := range wantRaw {
+		gotRaw := BrightnessRawForLevel(lvl, 100)
+		if gotRaw != raw {
+			t.Fatalf("BrightnessRawForLevel(%d, 100) = %d, want %d", lvl, gotRaw, raw)
 		}
+		if gotLvl := BrightnessLevel(raw, 100); gotLvl != lvl {
+			t.Fatalf("BrightnessLevel(%d, 100) = %d, want %d", raw, gotLvl, lvl)
+		}
+		if gotPct := BrightnessPercent(raw, 100); gotPct != lvl*10 {
+			t.Fatalf("BrightnessPercent(%d, 100) = %d, want %d", raw, gotPct, lvl*10)
+		}
+	}
+	// Non-zero values below level 1 still map to >= level 1.
+	if got := BrightnessLevel(1, 255); got < 1 {
+		t.Fatalf("expected non-zero raw to map to >=1, got %d", got)
 	}
 }
 
@@ -49,7 +40,7 @@ func TestReadAndStepBacklight(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(blDir, "max_brightness"), []byte("100\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("50\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("18\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -59,55 +50,57 @@ func TestReadAndStepBacklight(t *testing.T) {
 	}
 
 	st, ok = StepBacklight(sysRoot, 1)
-	if !ok || st.Raw != 60 || st.Level != 6 {
+	if !ok || st.Raw != 28 || st.Level != 6 || st.Percent != 60 {
 		t.Fatalf("unexpected StepBacklight(+1): ok=%v st=%+v", ok, st)
 	}
 	st, ok = StepBacklight(sysRoot, -1)
-	if !ok || st.Raw != 50 || st.Level != 5 {
+	if !ok || st.Raw != 18 || st.Level != 5 || st.Percent != 50 {
 		t.Fatalf("unexpected StepBacklight(-1): ok=%v st=%+v", ok, st)
 	}
 
-	// Stepping down must reach 0, and stepping up from 5 or 0 snaps onto clean 10-level grid.
-	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("5\n"), 0o644); err != nil {
+	// Stepping down must reach 0, and stepping up/down from legacy MIN=5 works cleanly.
+	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st, ok = StepBacklight(sysRoot, 1)
-	if !ok || st.Raw != 10 || st.Level != 1 {
-		t.Fatalf("expected 5 -> 10 on StepBacklight(+1), got ok=%v st=%+v", ok, st)
-	}
 	st, ok = StepBacklight(sysRoot, -1)
-	if !ok || st.Raw != 0 || st.Level != 0 {
-		t.Fatalf("expected 10 -> 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
+	if !ok || st.Raw != 0 || st.Level != 0 || st.Percent != 0 {
+		t.Fatalf("expected 1 -> 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
 	}
 	st, ok = StepBacklight(sysRoot, -1)
 	if !ok || st.Raw != 0 || st.Level != 0 {
 		t.Fatalf("expected clamp at 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
 	}
 
-	// Full round-trip must produce strictly 0, 10, 20, ..., 100 with no 5.
+	// Full round-trip must produce the perceptual curve 0..100 with 0%..100% steps.
+	wantUp := []int{1, 3, 6, 11, 18, 28, 41, 57, 76, 100}
 	var up []int
 	for i := 0; i < 10; i++ {
 		st, ok = StepBacklight(sysRoot, 1)
 		if !ok {
 			t.Fatal("StepBacklight(+1) failed")
 		}
+		if st.Percent != (i+1)*10 {
+			t.Fatalf("up step %d percent = %d, want %d", i, st.Percent, (i+1)*10)
+		}
 		up = append(up, st.Raw)
 	}
-	wantUp := []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
 	for i, w := range wantUp {
 		if up[i] != w {
 			t.Fatalf("up step %d = %d, want %d (all=%v)", i, up[i], w, up)
 		}
 	}
+	wantDn := []int{76, 57, 41, 28, 18, 11, 6, 3, 1, 0}
 	var dn []int
 	for i := 0; i < 10; i++ {
 		st, ok = StepBacklight(sysRoot, -1)
 		if !ok {
 			t.Fatal("StepBacklight(-1) failed")
 		}
+		if st.Percent != (9-i)*10 {
+			t.Fatalf("down step %d percent = %d, want %d", i, st.Percent, (9-i)*10)
+		}
 		dn = append(dn, st.Raw)
 	}
-	wantDn := []int{90, 80, 70, 60, 50, 40, 30, 20, 10, 0}
 	for i, w := range wantDn {
 		if dn[i] != w {
 			t.Fatalf("down step %d = %d, want %d (all=%v)", i, dn[i], w, dn)
@@ -124,7 +117,7 @@ func TestLegacyDaemonClampSnappedToZero(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(blDir, "max_brightness"), []byte("100\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate legacy cardputer-brightness.py clamping 10 -> 5 on Fn+U.
+	// Simulate legacy cardputer-brightness.py clamping level 1 -> 5 on Fn+U.
 	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("5\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -132,13 +125,13 @@ func TestLegacyDaemonClampSnappedToZero(t *testing.T) {
 		events:     make(chan Event, 4),
 		stopCh:     make(chan struct{}),
 		blKey:      make(chan int, 4),
-		lastRaw:    10,
+		lastRaw:    BrightnessRawForLevel(1, 100),
 		hasLastRaw: true,
 	}
 	w.handleBrightnessKeyAt(sysRoot, -1)
 	ev := <-w.events
 	if ev.Brightness.Raw != 0 || ev.Brightness.Level != 0 {
-		t.Fatalf("expected legacy 10->5 clamp snapped to 0, got %+v", ev.Brightness)
+		t.Fatalf("expected legacy clamp snapped to 0, got %+v", ev.Brightness)
 	}
 	got, ok := ReadBacklight(sysRoot)
 	if !ok || got.Raw != 0 {

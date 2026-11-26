@@ -215,6 +215,13 @@ type filesPlayDoneMsg struct {
 	err error
 }
 
+type filesAudioDoneMsg struct {
+	seq int
+	err error
+}
+
+type filesPlayTickMsg struct{}
+
 type filesRecordDoneMsg struct {
 	seq int
 	err error
@@ -672,6 +679,18 @@ func playMediaCmd(path string, video bool) tea.Cmd {
 	})
 }
 
+func playAudioCmd(ctx context.Context, seq int, path string) tea.Cmd {
+	return func() tea.Msg {
+		return filesAudioDoneMsg{seq: seq, err: audio.PlayAudio(ctx, path)}
+	}
+}
+
+func filesPlayTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return filesPlayTickMsg{}
+	})
+}
+
 func recordMicCmd(ctx context.Context, seq int, path string) tea.Cmd {
 	return func() tea.Msg {
 		return filesRecordDoneMsg{seq: seq, err: audio.RecordMic(ctx, path, nil)}
@@ -1051,9 +1070,31 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case filesPlayDoneMsg:
 		if msg.err != nil {
+			m.Files.Note = msg.err.Error()
+			m.Files.NoteIsErr = true
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Playback failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Playback finished"), m.resetMarquee())
+
+	case filesAudioDoneMsg:
+		if errors.Is(msg.err, context.Canceled) {
+			m.Files.FinishPlayback(msg.seq, nil)
+			return m, tea.Batch(m.setStatus("Playback stopped"), m.resetMarquee())
+		}
+		m.Files.FinishPlayback(msg.seq, msg.err)
+		if msg.err != nil {
 			return m, tea.Batch(m.setStatus("Playback failed"), m.resetMarquee())
 		}
 		return m, tea.Batch(m.setStatus("Playback finished"), m.resetMarquee())
+
+	case filesPlayTickMsg:
+		if !m.Files.Playing {
+			return m, nil
+		}
+		if !m.Files.PlayStarted.IsZero() {
+			m.Files.PlayElapsed = time.Since(m.Files.PlayStarted)
+		}
+		return m, filesPlayTickCmd()
 
 	case filesRecordDoneMsg:
 		if errors.Is(msg.err, context.Canceled) {
@@ -1355,6 +1396,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.Files.Recording && (k == "ctrl+c" || k == "q") {
 		m.Files.StopRecording()
 		return m, m.setStatus("Stopping recording...")
+	}
+	if m.Files.Playing && (k == "ctrl+c" || k == "q") {
+		m.Files.StopPlayback()
+		return m, m.setStatus("Stopping playback...")
 	}
 	if m.BluetoothScan.CWRecord && (k == "ctrl+c" || k == "q") {
 		m.BluetoothScan.StopCWRecord()
@@ -2241,7 +2286,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				if err != nil {
 					return m, m.setStatus(err.Error())
 				}
-				if kind != "" {
+				if kind == "audio" {
+					ctx, seq, playPath, ok := m.Files.StartPlayback(path)
+					if ok {
+						return m, tea.Batch(m.setStatus("Playing "+m.Files.PlayName), playAudioCmd(ctx, seq, playPath), filesPlayTickCmd())
+					}
+				} else if kind != "" {
 					return m, playMediaCmd(path, kind == "video")
 				}
 			case k == "n":
@@ -2273,6 +2323,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		case filesModeRecord:
 			if k == "enter" || k == " " {
 				m.Files.StopRecording()
+			}
+			return m, nil
+
+		case filesModePlay:
+			if k == "enter" || k == " " {
+				m.Files.StopPlayback()
 			}
 			return m, nil
 
@@ -3125,6 +3181,8 @@ func (m AppModel) currentHints() []Hint {
 		case filesModeImage:
 			return []Hint{{Key: "Esc", Desc: "back"}}
 		case filesModeRecord:
+			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
+		case filesModePlay:
 			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
 		default:
 			return []Hint{

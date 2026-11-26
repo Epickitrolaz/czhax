@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -47,5 +48,18 @@ func TestConvertWAVNativeResamples(t *testing.T) {
 	}
 	if len(data) != len(samples)*2/2 {
 		t.Fatalf("resampled bytes = %d, want %d", len(data), len(samples)*2/2)
+	}
+}
+
+func TestPlayAudioValidatesFile(t *testing.T) {
+	if err := PlayAudio(context.Background(), filepath.Join(t.TempDir(), "missing.wav")); err == nil {
+		t.Fatal("expected error for missing file")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.wav")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := PlayAudio(context.Background(), empty); err == nil {
+		t.Fatal("expected error for empty file")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +89,8 @@ func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(s
 		"--hci", NormalizeHCI(req.HCI),
 		"--addr", NormalizeAddr(req.Address),
 		"--record", req.RecordPath,
+		"--uid", strconv.Itoa(os.Getuid()),
+		"--gid", strconv.Itoa(os.Getgid()),
 	}
 	if !req.Record {
 		args = append(args, "--no-record")
@@ -167,8 +170,8 @@ func CarwhispererRecordPath(address string) string {
 }
 
 func CarwhispererRecordPathIn(root, address string) string {
-	dir := workdir.BT(root)
-	_ = os.MkdirAll(dir, 0o700)
+	dir := workdir.Captures(root)
+	_ = os.MkdirAll(dir, 0o755)
 	addr := strings.ReplaceAll(NormalizeAddr(address), ":", "")
 	name := fmt.Sprintf("carwhisperer-%s-%s.wav", addr, time.Now().Format("20060102-150405"))
 	return filepath.Join(dir, name)

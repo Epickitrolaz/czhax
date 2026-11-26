@@ -449,7 +449,8 @@ func (v *BluetoothScanView) OpenCWAudio() bool {
 	if strings.TrimSpace(root) == "" {
 		root = workdir.Resolve("")
 	}
-	entries, err := files.ListAudio(root)
+	_ = workdir.Ensure(root)
+	entries, err := files.ListAudio(workdir.Audio(root))
 	if err != nil {
 		v.Note = err.Error()
 		v.NoteIsErr = true
@@ -567,7 +568,7 @@ func (v *BluetoothScanView) ConvertPath() string {
 	if strings.TrimSpace(root) == "" {
 		root = workdir.Resolve("")
 	}
-	return filepath.Join(workdir.BT(root), "playback.raw")
+	return filepath.Join(workdir.Temp(root), "playback.raw")
 }
 
 func (v *BluetoothScanView) OpenDetail(fromMode BTViewMode) bool {
@@ -1276,8 +1277,12 @@ func (v BluetoothScanView) renderCWAudio(w, h int, pal theme.Palette, focused bo
 		listH--
 	}
 	if len(v.CWAudio) == 0 {
-		lines = append(lines, " "+muted.Render("No audio files in the workdir"))
-		lines = append(lines, " "+muted.Render("Put .wav/.mp3 in "+v.WorkDir))
+		root := v.WorkDir
+		if strings.TrimSpace(root) == "" {
+			root = workdir.Resolve("")
+		}
+		lines = append(lines, " "+muted.Render("No audio files in user/audio"))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Put audio in "+workdir.Audio(root), max(6, w-2))))
 	} else {
 		cursor := clampIndex(v.CWAudioCur, len(v.CWAudio))
 		start, end := ScrollWindow(len(v.CWAudio), cursor, max(1, listH))
@@ -1285,7 +1290,7 @@ func (v BluetoothScanView) renderCWAudio(w, h int, pal theme.Palette, focused bo
 			e := v.CWAudio[i]
 			selected := i == cursor
 			right := files.HumanSize(e.Size)
-			nameW := max(4, w-2-len(right)-1)
+			nameW := max(4, w-4-len(right))
 			name := v.Marquee.FitLine(e.Rel, nameW)
 			if selected && focused {
 				lines = append(lines, sel.Width(w).Render(Truncate(fmt.Sprintf(" ▸ %s %s", name, right), w)))

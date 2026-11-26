@@ -12,7 +12,7 @@ func TestResolveAndEnsure(t *testing.T) {
 	if err := Ensure(root); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{root, Captures(root), BT(root), Recordings(root)} {
+	for _, dir := range []string{root, Captures(root), Temp(root), User(root), Audio(root), Recordings(root)} {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 			t.Fatalf("missing %s: %v", dir, err)
 		}

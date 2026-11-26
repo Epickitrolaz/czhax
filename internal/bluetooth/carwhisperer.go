@@ -82,7 +82,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		if strings.TrimSpace(recordPath) == "" {
 			recordPath = CarwhispererRecordPath(address)
 		}
-		if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(recordPath), 0o755); err != nil {
 			return err
 		}
 		w, err := newWAVWriter(recordPath)
@@ -558,16 +558,17 @@ func scoWrite(fd int, data []byte) {
 
 // wavWriter writes 8 kHz mono 16-bit PCM and patches the RIFF sizes on close.
 type wavWriter struct {
+	path  string
 	f     *os.File
 	bytes int64
 }
 
 func newWAVWriter(path string) (*wavWriter, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	w := &wavWriter{f: f}
+	w := &wavWriter{path: path, f: f}
 	if err := w.writeHeader(0); err != nil {
 		f.Close()
 		return nil, err
@@ -582,8 +583,47 @@ func (w *wavWriter) Write(p []byte) (int, error) {
 }
 
 func (w *wavWriter) Close() error {
+	if w.bytes == 0 {
+		err := w.f.Close()
+		if w.path != "" {
+			_ = os.Remove(w.path)
+		}
+		return err
+	}
+	// Keep 16-bit PCM sample-aligned so players/demuxers don't choke on an odd trailing byte.
+	if w.bytes%2 != 0 {
+		if _, err := w.f.Write([]byte{0}); err == nil {
+			w.bytes++
+		}
+	}
 	_ = w.writeHeader(w.bytes)
 	return w.f.Close()
+}
+
+// ChownCapture ensures a Carwhisperer capture file and its directory belong to uid:gid.
+func ChownCapture(path string, uid, gid int) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if uid < 0 {
+		if s := strings.TrimSpace(os.Getenv("SUDO_UID")); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				uid = n
+			}
+		}
+	}
+	if gid < 0 {
+		if s := strings.TrimSpace(os.Getenv("SUDO_GID")); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				gid = n
+			}
+		}
+	}
+	if uid < 0 || gid < 0 {
+		return
+	}
+	_ = os.Chown(filepath.Dir(path), uid, gid)
+	_ = os.Chown(path, uid, gid)
 }
 
 func (w *wavWriter) writeHeader(dataBytes int64) error {

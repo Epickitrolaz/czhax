@@ -281,6 +281,8 @@ func main() {
 			record := fs.String("record", "", "Raw audio output path")
 			play := fs.String("play", "", "Optional raw audio to inject")
 			noRecord := fs.Bool("no-record", false, "Do not save captured audio")
+			uid := fs.Int("uid", -1, "Owner UID for capture file")
+			gid := fs.Int("gid", -1, "Owner GID for capture file")
 			_ = fs.Parse(os.Args[3:])
 			if strings.TrimSpace(*addr) == "" {
 				fmt.Fprintln(os.Stderr, "bt carwhisperer: --addr is required")
@@ -291,6 +293,9 @@ func main() {
 			err := bluetooth.Carwhisperer(ctx, *hci, *addr, *record, *play, !*noRecord, func(line string) {
 				fmt.Println(line)
 			})
+			if !*noRecord {
+				bluetooth.ChownCapture(*record, *uid, *gid)
+			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "bt carwhisperer error: %v\n", err)
 				os.Exit(1)
