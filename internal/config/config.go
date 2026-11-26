@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/czhax/czhax/internal/workdir"
 )
 
 type ViewportMode string
@@ -52,6 +55,7 @@ type Config struct {
 	IRFlipperDir   string       `json:"ir_flipper_dir,omitempty"`
 	IRMiDir        string       `json:"ir_mi_dir,omitempty"`
 	OneShotDir     string       `json:"oneshot_dir,omitempty"`
+	WorkDir        string       `json:"work_dir,omitempty"`
 	WiFiColor      string       `json:"wifi_color_mode,omitempty"` // security|oneshot
 }
 
@@ -71,6 +75,7 @@ func Default() Config {
 		RefreshSeconds: 2,
 		ConfirmQuit:    true,
 		WiFiColor:      WiFiColorSecurity,
+		WorkDir:        workdir.Default(),
 	}
 }
 
@@ -123,6 +128,11 @@ func Save(path string, cfg Config) error {
 
 func (c *Config) normalize() {
 	c.Theme = "mono-hi"
+	if strings.TrimSpace(c.WorkDir) == "" {
+		c.WorkDir = workdir.Default()
+	} else {
+		c.WorkDir = workdir.Resolve(c.WorkDir)
+	}
 	switch c.Viewport {
 	case ViewportAuto, ViewportCZ5314, ViewportCZ4510, ViewportCZ4010, ViewportWide:
 	default:

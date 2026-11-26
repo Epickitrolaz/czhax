@@ -44,8 +44,11 @@ internal/
   bluetooth/bluetooth.go   # HCI adapter telemetry from sysfs, hciconfig and bluetoothctl
   bluetooth/scan.go        # BLE/Classic device scan (bluetoothctl, hcitool fallback) + Fast Pair parsing
   bluetooth/attack.go      # Carwhisperer / WhisperPair / l2ping flood action dispatch
-  bluetooth/carwhisperer.go# Native RFCOMM + SCO audio injection/recording
+  bluetooth/carwhisperer.go # Native RFCOMM + SCO audio injection/recording (WAV)
   bluetooth/exec.go        # Privileged streaming command helper (sudo -n)
+  audio/audio.go           # Mic recording (arecord/parecord), SCO conversion, media players
+  files/files.go           # Working-directory browser, text/image/audio/video helpers
+  workdir/workdir.go       # ~/czhax working directory + captures/bt/recordings paths
   ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
   ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
   ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit
@@ -63,6 +66,7 @@ internal/
     local.go               # Local -> Scan interface picker, nmap options, live run, host details
     bluetooth.go           # Status -> Bluetooth view
     bluetooth_scan.go      # BT -> Scan list/actions/detail/live attack output (Carwhisperer, WhisperPair, l2ping)
+    files.go               # Files -> working-directory browser, text editor, image viewer, mic recorder
     ir.go                  # IR -> Remote/Learn/Browse, probe + grid discovery modes
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)
     osd.go                 # Centered Brightness (10-level) and Volume (20-level) OSD popups

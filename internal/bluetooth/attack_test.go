@@ -34,7 +34,7 @@ func TestRFCOMMResponse(t *testing.T) {
 func TestCarwhispererRecordPath(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	p := CarwhispererRecordPath("AA:BB:CC:DD:EE:FF")
-	if filepath.Ext(p) != ".raw" || !strings.Contains(filepath.Base(p), "carwhisperer-AABBCCDDEEFF-") {
+	if filepath.Ext(p) != ".wav" || !strings.Contains(filepath.Base(p), "carwhisperer-AABBCCDDEEFF-") {
 		t.Fatalf("unexpected record path %q", p)
 	}
 }

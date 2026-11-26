@@ -2,7 +2,9 @@ package bluetooth
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,7 +73,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
 		return err
 	}
-	record, err := os.OpenFile(recordPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	record, err := newWAVWriter(recordPath)
 	if err != nil {
 		return fmt.Errorf("open record file: %w", err)
 	}
@@ -258,7 +260,7 @@ func rfcommWrite(fd int, s string) {
 	}
 }
 
-func carwhispererSCO(ctx context.Context, fd int, record, play *os.File, emit func(string, ...any)) {
+func carwhispererSCO(ctx context.Context, fd int, record io.Writer, play *os.File, emit func(string, ...any)) {
 	buf := make([]byte, 512)
 	silence := make([]byte, 512)
 	total := 0
@@ -321,4 +323,53 @@ func scoWrite(fd int, data []byte) {
 			return
 		}
 	}
+}
+
+// wavWriter writes 8 kHz mono 16-bit PCM and patches the RIFF sizes on close.
+type wavWriter struct {
+	f     *os.File
+	bytes int64
+}
+
+func newWAVWriter(path string) (*wavWriter, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	w := &wavWriter{f: f}
+	if err := w.writeHeader(0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *wavWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *wavWriter) Close() error {
+	_ = w.writeHeader(w.bytes)
+	return w.f.Close()
+}
+
+func (w *wavWriter) writeHeader(dataBytes int64) error {
+	var h [44]byte
+	copy(h[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(h[4:8], uint32(36+dataBytes))
+	copy(h[8:12], "WAVE")
+	copy(h[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(h[16:20], 16)
+	binary.LittleEndian.PutUint16(h[20:22], 1)    // PCM
+	binary.LittleEndian.PutUint16(h[22:24], 1)    // mono
+	binary.LittleEndian.PutUint32(h[24:28], 8000) // sample rate
+	binary.LittleEndian.PutUint32(h[28:32], 16000)
+	binary.LittleEndian.PutUint16(h[32:34], 2)
+	binary.LittleEndian.PutUint16(h[34:36], 16)
+	copy(h[36:40], "data")
+	binary.LittleEndian.PutUint32(h[40:44], uint32(dataBytes))
+	_, err := w.f.WriteAt(h[:], 0)
+	return err
 }

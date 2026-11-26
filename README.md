@@ -45,7 +45,7 @@ What each component does:
 | **Cardputer setup** | [`scripts/setup-cardputer.sh`](scripts/setup-cardputer.sh): `m5stack-linux-dtoverlays` for the LCD/keyboard/audio/battery/RTC, `fb_load` disabled, `en_US.UTF-8` + Terminus 6×12 console, `cardputer-keymap` and `cardputer-brightness` services, tty1 autologin |
 | **Wi-Fi monitor mode** | [`firmware/nexmon`](firmware/nexmon): patched CYW43439 firmware + nexmon `brcmfmac` — monitor mode with radiotap and frame injection (`airmon-ng`, `aireplay-ng`, `mdk4` all work). Builds the firmware from source on x86_64, and on the board applies the prebuilt patch bundle to the stock image (no toolchain needed) |
 | **CZHax TUI** | downloads the latest release binary, verifies its SHA256 and installs it to `/usr/local/bin/czhax` |
-| **Pentest packages** | `aircrack-ng`, `hcxtools`, `hcxdumptool`, `mdk4`, `pixiewps`, `reaver`, `tshark`, `nmap`, `macchanger`, `hostapd`, `dnsmasq`, `bettercap`, `bluez`, `bluez-deprecated-tools`, … (only those available in your repos) |
+| **Pentest packages** | `aircrack-ng`, `hcxtools`, `hcxdumptool`, `mdk4`, `pixiewps`, `reaver`, `tshark`, `nmap`, `macchanger`, `hostapd`, `dnsmasq`, `bettercap`, `bluez`, `bluez-deprecated-tools`, `alsa-utils`, `ffmpeg`, `mpv`, … (only those available in your repos) |
 
 ### Fresh Raspberry Pi OS Lite Setup (Drivers, Keymap & Console)
 
@@ -101,7 +101,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `BT`, `IR`, `System`/`Sys`) and top horizontal tab bar, plus auto-dismissing **Brightness** (10 levels, `Fn+U`/`Fn+I`) and **Volume** (20 levels + Mute, `Fn+S`/`Fn+D`/`Fn+A`) OSD popups.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `BT`, `Files`/`Fil`, `IR`, `System`/`Sys`) and top horizontal tab bar, plus auto-dismissing **Brightness** (10 levels, `Fn+U`/`Fn+I`) and **Volume** (20 levels + Mute, `Fn+S`/`Fn+D`/`Fn+A`) OSD popups.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
@@ -112,7 +112,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Scan nearby networks on any detected wireless interface (`nmcli`, falling back to `iw`)
   - Signal, security, channel, and in-use state per AP, with a detail view
   - Connect to open, WPA/WPA2/WPA3, or hidden networks; pick the target interface and reveal the passphrase while typing
-  - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax-captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
+  - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax/captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
   - **WPS attack (OneShot-Extended)**: press `Enter` on an AP and pick **WPS Attack (OneShot)**. OneShot-Extended is **bundled in the CZHax binary** (pinned upstream snapshot extracted to `~/.cache/czhax/oneshot-<commit>` on first use), so no separate download is needed; set `oneshot_dir` or `CZHAX_ONESHOT_DIR` to override with a local clone. Default attack is `-P -k` (Pixie Dust + kill interfering processes); presets also cover Pixie force, Null PIN, push-button, bruteforce, and a custom PIN. After each run CZHax restores NetworkManager, the interface and `rfkill` state that `--kill` terminated. If OneShot recovers a PSK, press **`c`** to connect to the AP with it after choosing an interface; if it recovers only the WPS PIN, press **`p`** to rerun the PSK capture with the saved PIN (also available as *Retry with PIN* in the WPS menu). Requires Python 3.11+, `pixiewps`, `wpa_supplicant`, `iw` and `ip`; its `vulnwsc.txt` DB drives the vulnerability colors.
   - **Network colors**: press `o` to cycle coloring modes — **SEC** (red WPA3, orange WPA2, yellow WPA/WEP, green Open) or **OSE** (green = in OneShot's vulnerable-device DB or WPS 1.0, red = WPS locked, muted = no WPS). The mode is persisted in `~/.config/czhax/config.json` as `wifi_color_mode`.
 - **Local Scan (`Local → Scan`)**:
@@ -123,9 +123,15 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Scans nearby Bluetooth peers on any `hci*` adapter, with `m` cycling **BLE+Classic**, **BLE**, and **Classic** discovery (`bluetoothctl`, falling back to `hcitool`).
   - Discovery keeps an interactive `bluetoothctl` session open (with a PTY fallback) because BlueZ 5.75+ exits immediately from non-interactive `scan on`; it also unblocks/powers the adapter automatically. Run `czhax bt scan --raw` to print the raw session for troubleshooting.
   - Shows device name, address, RSSI, Classic/BLE kind, Fast Pair (`FP`) advertisements with Model ID, and paired/connected state. Names come from the EIR/alias; BlueZ's auto-generated `AA-BB-CC-DD-EE-FF` aliases are replaced by the colon-form address, and RSSI is enriched via `btmgmt find` when `bluetoothctl` omits it. Press `←→` to switch adapters and `⏎` for per-device actions.
-  - **Carwhisperer**: opens the hands-free RFCOMM channel and SCO audio link, sends a fake `RING`, injects silence and records raw 8 kHz audio to `~/.local/share/czhax/bt/carwhisperer-*.raw` (native implementation, requires root or passwordless sudo).
-  - **WhisperPair**: runs the reference `whisperpair` CLI when installed (`verify <addr> --authorized`); otherwise performs a built-in Fast Pair audit that detects the `0xFE2C` service and Model ID and explains that the active predicate test needs the model's Google anti-spoofing key.
+  - **Carwhisperer**: opens the hands-free RFCOMM channel and SCO audio link, sends a fake `RING`, and records 8 kHz WAV audio natively (`~/czhax/bt/carwhisperer-*.wav`). The Carwhisperer menu offers **Tap** (record the device microphone), **Record message** (record from the Cardputer mic, then play it to the target), and **Play audio** (pick a WAV/MP3 from the working directory and inject it on connect). Requires root or passwordless sudo.
+  - **WhisperPair**: built-in invalid-curve Fast Pair test using `gatttool` (no external WhisperPair download); it discovers the `0xFE2C` Key-based Pairing characteristic, sends the small-order point payloads, and reports whether the device accepts the request. Falls back to an installed `whisperpair` CLI, otherwise asks for `bluez-deprecated-tools`.
   - **l2ping Flood**: floods the selected Classic device with `l2ping -f` (`bluez`); `Esc` stops any running action and keeps the captured output on screen.
+- **Files (`Files → Files`)**:
+  - Browses the CZHax working directory (`~/czhax` by default, configurable with `work_dir`), with folders first, sizes, and nested navigation.
+  - Create text files/folders (`n`/`m`), rename (`r`), delete (`x`), and a small in-TUI text editor (`Ctrl+S` saves).
+  - In-TUI image viewer for PNG/JPEG/GIF and external playback for music/video via `mpv`/`ffplay`.
+  - Microphone recording (`a`) writes WAV files to `~/czhax/recordings`.
+  - CZHax keeps user files, captures (`captures/`), Bluetooth audio (`bt/`), and recordings (`recordings/`) under the same working directory.
 - **IR Remote (`IR → Remote`, `IR → Learn`, `IR → Browse`)**:
   - **Learn**: copy any physical remote button with the GPIO13 IR receiver and bind it to a Cardputer key. Learned profiles persist in `~/.config/czhax/ir.json`.
   - **Remote**: the active profile maps buttons to keys (`1` Power, `2` Vol+, `3` Vol−, `4` Mute, `5`/`6` channel, `7`–`0` arrows, `Enter` OK, `Backspace` Back); presses transmit over the GPIO12 IR LED.
@@ -144,6 +150,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
   - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `o` cycles network color modes, `m` cycles Bluetooth scan modes, `?` toggles help, `q` / `Ctrl+C` quits
+  - Files: `⏎` opens, `n` new file, `m` new folder, `a` records the mic, `x` deletes, `r` renames; the editor uses `Ctrl+S` to save
   - IR: `l` learns, `p`/`v`/`m` try power/volume/mute candidates, `a` accepts, `g` toggles grid mode, and `[`/`]` cycle profiles
 
 ## Build from Source
@@ -156,7 +163,7 @@ make build-all   # Cross-compile arm64, armv7, amd64 + SHA256 checksums
 ## Third-party code
 
 - [OneShot-Extended](https://github.com/chkndrp/OneShot-Extended) is bundled as a pinned upstream snapshot under `internal/oneshot/upstream` (GPL-2.0; see its `LICENSE`). It is extracted to the user cache directory on first use and executed with `python3`; CZHax itself does not modify it.
-- The Bluetooth tab integrates Carwhisperer natively (RFCOMM + SCO sockets) and uses BlueZ's `l2ping` from the OS `bluez` package. If a `whisperpair` reference CLI is already on `PATH`, CZHax runs `whisperpair verify <addr> --authorized`; otherwise it performs a local Fast Pair service/Model ID audit. The WhisperPair toolkit itself is not downloaded or bundled by CZHax.
+- The Bluetooth tab integrates Carwhisperer natively (RFCOMM + SCO sockets) and uses BlueZ's `l2ping`/`btmgmt`/`gatttool` from the OS `bluez` packages. The WhisperPair invalid-curve test is implemented in CZHax; no WhisperPair toolkit is downloaded or bundled.
 
 See [AGENTS.md](AGENTS.md) for guidelines on adding new UI tabs and features.
 

@@ -65,6 +65,7 @@ type Device struct {
 	RSSI        int
 	HasRSSI     bool
 	Kind        string // "Classic", "BLE", or "BT"
+	AddrType    string // "public", "random", or ""
 	Class       string
 	Icon        string
 	UUIDs       []string
@@ -457,9 +458,6 @@ func scanWithBtmgmt(ctx context.Context, req ScanRequest, timeout time.Duration)
 	} else {
 		prefix = []string{"-i", req.HCI}
 	}
-	bctx, cancel := context.WithTimeout(ctx, timeout+4*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(bctx, bin, prefix...)
 	find := "find"
 	switch req.Mode {
 	case ScanLE:
@@ -467,10 +465,28 @@ func scanWithBtmgmt(ctx context.Context, req ScanRequest, timeout time.Duration)
 	case ScanClassic:
 		find += " -b"
 	}
-	out, err := runShellSession(bctx, cmd, func(write func(string)) {
-		write(find)
-	}, timeout, "stop-find")
-	if bctx.Err() != nil && strings.TrimSpace(out) != "" {
+	run := func(cmd *exec.Cmd) (string, error) {
+		return runShellSession(ctx, cmd, func(write func(string)) {
+			write(find)
+		}, timeout, "stop-find")
+	}
+	// A PTY keeps btmgmt from exiting its non-interactive stdin loop before
+	// the scan window ends.
+	if _, err := exec.LookPath("script"); err == nil {
+		cmdStr := shellJoin(append([]string{bin}, prefix...))
+		cmd := exec.CommandContext(ctx, "script", "-q", "-c", cmdStr, "/dev/null")
+		if out, err := run(cmd); strings.TrimSpace(out) != "" {
+			if devices := ParseBtmgmtOutput(out); len(devices) > 0 {
+				return devices, nil
+			}
+			if err != nil && ctx.Err() == nil {
+				// Fall through to the direct path.
+			}
+		}
+	}
+	cmd := exec.CommandContext(ctx, bin, prefix...)
+	out, err := run(cmd)
+	if err != nil && ctx.Err() != nil && strings.TrimSpace(out) != "" {
 		err = nil
 	}
 	devices := ParseBtmgmtOutput(out)
@@ -478,6 +494,19 @@ func scanWithBtmgmt(ctx context.Context, req ScanRequest, timeout time.Duration)
 		return devices, nil
 	}
 	return devices, err
+}
+
+func shellJoin(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("'")
+		b.WriteString(strings.ReplaceAll(a, "'", "'\\''"))
+		b.WriteString("'")
+	}
+	return b.String()
 }
 
 var reBtDevFound = regexp.MustCompile(`dev_found:\s*([0-9A-Fa-f:]{17})\s+type\s+(BR/EDR|LE\s+(?:Public|Random))\s+rssi\s+(-?\d+)`)
@@ -503,6 +532,11 @@ func ParseBtmgmtOutput(out string) []Device {
 			}
 			if strings.HasPrefix(m[2], "LE") {
 				d.Kind = "BLE"
+				if strings.HasSuffix(strings.ToLower(m[2]), "random") {
+					d.AddrType = "random"
+				} else {
+					d.AddrType = "public"
+				}
 			}
 			if n, err := strconv.Atoi(m[3]); err == nil {
 				d.RSSI = n
@@ -594,6 +628,9 @@ func mergeDeviceLists(base, extra []Device) []Device {
 			}
 			if e.Kind != "" && (d.Kind == "" || d.Kind == "BT") {
 				d.Kind = e.Kind
+			}
+			if e.AddrType != "" {
+				d.AddrType = e.AddrType
 			}
 			if e.Class != "" {
 				d.Class = e.Class
@@ -856,6 +893,9 @@ func ParseDeviceInfo(out string) Device {
 				d.Address = NormalizeAddr(fields[1])
 				if strings.Contains(line, "(Random)") {
 					d.Kind = "BLE"
+					d.AddrType = "random"
+				} else if strings.Contains(line, "(Public)") {
+					d.AddrType = "public"
 				}
 			}
 			continue

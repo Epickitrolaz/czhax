@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/audio"
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
@@ -22,6 +24,7 @@ import (
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/updater"
 	"github.com/czhax/czhax/internal/wifi"
+	"github.com/czhax/czhax/internal/workdir"
 )
 
 type FocusZone int
@@ -208,6 +211,30 @@ type btAttackDoneMsg struct {
 
 type btAttackTickMsg struct{}
 
+type filesPlayDoneMsg struct {
+	err error
+}
+
+type filesRecordDoneMsg struct {
+	seq int
+	err error
+}
+
+type filesRecordTickMsg struct{}
+
+type btMicDoneMsg struct {
+	seq  int
+	path string
+	err  error
+}
+
+type btMicTickMsg struct{}
+
+type btConvertDoneMsg struct {
+	path string
+	err  error
+}
+
 type localIfacesMsg struct {
 	ifaces []localscan.Interface
 }
@@ -253,7 +280,9 @@ type AppModel struct {
 	IR            IRView
 	Bluetooth     BluetoothView
 	BluetoothScan BluetoothScanView
+	Files         FilesView
 	Help          HelpView
+	WorkDir       string
 
 	ShowHelp      bool
 	ConfirmExit   bool
@@ -270,6 +299,8 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 	if version == "" {
 		version = "dev"
 	}
+	root := workdir.Resolve(cfg.WorkDir)
+	_ = workdir.Ensure(root)
 	m := AppModel{
 		Cfg:           cfg,
 		ConfigPath:    cfgPath,
@@ -286,7 +317,10 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		IR:            NewIRView(cfgPath),
 		Bluetooth:     NewBluetoothView(),
 		BluetoothScan: NewBluetoothScanView(),
+		Files:         NewFilesView(root),
+		WorkDir:       root,
 	}
+	m.BluetoothScan.WorkDir = root
 	m.WifiScan.ColorMode = cfg.WiFiColor
 	m.WifiScan.SetOneShotRefresh(cfg.OneShotDir)
 	if cfg.IRFlipperDir != "" {
@@ -619,6 +653,47 @@ func btAttackTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg {
 		return btAttackTickMsg{}
 	})
+}
+
+func playMediaCmd(path string, video bool) tea.Cmd {
+	bin, args, err := audio.PlayerCommand(path, video)
+	if err != nil {
+		return func() tea.Msg { return filesPlayDoneMsg{err: err} }
+	}
+	c := exec.Command(bin, args...)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return filesPlayDoneMsg{err: err}
+	})
+}
+
+func recordMicCmd(ctx context.Context, seq int, path string) tea.Cmd {
+	return func() tea.Msg {
+		return filesRecordDoneMsg{seq: seq, err: audio.RecordMic(ctx, path, nil)}
+	}
+}
+
+func filesRecordTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return filesRecordTickMsg{}
+	})
+}
+
+func btMicRecordCmd(ctx context.Context, seq int, path string) tea.Cmd {
+	return func() tea.Msg {
+		return btMicDoneMsg{seq: seq, path: path, err: audio.RecordMic(ctx, path, nil)}
+	}
+}
+
+func btMicTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return btMicTickMsg{}
+	})
+}
+
+func btConvertCmd(ctx context.Context, input, output string) tea.Cmd {
+	return func() tea.Msg {
+		return btConvertDoneMsg{path: output, err: audio.ConvertToSCO(ctx, input, output)}
+	}
 }
 
 func collectLocalIfacesCmd() tea.Cmd {
@@ -968,6 +1043,65 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, btAttackTickCmd()
 
+	case filesPlayDoneMsg:
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("Playback failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("Playback finished"), m.resetMarquee())
+
+	case filesRecordDoneMsg:
+		if errors.Is(msg.err, context.Canceled) {
+			m.Files.FinishRecording(msg.seq, nil)
+			return m, tea.Batch(m.setStatus("Recording stopped"), m.resetMarquee())
+		}
+		m.Files.FinishRecording(msg.seq, msg.err)
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("Recording failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("Recording saved"), m.resetMarquee())
+
+	case filesRecordTickMsg:
+		if !m.Files.Recording {
+			return m, nil
+		}
+		if !m.Files.RecordStarted.IsZero() {
+			m.Files.RecordElapsed = time.Since(m.Files.RecordStarted)
+		}
+		return m, filesRecordTickCmd()
+
+	case btMicDoneMsg:
+		if errors.Is(msg.err, context.Canceled) {
+			m.BluetoothScan.FinishCWRecord(msg.seq, nil)
+			return m, tea.Batch(m.setStatus("Recording stopped"), m.resetMarquee())
+		}
+		m.BluetoothScan.FinishCWRecord(msg.seq, msg.err)
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("Mic recording failed"), m.resetMarquee())
+		}
+		if msg.path != "" {
+			return m, tea.Batch(
+				m.setStatus("Converting message..."),
+				btConvertCmd(context.Background(), msg.path, m.BluetoothScan.ConvertPath()),
+			)
+		}
+		return m, nil
+
+	case btMicTickMsg:
+		if !m.BluetoothScan.CWRecord {
+			return m, nil
+		}
+		if !m.BluetoothScan.CWRecordAt.IsZero() {
+			m.BluetoothScan.CWRecordFor = time.Since(m.BluetoothScan.CWRecordAt)
+		}
+		return m, btMicTickCmd()
+
+	case btConvertDoneMsg:
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("Audio convert failed"), m.resetMarquee())
+		}
+		m.BluetoothScan.Mode = btModeCWMenu
+		return m.startBluetoothActionWithPlay(btActCarwhisperer, msg.path)
+
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
 		return m, nil
@@ -1135,6 +1269,33 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Text/name editing in the Files view must receive printable keys before
+	// the global q/r/? shortcuts.
+	if m.Focus == FocusContent && m.ActiveView == ViewFiles {
+		switch m.Files.Mode {
+		case filesModeText:
+			if k == "esc" {
+				m.Files.HandleEsc()
+				return m, nil
+			}
+			m.Files.TextKey(msg)
+			return m, m.resetMarquee()
+		case filesModeInput:
+			if k == "esc" {
+				m.Files.HandleEsc()
+				return m, nil
+			}
+			if k == "enter" {
+				if err := m.Files.ConfirmInput(); err != nil {
+					return m, m.setStatus(err.Error())
+				}
+				return m, m.resetMarquee()
+			}
+			m.Files.InputKey(msg)
+			return m, nil
+		}
+	}
+
 	// Never leave a monitor interface behind: stop a run before quitting.
 	if m.WifiScan.PentestActive && (k == "ctrl+c" || k == "q") {
 		m.WifiScan.StopPentest()
@@ -1159,6 +1320,14 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.BluetoothScan.RunActive && (k == "ctrl+c" || k == "q") {
 		m.BluetoothScan.StopAttack()
 		return m, m.setStatus("Stopping Bluetooth action...")
+	}
+	if m.Files.Recording && (k == "ctrl+c" || k == "q") {
+		m.Files.StopRecording()
+		return m, m.setStatus("Stopping recording...")
+	}
+	if m.BluetoothScan.CWRecord && (k == "ctrl+c" || k == "q") {
+		m.BluetoothScan.StopCWRecord()
+		return m, m.setStatus("Stopping mic recording...")
 	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
@@ -1248,6 +1417,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, collectBluetoothCmd()
+		}
+		if m.ActiveView == ViewFiles && m.Focus == FocusContent && m.Files.Mode == filesModeList {
+			m.Files.BeginInput(filesInputRename)
+			return m, nil
 		}
 		if m.ActiveView == ViewLocal && m.Focus == FocusContent {
 			switch m.Local.Mode {
@@ -1357,6 +1530,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(collectBluetoothCmd(), scanBluetoothDevicesCmd(hci, m.BluetoothScan.EffectiveController(), m.BluetoothScan.ScanMode), m.setStatus("Scanning "+hci+"..."))
 				}
 				return m, collectBluetoothCmd()
+			} else if m.ActiveView == ViewFiles {
+				m.Files.Reload()
+				return m, nil
 			} else if m.ActiveView == ViewIR {
 				m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 				m.IR.RefreshHardware()
@@ -1395,6 +1571,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.ActiveView == ViewBluetooth {
 			return m, collectBluetoothCmd()
+		}
+		if m.ActiveView == ViewFiles {
+			m.Files.Reload()
+			return m, nil
 		}
 		if m.ActiveView == ViewStatus {
 			switch m.ActiveTabs[ViewStatus] {
@@ -1483,7 +1663,11 @@ func (m AppModel) launchLocalScan(opt localscan.ScanOption) (tea.Model, tea.Cmd)
 }
 
 func (m AppModel) startBluetoothAction(kind BTActionKind) (tea.Model, tea.Cmd) {
-	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind)
+	return m.startBluetoothActionWithPlay(kind, "")
+}
+
+func (m AppModel) startBluetoothActionWithPlay(kind BTActionKind, playPath string) (tea.Model, tea.Cmd) {
+	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind, playPath)
 	if !ok {
 		return m, m.setStatus("Select a device first")
 	}
@@ -1610,6 +1794,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.ActiveView == ViewBluetooth && m.BluetoothScan.HandleEsc() {
+			return m, nil
+		}
+		if m.ActiveView == ViewFiles && m.Files.HandleEsc() {
 			return m, nil
 		}
 		if m.ActiveView == ViewIR && m.IR.HandleEsc() {
@@ -1904,7 +2091,61 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+				if act == btActCarwhisperer {
+					m.BluetoothScan.OpenCWMenu()
+					return m, nil
+				}
 				return m.startBluetoothAction(act)
+			}
+			return m, nil
+
+		case btModeCWMenu:
+			switch {
+			case m.isUp(k):
+				m.BluetoothScan.MoveCW(-1)
+			case m.isDown(k):
+				m.BluetoothScan.MoveCW(1)
+			case k == "enter" || k == " ":
+				act, ok := m.BluetoothScan.SelectedCW()
+				if !ok {
+					return m, nil
+				}
+				switch act {
+				case cwBack:
+					m.BluetoothScan.HandleEsc()
+				case cwTap:
+					return m.startBluetoothAction(btActCarwhisperer)
+				case cwRecordMessage:
+					ctx, seq, path, ok := m.BluetoothScan.StartCWRecord()
+					if ok {
+						return m, tea.Batch(m.setStatus("Recording message..."), btMicRecordCmd(ctx, seq, path), btMicTickCmd())
+					}
+				case cwPlayAudio:
+					m.BluetoothScan.OpenCWAudio()
+				}
+			}
+			return m, nil
+
+		case btModeCWAudio:
+			switch {
+			case m.isUp(k):
+				m.BluetoothScan.MoveCWAudio(-1)
+			case m.isDown(k):
+				m.BluetoothScan.MoveCWAudio(1)
+			case k == "enter" || k == " ":
+				e, ok := m.BluetoothScan.SelectedCWAudio()
+				if ok {
+					return m, tea.Batch(
+						m.setStatus("Converting audio..."),
+						btConvertCmd(context.Background(), e.Path, m.BluetoothScan.ConvertPath()),
+					)
+				}
+			}
+			return m, nil
+
+		case btModeCWRecord:
+			if k == "enter" || k == " " {
+				m.BluetoothScan.StopCWRecord()
 			}
 			return m, nil
 
@@ -1918,6 +2159,59 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case btModeRunning:
+			return m, nil
+		}
+		return m, nil
+
+	case ViewFiles:
+		switch m.Files.Mode {
+		case filesModeList:
+			switch {
+			case m.isUp(k):
+				m.Files.Move(-1)
+			case m.isDown(k):
+				m.Files.Move(1)
+			case k == "enter" || k == " ":
+				kind, path, err := m.Files.EnterSelected()
+				if err != nil {
+					return m, m.setStatus(err.Error())
+				}
+				if kind != "" {
+					return m, playMediaCmd(path, kind == "video")
+				}
+			case k == "n":
+				m.Files.BeginInput(filesInputNewFile)
+			case k == "m":
+				m.Files.BeginInput(filesInputNewDir)
+			case k == "x" || k == "delete" || k == "backspace":
+				m.Files.BeginDelete()
+			case k == "a":
+				ctx, seq, path, ok := m.Files.StartRecording()
+				if ok {
+					return m, tea.Batch(m.setStatus("Recording..."), recordMicCmd(ctx, seq, path), filesRecordTickCmd())
+				}
+			}
+			return m, nil
+
+		case filesModeDelete:
+			switch k {
+			case "y", "Y", "enter":
+				if err := m.Files.ConfirmDelete(); err != nil {
+					return m, m.setStatus("Delete failed")
+				}
+				return m, m.setStatus("Deleted")
+			case "n", "N":
+				m.Files.Mode = filesModeList
+			}
+			return m, nil
+
+		case filesModeRecord:
+			if k == "enter" || k == " " {
+				m.Files.StopRecording()
+			}
+			return m, nil
+
+		case filesModeImage:
 			return m, nil
 		}
 		return m, nil
@@ -2551,6 +2845,10 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		btScanView := m.BluetoothScan
 		btScanView.Marquee = mq
 		mainLines = btScanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+	case m.ActiveView == ViewFiles:
+		filesView := m.Files
+		filesView.Marquee = mq
+		mainLines = filesView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewIR:
 		irView := m.IR
 		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
@@ -2725,6 +3023,12 @@ func (m AppModel) currentHints() []Hint {
 		switch m.BluetoothScan.Mode {
 		case btModeActions:
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
+		case btModeCWMenu:
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
+		case btModeCWAudio:
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "play"}, {Key: "Esc", Desc: "back"}}
+		case btModeCWRecord:
+			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
 		case btModeDetail:
 			return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "Esc", Desc: "back"}}
 		case btModeRunning:
@@ -2740,6 +3044,30 @@ func (m AppModel) currentHints() []Hint {
 				{Key: "m", Desc: "mode"},
 				{Key: "⏎", Desc: "act"},
 				{Key: "Esc", Desc: "tabs"},
+			}
+		}
+	}
+	if m.ActiveView == ViewFiles {
+		switch m.Files.Mode {
+		case filesModeText:
+			return []Hint{{Key: "Ctrl+S", Desc: "save"}, {Key: "Esc", Desc: "back"}}
+		case filesModeInput:
+			return []Hint{{Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "cancel"}}
+		case filesModeDelete:
+			return []Hint{{Key: "y", Desc: "delete"}, {Key: "n", Desc: "cancel"}}
+		case filesModeImage:
+			return []Hint{{Key: "Esc", Desc: "back"}}
+		case filesModeRecord:
+			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
+		default:
+			return []Hint{
+				{Key: "⏎", Desc: "open"},
+				{Key: "n", Desc: "file"},
+				{Key: "m", Desc: "dir"},
+				{Key: "a", Desc: "rec"},
+				{Key: "x", Desc: "del"},
+				{Key: "r", Desc: "ren"},
+				{Key: "Esc", Desc: "up"},
 			}
 		}
 	}

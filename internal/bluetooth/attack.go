@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/czhax/czhax/internal/workdir"
 )
 
 // AttackKind is a Bluetooth action offered by the scanner.
@@ -38,8 +40,10 @@ type AttackRequest struct {
 	Kind       AttackKind
 	HCI        string
 	Address    string
+	AddrType   string
 	Name       string
 	RecordPath string
+	PlayPath   string
 	FastPair   bool
 	ModelID    uint32
 }
@@ -72,7 +76,7 @@ func runL2Flood(ctx context.Context, req AttackRequest, onLine func(string)) err
 
 func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(string)) error {
 	if os.Geteuid() == 0 {
-		return Carwhisperer(ctx, req.HCI, req.Address, req.RecordPath, "", onLine)
+		return Carwhisperer(ctx, req.HCI, req.Address, req.RecordPath, req.PlayPath, onLine)
 	}
 	exe, err := executablePath()
 	if err != nil {
@@ -84,6 +88,9 @@ func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(s
 		"--addr", NormalizeAddr(req.Address),
 		"--record", req.RecordPath,
 	}
+	if strings.TrimSpace(req.PlayPath) != "" {
+		args = append(args, "--play", req.PlayPath)
+	}
 	if onLine != nil {
 		onLine("Starting Carwhisperer on " + NormalizeAddr(req.Address))
 	}
@@ -91,14 +98,16 @@ func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(s
 }
 
 func runWhisperPair(ctx context.Context, req AttackRequest, onLine func(string)) error {
+	if _, err := exec.LookPath("gatttool"); err == nil {
+		return runFastPairInvalidCurve(ctx, req, onLine)
+	}
 	if bin := findWhisperPair(); bin != "" {
 		if onLine != nil {
 			onLine("Running WhisperPair reference CLI for " + NormalizeAddr(req.Address))
 		}
-		args := []string{"verify", NormalizeAddr(req.Address), "--authorized"}
-		return streamCommand(ctx, bin, args, onLine)
+		return streamCommand(ctx, bin, []string{"verify", NormalizeAddr(req.Address), "--authorized"}, onLine)
 	}
-	return auditFastPair(ctx, req, onLine)
+	return errors.New("gatttool not installed (install bluez-deprecated-tools) for the built-in WhisperPair test")
 }
 
 // auditFastPair is the built-in fallback when the external WhisperPair toolkit
@@ -148,20 +157,15 @@ func findWhisperPair() string {
 	return ""
 }
 
-// CarwhispererRecordPath returns a per-run raw audio destination.
+// CarwhispererRecordPath returns a per-run 8 kHz WAV destination.
 func CarwhispererRecordPath(address string) string {
-	dir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".local", "share")
-		}
-	}
-	if dir == "" {
-		dir = os.TempDir()
-	}
-	dir = filepath.Join(dir, "czhax", "bt")
+	return CarwhispererRecordPathIn(workdir.Resolve(""), address)
+}
+
+func CarwhispererRecordPathIn(root, address string) string {
+	dir := workdir.BT(root)
 	_ = os.MkdirAll(dir, 0o700)
 	addr := strings.ReplaceAll(NormalizeAddr(address), ":", "")
-	name := fmt.Sprintf("carwhisperer-%s-%s.raw", addr, time.Now().Format("20060102-150405"))
+	name := fmt.Sprintf("carwhisperer-%s-%s.wav", addr, time.Now().Format("20060102-150405"))
 	return filepath.Join(dir, name)
 }
