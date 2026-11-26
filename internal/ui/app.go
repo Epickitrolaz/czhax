@@ -133,6 +133,29 @@ type irRemoteLoadedMsg struct {
 
 type irLearnTickMsg struct{}
 
+type irMatchCandidatesMsg struct {
+	cands []ir.MatchCandidate
+	err   error
+}
+
+type irMatchSavedMsg struct {
+	profile ir.Profile
+	err     error
+}
+
+type irUniversalProgressMsg struct {
+	seq  int
+	prog ir.UniversalProgress
+}
+
+type irUniversalDoneMsg struct {
+	seq        int
+	target     string
+	uniqueSent int
+	lastBrand  string
+	err        error
+}
+
 type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
@@ -304,6 +327,69 @@ func irLearnTickCmd() tea.Cmd {
 	})
 }
 
+func irMatchCandidatesCmd(entries []ir.Entry, category, brand string) tea.Cmd {
+	return func() tea.Msg {
+		cands, err := ir.CollectBrandPowerCandidates(entries, category, brand)
+		return irMatchCandidatesMsg{cands: cands, err: err}
+	}
+}
+
+func irMatchSaveCmd(cand ir.MatchCandidate) tea.Cmd {
+	return func() tea.Msg {
+		prof, err := ir.BindMatchedRemote(cand)
+		return irMatchSavedMsg{profile: prof, err: err}
+	}
+}
+
+func irUniversalBlastCmd(ctx context.Context, seq int, txPath string, entries []ir.Entry, target string, progressCh chan ir.UniversalProgress) tea.Cmd {
+	return func() tea.Msg {
+		defer func() {
+			if progressCh != nil {
+				close(progressCh)
+			}
+		}()
+		var last ir.UniversalProgress
+		err := ir.BlastUniversal(ctx, txPath, entries, target, func(prog ir.UniversalProgress) {
+			last = prog
+			if progressCh == nil {
+				return
+			}
+			select {
+			case progressCh <- prog:
+			default:
+				select {
+				case <-progressCh:
+				default:
+				}
+				select {
+				case progressCh <- prog:
+				default:
+				}
+			}
+		})
+		return irUniversalDoneMsg{
+			seq:        seq,
+			target:     target,
+			uniqueSent: last.UniqueSent,
+			lastBrand:  last.Current.Brand,
+			err:        err,
+		}
+	}
+}
+
+func waitIRUniversalProgressCmd(seq int, ch <-chan ir.UniversalProgress) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		prog, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return irUniversalProgressMsg{seq: seq, prog: prog}
+	}
+}
+
 func collectBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
 		return bluetoothRefreshedMsg{adapters: bluetooth.Collect()}
@@ -439,6 +525,37 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.IR.CaptureElapsed = time.Since(m.IR.CaptureStarted)
 		return m, irLearnTickCmd()
 
+	case irMatchCandidatesMsg:
+		m.IR.SetMatchCandidates(msg.cands, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Match load failed")
+		}
+		return m, m.setStatus(fmt.Sprintf("%d Power codes", len(msg.cands)))
+
+	case irMatchSavedMsg:
+		if !m.IR.AcceptMatchedProfile(msg.profile, msg.err) {
+			return m, m.setStatus("Save remote failed")
+		}
+		m.ActiveTabs[ViewIR] = int(IRTabRemote)
+		if m.IR.NoteIsErr {
+			return m, m.setStatus("IR save failed")
+		}
+		return m, m.setStatus("Saved " + msg.profile.Name)
+
+	case irUniversalProgressMsg:
+		if !m.IR.UnivBlasting || msg.seq != m.IR.UnivSeq {
+			return m, nil
+		}
+		m.IR.ApplyUniversalProgress(msg.seq, msg.prog)
+		return m, waitIRUniversalProgressCmd(msg.seq, m.IR.UnivProgressCh)
+
+	case irUniversalDoneMsg:
+		m.IR.ApplyUniversalDone(msg.seq, msg.target, msg.uniqueSent, msg.lastBrand, msg.err)
+		if msg.err != nil {
+			return m, m.setStatus("Universal stopped")
+		}
+		return m, m.setStatus(fmt.Sprintf("Sent %d codes", msg.uniqueSent))
+
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
 		return m, nil
@@ -559,6 +676,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.IR.StopCapture()
 		return m, m.setStatus("IR capture stopped")
 	}
+	if m.IR.UnivBlasting && (k == "ctrl+c" || k == "q") {
+		m.IR.StopUniversalBlast()
+		return m, m.setStatus("IR blast stopped")
+	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
@@ -611,6 +732,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.IR.Capturing {
 				return m, m.setStatus("IR capture running")
 			}
+			if m.IR.UnivBlasting {
+				return m, m.setStatus("IR blast running")
+			}
 			if m.IR.Tab == IRTabRemote {
 				if b, ok := m.IR.BindingForKey(k); ok {
 					return m.sendIR(b.Signal, b.Name)
@@ -621,6 +745,15 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.IR.advanceGrid(k)
 					return m.sendIR(sig, name)
 				}
+			}
+			if m.IR.Tab == IRTabBrowse && m.IR.Remote == nil && m.IR.BrowseMode != browseModeList {
+				if m.IR.BrowseMode == browseModeMatchTest {
+					if cand, ok := m.IR.CurrentMatchCandidate(); ok {
+						return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+					}
+				}
+				m.IR.RefreshHardware()
+				return m, m.setStatus("IR refreshed")
 			}
 			m.IR.RefreshHardware()
 			if IRTab(m.ActiveTabs[ViewIR]) == IRTabBrowse {
@@ -769,6 +902,23 @@ func (m AppModel) irProbe(target string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.sendIR(sig, target)
+}
+
+func (m AppModel) startIRUniversalBlast(btn ir.UniversalButton) (tea.Model, tea.Cmd) {
+	ctx, seq, ch, ok := m.IR.StartUniversalBlast(btn.Target)
+	if !ok {
+		if m.IR.UnivBlastErr != "" {
+			return m, m.setStatus("No IR transmitter")
+		}
+		return m, nil
+	}
+	entries := ir.EntriesForCategory(m.IR.Index, m.IR.UnivCategory, m.IR.UnivLastBrand)
+	m.IR.UnivProgress.TotalEntries = len(entries)
+	return m, tea.Batch(
+		m.setStatus("Blasting "+btn.Label+"..."),
+		irUniversalBlastCmd(ctx, seq, m.IR.HW.TXPath, entries, btn.Target, ch),
+		waitIRUniversalProgressCmd(seq, ch),
+	)
 }
 
 func (m AppModel) startIRCapture() (tea.Model, tea.Cmd) {
@@ -959,6 +1109,25 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					case 2:
 						m.ActiveTabs[ViewIR] = int(IRTabBrowse)
 						m.IR.Tab = IRTabBrowse
+						m.IR.BrowseMode = browseModeList
+						if !m.IR.IndexDone && !m.IR.IndexLoading {
+							m.IR.RemoteErr = ""
+							m.IR.IndexLoading = true
+							return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+						}
+					case 3:
+						m.ActiveTabs[ViewIR] = int(IRTabBrowse)
+						m.IR.Tab = IRTabBrowse
+						m.IR.StartMatchWizard()
+						if !m.IR.IndexDone && !m.IR.IndexLoading {
+							m.IR.RemoteErr = ""
+							m.IR.IndexLoading = true
+							return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+						}
+					case 4:
+						m.ActiveTabs[ViewIR] = int(IRTabBrowse)
+						m.IR.Tab = IRTabBrowse
+						m.IR.StartUniversalWizard()
 						if !m.IR.IndexDone && !m.IR.IndexLoading {
 							m.IR.RemoteErr = ""
 							m.IR.IndexLoading = true
@@ -1060,6 +1229,122 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 		case IRTabBrowse:
 			if m.IR.Remote == nil {
+				if m.IR.IndexLoading {
+					return m, nil
+				}
+				switch m.IR.BrowseMode {
+				case browseModeMatchType:
+					switch {
+					case m.isUp(k):
+						m.IR.MoveType(-1)
+					case m.isDown(k):
+						m.IR.MoveType(1)
+					case k == "enter" || k == " ":
+						m.IR.ConfirmMatchType()
+					}
+					return m, nil
+
+				case browseModeMatchBrand:
+					switch {
+					case m.isUp(k):
+						m.IR.MoveMatchBrand(-1)
+					case m.isDown(k):
+						m.IR.MoveMatchBrand(1)
+					case k == "[":
+						m.IR.JumpMatchBrandLetter(-1)
+					case k == "]":
+						m.IR.JumpMatchBrandLetter(1)
+					case k == "/":
+						m.IR.MatchBrandSearching = true
+					case k == "enter" || k == " ":
+						if cat, brand, ok := m.IR.BeginMatchCandidates(); ok {
+							return m, tea.Batch(m.setStatus("Loading "+brand+"..."), irMatchCandidatesCmd(m.IR.Index, cat, brand))
+						}
+					}
+					return m, nil
+
+				case browseModeMatchTest:
+					if m.IR.MatchLoading || m.IR.MatchSaving {
+						return m, nil
+					}
+					switch {
+					case m.isUp(k):
+						m.IR.MoveMatchAction(-1)
+					case m.isDown(k):
+						m.IR.MoveMatchAction(1)
+					case m.isLeft(k):
+						if cand, ok := m.IR.StepMatchCandidate(-1); ok {
+							return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+						}
+					case m.isRight(k) || k == "n":
+						if cand, ok := m.IR.StepMatchCandidate(1); ok {
+							return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+						}
+					case k == "p":
+						if cand, ok := m.IR.CurrentMatchCandidate(); ok {
+							return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+						}
+					case k == "y" || k == "s" || k == "a":
+						if cand, ok := m.IR.CurrentMatchCandidate(); ok {
+							m.IR.MatchSaving = true
+							return m, tea.Batch(m.setStatus("Saving remote..."), irMatchSaveCmd(cand))
+						}
+					case k == "enter" || k == " ":
+						switch m.IR.MatchActionCursor {
+						case 0:
+							if cand, ok := m.IR.CurrentMatchCandidate(); ok {
+								return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+							}
+						case 1:
+							if cand, ok := m.IR.StepMatchCandidate(1); ok {
+								return m.sendIR(cand.Signal, fmt.Sprintf("Power #%d", m.IR.MatchCursor+1))
+							}
+						case 2:
+							if cand, ok := m.IR.CurrentMatchCandidate(); ok {
+								m.IR.MatchSaving = true
+								return m, tea.Batch(m.setStatus("Saving remote..."), irMatchSaveCmd(cand))
+							}
+						}
+					}
+					return m, nil
+
+				case browseModeUnivType:
+					switch {
+					case m.isUp(k):
+						m.IR.MoveType(-1)
+					case m.isDown(k):
+						m.IR.MoveType(1)
+					case k == "enter" || k == " ":
+						m.IR.ConfirmUnivType()
+					}
+					return m, nil
+
+				case browseModeUnivRemote:
+					if m.IR.UnivBlasting {
+						if k == " " || k == "enter" || k == "s" {
+							m.IR.StopUniversalBlast()
+							return m, m.setStatus("IR blast stopped")
+						}
+						return m, nil
+					}
+					switch {
+					case m.isUp(k):
+						m.IR.MoveUnivButton(-1)
+					case m.isDown(k):
+						m.IR.MoveUnivButton(1)
+					case k == "enter" || k == " ":
+						if btn, ok := m.IR.SelectedUnivButton(); ok {
+							return m.startIRUniversalBlast(btn)
+						}
+					default:
+						if btn, idx, ok := m.IR.UnivButtonForKey(k); ok {
+							m.IR.UnivCursor = idx
+							return m.startIRUniversalBlast(btn)
+						}
+					}
+					return m, nil
+				}
+
 				switch {
 				case m.isUp(k):
 					m.IR.MoveBrowse(-1)
@@ -1077,6 +1362,10 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					m.IR.BrowseSearching = true
 				case k == "p":
 					m.IR.CycleProvider(1)
+				case k == "m":
+					m.IR.StartMatchWizard()
+				case k == "u":
+					m.IR.StartUniversalWizard()
 				case k == "enter":
 					if e, ok := m.IR.SelectedEntry(); ok {
 						m.IR.RemoteLoading = true
@@ -1355,6 +1644,7 @@ func (m AppModel) View() string {
 	case m.ActiveView == ViewIR:
 		irView := m.IR
 		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
+		irView.ASCII = m.Cfg.Border == config.BorderAscii
 		mainLines = irView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewSystem:
 		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
@@ -1496,10 +1786,28 @@ func (m AppModel) currentHints() []Hint {
 				}
 				return []Hint{{Key: "p/v/m", Desc: "try"}, {Key: "a", Desc: "accept"}, {Key: "g", Desc: "grid"}, {Key: "Esc", Desc: "back"}}
 			}
+			switch m.IR.BrowseMode {
+			case browseModeMatchType:
+				return []Hint{{Key: "↑↓", Desc: "type"}, {Key: "⏎", Desc: "brands"}, {Key: "Esc", Desc: "back"}}
+			case browseModeMatchBrand:
+				if m.IR.MatchBrandSearching {
+					return []Hint{{Key: "⏎", Desc: "done"}, {Key: "Esc", Desc: "clear"}}
+				}
+				return []Hint{{Key: "↑↓", Desc: "brand"}, {Key: "/", Desc: "find"}, {Key: "⏎", Desc: "test"}, {Key: "Esc", Desc: "back"}}
+			case browseModeMatchTest:
+				return []Hint{{Key: "⏎", Desc: "run"}, {Key: "←→", Desc: "step"}, {Key: "y", Desc: "save"}, {Key: "Esc", Desc: "back"}}
+			case browseModeUnivType:
+				return []Hint{{Key: "↑↓", Desc: "type"}, {Key: "⏎", Desc: "open"}, {Key: "Esc", Desc: "back"}}
+			case browseModeUnivRemote:
+				if m.IR.UnivBlasting {
+					return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "Space", Desc: "stop"}}
+				}
+				return []Hint{{Key: "key/⏎", Desc: "blast"}, {Key: "↑↓", Desc: "sel"}, {Key: "Esc", Desc: "back"}}
+			}
 			if m.IR.BrowseSearching {
 				return []Hint{{Key: "⏎", Desc: "done"}, {Key: "Esc", Desc: "clear"}}
 			}
-			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "type"}, {Key: "/", Desc: "find"}, {Key: "p", Desc: "src"}, {Key: "⏎", Desc: "open"}}
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "m", Desc: "match"}, {Key: "u", Desc: "univ"}, {Key: "/", Desc: "find"}, {Key: "⏎", Desc: "open"}}
 		default:
 			if m.IR.RemoteMode == remoteModeNew {
 				return []Hint{{Key: "⏎", Desc: "create"}, {Key: "Esc", Desc: "cancel"}}

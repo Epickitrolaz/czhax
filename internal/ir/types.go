@@ -368,17 +368,22 @@ func NextFreeKey(used map[string]bool) string {
 func KeyForButton(name string) string {
 	n := normalizeName(name)
 	switch {
-	case strings.HasPrefix(n, "power") || n == "pwr" || n == "on" || n == "off":
+	case strings.HasPrefix(n, "power") || strings.HasPrefix(n, "pwr") || n == "on" || n == "off":
 		return "1"
-	case strings.HasPrefix(n, "vol_up") || strings.HasPrefix(n, "volume_up") || n == "vol_plus" || n == "vol+":
+	case strings.HasPrefix(n, "vol_up") || strings.HasPrefix(n, "volume_up") || n == "vol_plus" || n == "vol+" ||
+		strings.HasPrefix(n, "temp_up") || strings.HasPrefix(n, "temperature_up") || n == "temp+" || n == "temperature+" ||
+		n == "speed" || n == "wind_speed" || n == "fan_speed":
 		return "2"
-	case strings.HasPrefix(n, "vol_d") || strings.HasPrefix(n, "volume_d") || n == "vol_" || n == "vol-" || n == "vol_minus":
+	case strings.HasPrefix(n, "vol_d") || strings.HasPrefix(n, "volume_d") || n == "vol_" || n == "vol-" || n == "vol_minus" ||
+		strings.HasPrefix(n, "temp_d") || strings.HasPrefix(n, "temperature_d") || n == "temp-" || n == "temperature-":
 		return "3"
-	case strings.HasPrefix(n, "mute"):
+	case strings.HasPrefix(n, "mute") || n == "mode" || n == "wind_type":
 		return "4"
-	case strings.HasPrefix(n, "ch_next") || strings.HasPrefix(n, "ch_up") || strings.HasPrefix(n, "channel_up") || n == "ch+":
+	case strings.HasPrefix(n, "ch_next") || strings.HasPrefix(n, "ch_up") || strings.HasPrefix(n, "channel_up") || n == "ch+" ||
+		n == "fan":
 		return "5"
-	case strings.HasPrefix(n, "ch_prev") || strings.HasPrefix(n, "ch_dn") || strings.HasPrefix(n, "ch_down") || strings.HasPrefix(n, "channel_d") || n == "ch_" || n == "ch-":
+	case strings.HasPrefix(n, "ch_prev") || strings.HasPrefix(n, "ch_dn") || strings.HasPrefix(n, "ch_down") || strings.HasPrefix(n, "channel_d") || n == "ch_" || n == "ch-" ||
+		n == "swing" || n == "swing_r" || n == "osc" || n == "oscillate" || n == "oscillation" || n == "shake_wind":
 		return "6"
 	case n == "up" || n == "arrow_up":
 		return "7"
@@ -404,28 +409,34 @@ func normalizeName(s string) string {
 	return s
 }
 
-// BindSignals converts a remote's signals into a profile. Named buttons get
-// their conventional key; unmatched buttons take the next free key.
+// BindSignals converts a remote's signals into a profile. Pass 1 binds buttons
+// to their conventional KeyForButton slot so secondary variants don't steal
+// primary keys like Vol+/Temp+; Pass 2 assigns remaining signals to free keys.
 func BindSignals(profileName, source, category, brand, model string, sigs []Signal) Profile {
 	p := Profile{Name: profileName, Source: source, Category: category, Brand: brand, Model: model}
 	used := map[string]bool{}
+	var leftover []Signal
 	for _, sig := range sigs {
 		if len(sig.Timings) == 0 {
 			continue
 		}
 		key := KeyForButton(sig.Name)
-		if key != "" && used[key] {
-			key = ""
+		if key != "" && !used[key] {
+			used[key] = true
+			sn := sig.Normalized()
+			p.Bindings = append(p.Bindings, Binding{Key: key, Name: sig.Name, Signal: sn})
+			continue
 		}
-		if key == "" {
-			key = NextFreeKey(used)
-		}
+		leftover = append(leftover, sig)
+	}
+	for _, sig := range leftover {
+		key := NextFreeKey(used)
 		if key == "" {
 			break
 		}
 		used[key] = true
-		sig = sig.Normalized()
-		p.Bindings = append(p.Bindings, Binding{Key: key, Name: sig.Name, Signal: sig})
+		sn := sig.Normalized()
+		p.Bindings = append(p.Bindings, Binding{Key: key, Name: sig.Name, Signal: sn})
 	}
 	sortBindings(p.Bindings)
 	return p
