@@ -101,7 +101,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `IR`, `System`/`Sys`) and top horizontal tab bar.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `IR`, `System`/`Sys`) and top horizontal tab bar, plus auto-dismissing **Brightness** (10 levels, `Fn+U`/`Fn+I`) and **Volume** (20 levels + Mute, `Fn+S`/`Fn+D`/`Fn+A`) OSD popups.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state

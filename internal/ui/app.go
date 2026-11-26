@@ -14,6 +14,7 @@ import (
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/hwctl"
 	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/localscan"
 	"github.com/czhax/czhax/internal/power"
@@ -198,6 +199,13 @@ type localScanDoneMsg struct {
 
 type localScanTickMsg struct{}
 
+type hwEventMsg struct {
+	ev hwctl.Event
+	ch <-chan hwctl.Event
+}
+
+type osdHideMsg struct{ seq int }
+
 type AppModel struct {
 	Cfg        config.Config
 	ConfigPath string
@@ -225,8 +233,10 @@ type AppModel struct {
 	RestartOnQuit bool
 	StatusMsg     string
 
-	MarqueeGen  int
-	MarqueeStep int
+	MarqueeGen   int
+	MarqueeStep  int
+	OSD          OSDState
+	OSDMuteUntil time.Time
 }
 
 func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
@@ -279,7 +289,7 @@ func (m *AppModel) resetMarquee() tea.Cmd {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), marqueeStartCmd(m.MarqueeGen)}
+	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), startHWWatcherCmd(), marqueeStartCmd(m.MarqueeGen)}
 	if isLinuxConsole() {
 		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
@@ -566,6 +576,36 @@ func localScanTickCmd() tea.Cmd {
 	})
 }
 
+func startHWWatcherCmd() tea.Cmd {
+	return func() tea.Msg {
+		w := hwctl.StartWatcher()
+		ev, ok := <-w.Events()
+		if !ok {
+			return nil
+		}
+		return hwEventMsg{ev: ev, ch: w.Events()}
+	}
+}
+
+func waitHWEventCmd(ch <-chan hwctl.Event) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return hwEventMsg{ev: ev, ch: ch}
+	}
+}
+
+func osdHideCmd(seq int) tea.Cmd {
+	return tea.Tick(osdDisplayDuration, func(time.Time) tea.Msg {
+		return osdHideMsg{seq: seq}
+	})
+}
+
 func (m AppModel) scheduleTick() tea.Cmd {
 	if m.Cfg.RefreshSeconds <= 0 {
 		return nil
@@ -812,6 +852,23 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, localScanTickCmd()
 
+	case hwEventMsg:
+		nextCmd := waitHWEventCmd(msg.ch)
+		if !m.OSDMuteUntil.IsZero() && time.Now().Before(m.OSDMuteUntil) {
+			return m, nextCmd
+		}
+		switch msg.ev.Kind {
+		case hwctl.EventBrightness:
+			m.OSD.ShowBrightness(msg.ev.Brightness)
+		case hwctl.EventVolume:
+			m.OSD.ShowVolume(msg.ev.Volume)
+		}
+		return m, tea.Batch(nextCmd, osdHideCmd(m.OSD.Seq))
+
+	case osdHideMsg:
+		m.OSD.Hide(msg.seq)
+		return m, nil
+
 	case clearStatusMsg:
 		m.StatusMsg = ""
 		return m, m.resetMarquee()
@@ -849,7 +906,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellExitedMsg:
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
+		m.OSD.Hide(0)
+		m.OSDMuteUntil = time.Now().Add(500 * time.Millisecond)
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), m.resetMarquee())
 
 	case bootToggledMsg:
 		m.System.BootState = msg.state
@@ -866,12 +925,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sleepDoneMsg:
 		m.Snap = sysinfo.Collect()
+		m.OSD.Hide(0)
+		m.OSDMuteUntil = time.Now().Add(600 * time.Millisecond)
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), m.resetMarquee())
 		}
 		m.System.Note = "Woke from sleep"
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), m.resetMarquee())
 
 	case powerActionDoneMsg:
 		if msg.err != nil {
@@ -2260,6 +2321,9 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 	}
 
 	screen := strings.Join(parts, "\n")
+	if m.OSD.Visible {
+		screen = m.OSD.Overlay(screen, w, h, pal, m.Cfg)
+	}
 
 	if !bezel {
 		return screen, overflow
