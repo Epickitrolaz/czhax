@@ -49,6 +49,21 @@ func TestScanFailureMessages(t *testing.T) {
 	}
 }
 
+func TestCoalesceBleClassicBySuffix(t *testing.T) {
+	devices := []Device{
+		{Address: "FB:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "BLE", FastPair: true, HasModelID: true, ModelID: 0x345678, RSSI: -70, HasRSSI: true},
+		{Address: "84:D3:52:E8:E8:FB", Kind: "Classic", RSSI: -60, HasRSSI: true},
+	}
+	got := coalesceBleClassic(devices)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 coalesced device, got %+v", got)
+	}
+	d := got[0]
+	if d.Address != "84:D3:52:E8:E8:FB" || d.Name != "SRS-XB100" || d.Kind != "Classic" || d.RSSI != -60 || !d.FastPair || d.ModelID != 0x345678 {
+		t.Fatalf("unexpected coalesced device: %+v", d)
+	}
+}
+
 func TestSortDevicesPrefersClassicDuplicate(t *testing.T) {
 	devices := []Device{
 		{Address: "FB:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "BLE", FastPair: true},
