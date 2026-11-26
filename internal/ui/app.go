@@ -1126,6 +1126,14 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case scanModePentest:
+			// Deauth-only mode injects one burst per key press and keeps
+			// injecting while a key is held (terminal key repeat).
+			if m.WifiScan.PentestActive && m.WifiScan.PentestMode == wifi.PentestDeauth {
+				m.WifiScan.TriggerDeauth()
+			}
+			return m, nil
+
 		case scanModePickIface:
 			if m.WifiScan.Connecting {
 				return m, nil
@@ -1884,6 +1892,9 @@ func (m AppModel) currentHints() []Hint {
 			}
 		case scanModePentest:
 			if m.WifiScan.PentestActive {
+				if m.WifiScan.PentestMode == wifi.PentestDeauth {
+					return []Hint{{Key: "key", Desc: "deauth"}, {Key: "Esc", Desc: "stop"}}
+				}
 				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
 			}
 			return []Hint{{Key: "Esc", Desc: "back"}, {Key: "q", Desc: "quit"}}
