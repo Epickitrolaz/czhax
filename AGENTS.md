@@ -113,6 +113,7 @@ Maintain two explicit focus states in `AppModel`:
 1. **Create a feature backend package** under `internal/<feature>/` (e.g., `internal/wifi/`, `internal/netscan/`, `internal/crypto/`):
    - Keep platform/Linux calls isolated behind clean Go functions and interfaces so unit tests run anywhere without root or hardware.
    - **Never block `Update()` or `View()`**: run scans, subprocesses, or network probes asynchronously in a `tea.Cmd` returning a typed result message.
+   - **External software vs. OS packages**: All features built from external software (such as `OneShot-Extended` in `internal/oneshot/`) must be integrated/embedded directly into CZHax with **no external downloads** at runtime or install time. This does **not** apply to standard OS packages (such as `nmap`, `pixiewps`, `aircrack-ng`, etc.), which should **only** be added to `install.sh` (`setup_packages`).
 2. **Create a UI view** under `internal/ui/<feature>.go`:
    - Implement `RenderLines(w, h int, pal theme.Palette, ..., focused bool) []string` returning `SplitLinesPadded(..., w, h)`.
    - When `focused == true`, render an inverse selection bar (`pal.SelectFg` on `pal.SelectBg`) on the active row; when `focused == false`, render passively without an active inverse block so focus is obvious.

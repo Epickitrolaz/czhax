@@ -454,7 +454,7 @@ EV_KEY = 1
 KEY_BRIGHTNESSDOWN = 224
 KEY_BRIGHTNESSUP = 225
 STEP = 10
-MIN_BRIGHTNESS = 5  # Keep screen faintly readable; change to 0 to allow full off.
+MIN_BRIGHTNESS = 0  # Allow full off (10 clean steps: 0, 10, ..., 100).
 
 
 def find_keyboard_dev():
@@ -490,7 +490,13 @@ def adjust(delta):
             max_b = int(f.read().strip())
         with open(b_path, "r", encoding="utf-8") as f:
             cur = int(f.read().strip())
-        new_b = max(MIN_BRIGHTNESS, min(max_b, cur + delta))
+        step = max(1, max_b // 10)
+        if delta > 0:
+            new_b = min(max_b, ((cur // step) + 1) * step)
+        elif cur <= 0:
+            new_b = MIN_BRIGHTNESS
+        else:
+            new_b = max(MIN_BRIGHTNESS, ((cur - 1) // step) * step)
         with open(b_path, "w", encoding="utf-8") as f:
             f.write(str(new_b))
     except OSError:
