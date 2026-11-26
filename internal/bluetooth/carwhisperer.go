@@ -74,11 +74,10 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if lerr != nil {
 		return fmt.Errorf("local adapter address: %w", lerr)
 	}
-	if !devicePaired(address) {
-		// Keep the pairing agent alive while RFCOMM connects: the original C
-		// tool answered the PIN request during rfcomm_connect().
-		emit("Device is not paired; RFCOMM will trigger pairing")
-	}
+	// Match the original C tool: no pairing step. If another profile holds the
+	// ACL, drop it so RFCOMM can create its own channel.
+	disconnectBluetooth(hciName, address)
+	time.Sleep(500 * time.Millisecond)
 
 	var record io.Writer
 	if recordAudio {
@@ -111,15 +110,21 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		_ = exec.Command("hciconfig", hciName, "voice", "0x0060").Run()
 	}
 
-	rfd, agent, err := connectRFCOMMWithPairing(local, addr, address, emit)
-	if agent != nil {
-		defer func() {
-			_ = agent.Process.Kill()
-			_, _ = agent.Process.Wait()
-		}()
+	var rfd int
+	for attempt := 0; attempt < 4; attempt++ {
+		rfd, err = openRFCOMM(local, addr, 1)
+		if err == nil {
+			break
+		}
+		if err != unix.EBUSY && err != unix.ECONNRESET && err != unix.ETIMEDOUT && err != unix.EAGAIN {
+			break
+		}
+		emit("RFCOMM channel busy (%v); retrying...", err)
+		disconnectBluetooth(hciName, address)
+		time.Sleep(700 * time.Millisecond)
 	}
 	if err != nil {
-		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered and the device is in pairing mode; CZHax needs root)", err)
+		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered; CZHax needs root)", err)
 	}
 	defer unix.Close(rfd)
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
@@ -173,79 +178,13 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	return nil
 }
 
-func devicePaired(address string) bool {
-	if _, err := exec.LookPath("bluetoothctl"); err != nil {
-		return false
+func disconnectBluetooth(hciName, address string) {
+	if _, err := exec.LookPath("btmgmt"); err != nil {
+		return
 	}
-	out, err := exec.Command("bluetoothctl", "info", NormalizeAddr(address)).CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), "Paired: yes")
-}
-
-func connectRFCOMMWithPairing(local, remote [6]byte, address string, emit func(string, ...any)) (int, *exec.Cmd, error) {
-	if devicePaired(address) {
-		fd, err := openRFCOMM(local, remote, 1)
-		return fd, nil, err
-	}
-	type attempt struct {
-		capability string
-		pin        string
-	}
-	attempts := []attempt{
-		{capability: "NoInputNoOutput"},
-		{capability: "KeyboardOnly", pin: "0000"},
-		{capability: "KeyboardOnly", pin: "1234"},
-	}
-	var last error
-	for _, a := range attempts {
-		agent, err := startPairingAgent(address, a.capability, a.pin)
-		if err != nil {
-			last = err
-			continue
-		}
-		time.Sleep(500 * time.Millisecond)
-		emit("Trying RFCOMM with %s pairing%s", a.capability, pinLabel(a.pin))
-		fd, err := openRFCOMM(local, remote, 1)
-		if err == nil {
-			if devicePaired(address) {
-				_ = exec.Command("bluetoothctl", "trust", NormalizeAddr(address)).Run()
-			}
-			return fd, agent, nil
-		}
-		last = err
-		_ = agent.Process.Kill()
-		_, _ = agent.Process.Wait()
-	}
-	return -1, nil, last
-}
-
-func startPairingAgent(address, capability, pin string) (*exec.Cmd, error) {
-	if _, err := exec.LookPath("bt-agent"); err != nil {
-		return nil, err
-	}
-	args := []string{"-c", capability}
-	if pin != "" {
-		pinFile := filepath.Join(os.TempDir(), fmt.Sprintf("czhax-bt-pin-%d", os.Getpid()))
-		if err := os.WriteFile(pinFile, []byte(NormalizeAddr(address)+" "+pin+"\n"), 0o600); err != nil {
-			return nil, err
-		}
-		defer os.Remove(pinFile)
-		args = append(args, "-p", pinFile)
-	}
-	cmd := exec.Command("bt-agent", args...)
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	return cmd, nil
-}
-
-func pinLabel(pin string) string {
-	if pin == "" {
-		return ""
-	}
-	return " PIN " + pin
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "btmgmt", "-i", hciName, "disconnect", NormalizeAddr(address)).Run()
 }
 
 func prepareCarwhispererAdapter(hciName string) error {
@@ -332,7 +271,7 @@ func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
 	if err != nil {
 		return -1, fmt.Errorf("RFCOMM socket: %w", err)
 	}
-	setRecvTimeout(fd)
+	_ = unix.SetNonblock(fd, false)
 	// Match the original Carwhisperer: bind the local adapter address on
 	// channel 1, then connect to the target's channel 1.
 	if err := unix.Bind(fd, &unix.SockaddrRFCOMM{Addr: local, Channel: 1}); err != nil {
@@ -340,10 +279,45 @@ func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
 		return -1, fmt.Errorf("bind RFCOMM: %w", err)
 	}
 	if err := unix.Connect(fd, &unix.SockaddrRFCOMM{Addr: remote, Channel: uint8(channel)}); err != nil {
-		unix.Close(fd)
-		return -1, err
+		if err != unix.EINPROGRESS && err != unix.EALREADY {
+			unix.Close(fd)
+			return -1, err
+		}
+		if werr := waitWritable(fd); werr != nil {
+			unix.Close(fd)
+			return -1, werr
+		}
 	}
+	setRecvTimeout(fd)
 	return fd, nil
+}
+
+func waitWritable(fd int) error {
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := unix.Poll(pfd, 250)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		if pfd[0].Revents&(unix.POLLOUT|unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			soErr, gerr := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+			if gerr != nil {
+				return gerr
+			}
+			if soErr != 0 {
+				return unix.Errno(soErr)
+			}
+			return nil
+		}
+	}
+	return unix.ETIMEDOUT
 }
 
 func openSCO(local, remote [6]byte) (int, error) {
@@ -351,6 +325,7 @@ func openSCO(local, remote [6]byte) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+	_ = unix.SetNonblock(fd, false)
 	if err := bindSCO(fd, local); err != nil {
 		unix.Close(fd)
 		return -1, err
@@ -359,6 +334,7 @@ func openSCO(local, remote [6]byte) (int, error) {
 		unix.Close(fd)
 		return -1, err
 	}
+	setRecvTimeout(fd)
 	return fd, nil
 }
 
@@ -374,10 +350,16 @@ func bindSCO(fd int, addr [6]byte) error {
 func connectSCO(fd int, addr [6]byte) error {
 	sa := rawSCOAddr{Family: unix.AF_BLUETOOTH, Addr: addr}
 	_, _, errno := unix.Syscall(unix.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa))
-	if errno != 0 {
+	if errno == 0 {
+		return nil
+	}
+	if errno != unix.EINPROGRESS && errno != unix.EALREADY {
 		return errno
 	}
-	return nil
+	// SCO connect can report EINPROGRESS even on a blocking socket. Wait for
+	// writability and inspect SO_ERROR, equivalent to the C tool's blocking
+	// connect() completing.
+	return waitWritable(fd)
 }
 
 func setRecvTimeout(fd int) {
