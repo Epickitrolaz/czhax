@@ -3,6 +3,7 @@ package bluetooth
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,10 +71,6 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if err := prepareCarwhispererAdapter(hciName); err != nil {
 		emit("Adapter warning: %v", err)
 	}
-	if !devicePaired(address) {
-		emit("Pairing %s...", NormalizeAddr(address))
-		pairCarwhispererDevice(hciName, address, emit)
-	}
 
 	var record io.Writer
 	if recordAudio {
@@ -106,19 +103,19 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		_ = exec.Command("hciconfig", hciName, "voice", "0x0060").Run()
 	}
 
-	rfd, err := unix.Socket(unix.AF_BLUETOOTH, unix.SOCK_STREAM, unix.BTPROTO_RFCOMM)
+	rfd, err := openRFCOMM(addr)
+	if err != nil && errors.Is(err, unix.EACCES) {
+		// Older/dual-mode targets sometimes reject RFCOMM until they are
+		// bonded. The BLE speaker case that previously worked should not be
+		// pre-paired, so only try pairing after a real permission failure.
+		emit("RFCOMM permission denied; trying to pair %s...", NormalizeAddr(address))
+		pairCarwhispererDevice(hciName, address, emit)
+		rfd, err = openRFCOMM(addr)
+	}
 	if err != nil {
-		return fmt.Errorf("RFCOMM socket: %w", err)
-	}
-	defer unix.Close(rfd)
-	setRecvTimeout(rfd)
-
-	if err := unix.Bind(rfd, &unix.SockaddrRFCOMM{Channel: 1}); err != nil {
-		return fmt.Errorf("bind RFCOMM: %w", err)
-	}
-	if err := unix.Connect(rfd, &unix.SockaddrRFCOMM{Addr: addr, Channel: 1}); err != nil {
 		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered and the device is paired; CZHax needs root)", err)
 	}
+	defer unix.Close(rfd)
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
 
 	sfd, err := openSCO(addr)
@@ -165,17 +162,6 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	return nil
 }
 
-func devicePaired(address string) bool {
-	if _, err := exec.LookPath("bluetoothctl"); err != nil {
-		return true // don't warn when we cannot tell
-	}
-	out, err := exec.Command("bluetoothctl", "info", NormalizeAddr(address)).CombinedOutput()
-	if err != nil {
-		return true
-	}
-	return strings.Contains(string(out), "Paired: yes")
-}
-
 func pairCarwhispererDevice(hciName, address string, emit func(string, ...any)) {
 	if _, err := exec.LookPath("btmgmt"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -220,6 +206,23 @@ func prepareCarwhispererAdapter(hciName string) error {
 		}
 	}
 	return first
+}
+
+func openRFCOMM(addr [6]byte) (int, error) {
+	fd, err := unix.Socket(unix.AF_BLUETOOTH, unix.SOCK_STREAM, unix.BTPROTO_RFCOMM)
+	if err != nil {
+		return -1, fmt.Errorf("RFCOMM socket: %w", err)
+	}
+	setRecvTimeout(fd)
+	if err := unix.Bind(fd, &unix.SockaddrRFCOMM{Channel: 1}); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("bind RFCOMM: %w", err)
+	}
+	if err := unix.Connect(fd, &unix.SockaddrRFCOMM{Addr: addr, Channel: 1}); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
 }
 
 func openSCO(addr [6]byte) (int, error) {
