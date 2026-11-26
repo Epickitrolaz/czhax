@@ -48,9 +48,11 @@ func (s Signal) Normalized() Signal {
 }
 
 // normalizeTimings ensures a frame starts and ends with a mark (odd count),
-// stays within Linux LIRC_MODE_PULSE duration limits, and fits in LIRCBUF_SIZE.
+// stays within Linux LIRC_MODE_PULSE duration limits (both per sample and
+// cumulative IR_MAX_DURATION = 500ms per write), and fits in LIRCBUF_SIZE.
 func normalizeTimings(in []int) []int {
 	out := make([]int, 0, len(in))
+	total := 0
 	for _, v := range in {
 		if v <= 0 {
 			continue
@@ -58,10 +60,11 @@ func normalizeTimings(in []int) []int {
 		if v > maxDurationUS {
 			v = maxDurationUS
 		}
+		if total+v > maxDurationUS || len(out) >= MaxTimings {
+			break
+		}
 		out = append(out, v)
-	}
-	if len(out) > MaxTimings {
-		out = out[:MaxTimings]
+		total += v
 	}
 	if len(out) > 0 && len(out)%2 == 0 {
 		// Linux LIRC_MODE_PULSE requires an odd count (must start and end with a pulse).
@@ -77,10 +80,15 @@ func (s Signal) Validate() error {
 	if len(s.Timings)%2 == 0 {
 		return errors.New("signal timings must have an odd count (pulse/space/.../pulse)")
 	}
+	total := 0
 	for i, d := range s.Timings {
 		if d <= 0 || d > maxDurationUS {
 			return fmt.Errorf("timing[%d]=%d out of range (1..%d)", i, d, maxDurationUS)
 		}
+		if total+d > maxDurationUS {
+			return fmt.Errorf("signal total duration exceeds %d us", maxDurationUS)
+		}
+		total += d
 	}
 	return nil
 }
@@ -259,6 +267,61 @@ func (s *Store) DeleteBinding(profileIdx int, key string) bool {
 		}
 	}
 	return false
+}
+
+// RebindKey changes the keyboard key for bindingIdx in profileIdx to newKey.
+// If another binding in the same profile already uses newKey, their keys are
+// swapped so no saved IR signal is lost. Returns the displaced button's name
+// (if swapped) and the updated sorted index of the remapped binding.
+func (s *Store) RebindKey(profileIdx, bindingIdx int, newKey string) (swappedWith string, newIdx int, ok bool) {
+	if profileIdx < 0 || profileIdx >= len(s.Profiles) {
+		return "", 0, false
+	}
+	p := &s.Profiles[profileIdx]
+	if bindingIdx < 0 || bindingIdx >= len(p.Bindings) {
+		return "", 0, false
+	}
+	newKey = NormalizeBindKey(newKey)
+	if !IsBindableKey(newKey) {
+		return "", bindingIdx, false
+	}
+	oldKey := p.Bindings[bindingIdx].Key
+	if oldKey == newKey {
+		return "", bindingIdx, true
+	}
+	for i := range p.Bindings {
+		if i != bindingIdx && p.Bindings[i].Key == newKey {
+			swappedWith = p.Bindings[i].Name
+			p.Bindings[i].Key = oldKey
+			break
+		}
+	}
+	p.Bindings[bindingIdx].Key = newKey
+	sortBindings(p.Bindings)
+	for i := range p.Bindings {
+		if p.Bindings[i].Key == newKey {
+			return swappedWith, i, true
+		}
+	}
+	return swappedWith, bindingIdx, true
+}
+
+// RenameBinding updates the display label of bindingIdx in profileIdx.
+func (s *Store) RenameBinding(profileIdx, bindingIdx int, name string) bool {
+	if profileIdx < 0 || profileIdx >= len(s.Profiles) {
+		return false
+	}
+	p := &s.Profiles[profileIdx]
+	if bindingIdx < 0 || bindingIdx >= len(p.Bindings) {
+		return false
+	}
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return false
+	}
+	p.Bindings[bindingIdx].Name = trimmed
+	p.Bindings[bindingIdx].Signal.Name = trimmed
+	return true
 }
 
 func (s *Store) AddBinding(profileName string, b Binding) int {

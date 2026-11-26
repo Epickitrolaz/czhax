@@ -10,7 +10,8 @@ import (
 )
 
 type StatusView struct {
-	Scroll int
+	Scroll  int
+	Marquee Marquee
 }
 
 func (v *StatusView) Move(delta int, totalRows, visibleH int) {
@@ -40,7 +41,7 @@ func (v StatusView) BuildRows(w int, pal theme.Palette, cfg config.Config, snap 
 
 	ipView := danger.Render("offline")
 	if snap.NetUp && snap.PrimaryIP != "" {
-		ipView = ok.Render(Truncate(snap.PrimaryIP, max(6, w-7)))
+		ipView = ok.Render(v.Marquee.Truncate(snap.PrimaryIP, max(6, w-7)))
 	}
 
 	var memRatio, diskRatio float64
@@ -97,7 +98,7 @@ func (v StatusView) BuildRows(w int, pal theme.Palette, cfg config.Config, snap 
 	}
 
 	return []string{
-		" " + sec.Render("Host  ") + txt.Render(Truncate(snap.Hostname, max(6, w-14))) + " " + muted.Render(hw),
+		" " + sec.Render("Host  ") + txt.Render(v.Marquee.Truncate(snap.Hostname, max(6, w-14))) + " " + muted.Render(hw),
 		" " + sec.Render("IP    ") + ipView,
 		fmt.Sprintf(" %s %s %s", sec.Render("RAM  "), memBar, txt.Render(fmt.Sprintf("%d/%dM", snap.MemUsedMB, snap.MemTotalMB))),
 		fmt.Sprintf(" %s %s %s", sec.Render("Disk "), diskBar, txt.Render(fmt.Sprintf("%.1f/%.1fG", snap.DiskFreeGB, snap.DiskTotGB))),
@@ -122,7 +123,7 @@ func (v StatusView) RenderLines(w, h int, pal theme.Palette, cfg config.Config, 
 			visible[len(visible)-1] += indicator
 		}
 	}
-	return SplitLinesPadded(visible, w, h)
+	return v.Marquee.SplitLinesPadded(visible, w, h)
 }
 
 func barColor(pal theme.Palette, ratio float64) lipgloss.Color {

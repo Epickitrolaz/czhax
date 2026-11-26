@@ -6,7 +6,8 @@ import (
 )
 
 type HelpView struct {
-	Scroll int
+	Scroll  int
+	Marquee Marquee
 }
 
 func (v *HelpView) Move(delta int) {
@@ -19,24 +20,25 @@ func (v *HelpView) Move(delta int) {
 func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	descW := max(6, w-11)
 
 	rows := []string{
-		" " + sec.Render("↑↓/Fn+F,X ") + txt.Render("Vertical tabs / scroll"),
-		" " + sec.Render("←→/Fn+Z,C ") + txt.Render("Horizontal tabs"),
-		" " + sec.Render("Enter     ") + txt.Render("Enter tab content"),
-		" " + sec.Render("Esc       ") + txt.Render("Return to tabs"),
-		" " + sec.Render("r         ") + txt.Render("Refresh / rescan"),
-		" " + sec.Render("s / ⏎     ") + txt.Render("WiFi scan / AP actions"),
-		" " + sec.Render("pcap      ") + txt.Render("Saved ~/czhax-captures"),
-		" " + sec.Render("IR Remote ") + txt.Render("keys:send ←→:rem Tab:list"),
-		" " + sec.Render("IR Learn  ") + txt.Render("⏎:listen/remote/bind key"),
-		" " + sec.Render("IR Browse ") + txt.Render("m:match u:univ /:find [/]:brand"),
-		" " + sec.Render("?         ") + txt.Render("Toggle help"),
-		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
+		" " + sec.Render("↑↓/Fn+F,X ") + txt.Render(v.Marquee.Truncate("Vertical tabs / scroll", descW)),
+		" " + sec.Render("←→/Fn+Z,C ") + txt.Render(v.Marquee.Truncate("Horizontal tabs", descW)),
+		" " + sec.Render("Enter     ") + txt.Render(v.Marquee.Truncate("Enter tab content", descW)),
+		" " + sec.Render("Esc       ") + txt.Render(v.Marquee.Truncate("Return to tabs", descW)),
+		" " + sec.Render("r         ") + txt.Render(v.Marquee.Truncate("Refresh / rescan", descW)),
+		" " + sec.Render("s / ⏎     ") + txt.Render(v.Marquee.Truncate("WiFi scan / AP actions", descW)),
+		" " + sec.Render("pcap      ") + txt.Render(v.Marquee.Truncate("Saved ~/czhax-captures", descW)),
+		" " + sec.Render("IR Remote ") + txt.Render(v.Marquee.Truncate("keys:send ←→:rem Tab:list =:remap", descW)),
+		" " + sec.Render("IR Learn  ") + txt.Render(v.Marquee.Truncate("⏎:listen/remote/bind key", descW)),
+		" " + sec.Render("IR Browse ") + txt.Render(v.Marquee.Truncate("m:match u:univ /:find [/]:brand", descW)),
+		" " + sec.Render("?         ") + txt.Render(v.Marquee.Truncate("Toggle help", descW)),
+		" " + sec.Render("q / ^C    ") + txt.Render(v.Marquee.Truncate("Quit CZHax", descW)),
 	}
 
 	maxScroll := max(0, len(rows)-h)
 	scroll := min(v.Scroll, maxScroll)
 	end := min(len(rows), scroll+h)
-	return SplitLinesPadded(rows[scroll:end], w, h)
+	return v.Marquee.SplitLinesPadded(rows[scroll:end], w, h)
 }

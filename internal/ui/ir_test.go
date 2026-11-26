@@ -558,3 +558,127 @@ func TestIRUniversalRemoteFlow(t *testing.T) {
 		}
 	}
 }
+
+func TestIRRemapRemoteFlow(t *testing.T) {
+	pwr, _ := ir.EncodeProtocol("NEC", 0x08, 0x05)
+	pwr.Name = "Power"
+	okSig, _ := ir.EncodeProtocol("NEC", 0x08, 0x06)
+	okSig.Name = "OK"
+	oneSig, _ := ir.EncodeProtocol("NEC", 0x08, 0x07)
+	oneSig.Name = "1"
+
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}, {"Wide_100x30", 100, 30}} {
+		m := newIRTestModel(t, sz.w, sz.h)
+		prof := ir.BindSignals("Living TV", "flipper", "TV", "Acme", "X1", []ir.Signal{pwr, okSig, oneSig})
+		m.IR.Store.AddProfile(prof)
+
+		// Direct remap via '=' from IR > Remote.
+		m = sendKey(m, "=")
+		if m.IR.RemoteMode != remoteModeRemap {
+			t.Fatalf("[%s] expected remoteModeRemap on '=', got %v", sz.name, m.IR.RemoteMode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Remap/List")
+
+		// Find OK binding and remap it to 'k'.
+		okIdx := -1
+		for i, b := range m.IR.Store.ActiveProfile().Bindings {
+			if b.Name == "OK" {
+				okIdx = i
+				break
+			}
+		}
+		if okIdx < 0 {
+			t.Fatalf("[%s] missing OK binding", sz.name)
+		}
+		for m.IR.RemapCursor != okIdx {
+			m = sendKey(m, "down")
+		}
+		m = sendKey(m, "enter")
+		if !m.IR.IsRemapKeyCaptureActive() {
+			t.Fatalf("[%s] expected IsRemapKeyCaptureActive", sz.name)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Remap/AwaitKey")
+
+		// Reserved keys ('q', '?') must be blocked cleanly without quitting/opening help.
+		m = sendKey(m, "q")
+		if m.ConfirmExit || !m.IR.IsRemapKeyCaptureActive() {
+			t.Fatalf("[%s] expected 'q' blocked in remap key capture", sz.name)
+		}
+		m = sendKey(m, "k")
+		if m.IR.IsRemapKeyCaptureActive() {
+			t.Fatalf("[%s] expected 'k' to complete remap", sz.name)
+		}
+		if b, ok := m.IR.BindingForKey("k"); !ok || b.Name != "OK" {
+			t.Fatalf("[%s] expected OK mapped to 'k', got ok=%v b=%+v", sz.name, ok, b)
+		}
+
+		// Remap button "1" onto key '1' (swapping Power out cleanly without losing it).
+		oneIdx := -1
+		for i, b := range m.IR.Store.ActiveProfile().Bindings {
+			if b.Name == "1" {
+				oneIdx = i
+				break
+			}
+		}
+		for m.IR.RemapCursor != oneIdx {
+			m = sendKey(m, "down")
+		}
+		m = sendKey(m, "enter")
+		m = sendKey(m, "1")
+		if b, ok := m.IR.BindingForKey("1"); !ok || b.Name != "1" {
+			t.Fatalf("[%s] expected button '1' on key '1', got ok=%v b=%+v", sz.name, ok, b)
+		}
+		if len(m.IR.Store.ActiveProfile().Bindings) != 3 {
+			t.Fatalf("[%s] expected swap to preserve all 3 bindings, got %+v", sz.name, m.IR.Store.ActiveProfile().Bindings)
+		}
+
+		// Rename via 'n'.
+		m = sendKey(m, "n")
+		if !m.IR.RemapAwaitLabel {
+			t.Fatalf("[%s] expected RemapAwaitLabel on 'n'", sz.name)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Remap/Rename")
+		m = sendKey(m, "!")
+		m = sendKey(m, "enter")
+		if b, ok := m.IR.BindingForKey("1"); !ok || b.Name != "1!" {
+			t.Fatalf("[%s] expected renamed '1!', got %+v", sz.name, b)
+		}
+
+		// Esc returns to remoteModeUse; pressing 'k' must send OK even with NavArrowsVim enabled!
+		m = sendKey(m, "esc")
+		if m.IR.RemoteMode != remoteModeUse {
+			t.Fatalf("[%s] expected Esc to return to remoteModeUse, got %v", sz.name, m.IR.RemoteMode)
+		}
+		_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+		if cmd == nil {
+			t.Fatalf("[%s] expected pressing bound 'k' in Remote tab to queue IR send", sz.name)
+		}
+
+		// Verify persistence on disk.
+		reloaded, err := ir.LoadStore(m.IR.StorePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reloaded.Profiles) != 1 || len(reloaded.Profiles[0].Bindings) != 3 {
+			t.Fatalf("[%s] reloaded store unexpected: %+v", sz.name, reloaded)
+		}
+
+		// Also verify Tab -> 'e' opens remap and Esc returns to remoteModeList.
+		m = sendKey(m, "tab")
+		if m.IR.RemoteMode != remoteModeList {
+			t.Fatalf("[%s] expected remoteModeList on Tab", sz.name)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Remap/FromListCheck")
+		m = sendKey(m, "e")
+		if m.IR.RemoteMode != remoteModeRemap {
+			t.Fatalf("[%s] expected remoteModeRemap on 'e' from list", sz.name)
+		}
+		m = sendKey(m, "esc")
+		if m.IR.RemoteMode != remoteModeList {
+			t.Fatalf("[%s] expected Esc to return to remoteModeList, got %v", sz.name, m.IR.RemoteMode)
+		}
+	}
+}

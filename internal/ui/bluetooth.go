@@ -14,6 +14,7 @@ type BluetoothView struct {
 	Scroll   int
 	Scanning bool
 	Adapters []bluetooth.Adapter
+	Marquee  Marquee
 }
 
 func NewBluetoothView() BluetoothView {
@@ -76,7 +77,7 @@ func (v BluetoothView) BuildRows(w int, pal theme.Palette, ad bluetooth.Adapter)
 	stateView := muted.Render("unknown")
 	switch {
 	case ad.RFKill == "hard-blocked" || ad.RFKill == "soft-blocked":
-		stateView = danger.Render("BLOCKED") + " " + muted.Render("("+Truncate(ad.RFKill, max(4, valW-10))+")")
+		stateView = danger.Render("BLOCKED") + " " + muted.Render("("+v.Marquee.Truncate(ad.RFKill, max(4, valW-10))+")")
 	case ad.StateKnown && (ad.Up || ad.Powered):
 		stateView = ok.Render("UP") + " " + txt.Render("powered")
 	case ad.StateKnown:
@@ -90,29 +91,29 @@ func (v BluetoothView) BuildRows(w int, pal theme.Palette, ad bluetooth.Adapter)
 	}
 	vendorView := muted.Render("n/a")
 	if vendorStr != "" {
-		vendorView = txt.Render(Truncate(vendorStr, valW))
+		vendorView = txt.Render(v.Marquee.Truncate(vendorStr, valW))
 	}
 
 	// Driver / Bus line
 	driverView := muted.Render("n/a")
 	if ad.Driver != "" && ad.Bus != "" {
-		driverView = txt.Render(Truncate(ad.Driver+" ("+ad.Bus+")", valW))
+		driverView = txt.Render(v.Marquee.Truncate(ad.Driver+" ("+ad.Bus+")", valW))
 	} else if ad.Driver != "" {
-		driverView = txt.Render(Truncate(ad.Driver, valW))
+		driverView = txt.Render(v.Marquee.Truncate(ad.Driver, valW))
 	} else if ad.Bus != "" {
-		driverView = txt.Render(Truncate(ad.Bus, valW))
+		driverView = txt.Render(v.Marquee.Truncate(ad.Bus, valW))
 	}
 
 	// BD_ADDR line
 	addrView := muted.Render("n/a")
 	if ad.Address != "" {
-		addrView = txt.Render(Truncate(ad.Address, valW))
+		addrView = txt.Render(v.Marquee.Truncate(ad.Address, valW))
 	}
 
 	var rows []string
 	rows = append(rows, " "+sec.Render("State  ")+stateView)
 	if ad.Alias != "" {
-		rows = append(rows, " "+sec.Render("Alias  ")+txt.Render(Truncate(ad.Alias, valW)))
+		rows = append(rows, " "+sec.Render("Alias  ")+txt.Render(v.Marquee.Truncate(ad.Alias, valW)))
 	}
 	rows = append(rows,
 		" "+sec.Render("Vendor ")+vendorView,
@@ -126,7 +127,7 @@ func (v BluetoothView) BuildRows(w int, pal theme.Palette, ad bluetooth.Adapter)
 			hciPart = "HCI " + ad.HCIVersion
 		}
 		modeStr := joinNonEmpty(" · ", ad.Mode, hciPart)
-		rows = append(rows, " "+sec.Render("Mode   ")+txt.Render(Truncate(modeStr, valW)))
+		rows = append(rows, " "+sec.Render("Mode   ")+txt.Render(v.Marquee.Truncate(modeStr, valW)))
 	}
 
 	if ad.FlagsKnown {
@@ -143,7 +144,7 @@ func (v BluetoothView) BuildRows(w int, pal theme.Palette, ad bluetooth.Adapter)
 			if ad.Discoverable {
 				flagStyle = warn
 			}
-			flagView = flagStyle.Render(Truncate(strings.Join(flags, " · "), valW))
+			flagView = flagStyle.Render(v.Marquee.Truncate(strings.Join(flags, " · "), valW))
 		}
 		rows = append(rows, " "+sec.Render("Flags  ")+flagView)
 	}
@@ -153,20 +154,20 @@ func (v BluetoothView) BuildRows(w int, pal theme.Palette, ad bluetooth.Adapter)
 		if ad.RFKill != "unblocked" {
 			rfStyle = danger
 		}
-		rows = append(rows, " "+sec.Render("RFKill ")+rfStyle.Render(Truncate(ad.RFKill, valW)))
+		rows = append(rows, " "+sec.Render("RFKill ")+rfStyle.Render(v.Marquee.Truncate(ad.RFKill, valW)))
 	}
 
 	if ad.Type != "" {
-		rows = append(rows, " "+sec.Render("Type   ")+muted.Render(Truncate(ad.Type, valW)))
+		rows = append(rows, " "+sec.Render("Type   ")+muted.Render(v.Marquee.Truncate(ad.Type, valW)))
 	}
 
 	if ad.VendorID != "" || ad.ProductID != "" {
 		hwID := strings.Trim(ad.VendorID+":"+ad.ProductID, ":")
-		rows = append(rows, " "+sec.Render("HW ID  ")+muted.Render(Truncate(hwID, valW)))
+		rows = append(rows, " "+sec.Render("HW ID  ")+muted.Render(v.Marquee.Truncate(hwID, valW)))
 	}
 
 	if ad.ScanMode != "" {
-		rows = append(rows, " "+sec.Render("Scan   ")+muted.Render(Truncate(ad.ScanMode, valW)))
+		rows = append(rows, " "+sec.Render("Scan   ")+muted.Render(v.Marquee.Truncate(ad.ScanMode, valW)))
 	}
 
 	return rows
@@ -216,5 +217,5 @@ func (v BluetoothView) RenderLines(w, h int, pal theme.Palette, focused bool) []
 	lines := make([]string, 0, h)
 	lines = append(lines, header)
 	lines = append(lines, visible...)
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
