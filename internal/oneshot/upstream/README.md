@@ -1,0 +1,151 @@
+```
+▄▖    ▄▖▌   ▗   ▄▖  ▗      ▌   ▌
+▌▌▛▌█▌▚ ▛▌▛▌▜▘▄▖▙▖▚▘▜▘█▌▛▌▛▌█▌▛▌
+▙▌▌▌▙▖▄▌▌▌▙▌▐▖  ▙▖▞▖▐▖▙▖▌▌▙▌▙▖▙▌
+```
+
+This tool performs various WPS attacks without the requirement of monitor mode, or any python dependencies.
+
+This is an improved version of the original OneShot
+
+## Features
+ - PIN/Null PIN and Push button connection
+ - [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack)
+ - [Online WPS bruteforce](https://sviehb.files.wordpress.com/2011/12/viehboeck_wps.pdf)
+ - Offline WPS PIN generating algorithm
+ - Wi-Fi scanner with highlighting based on iw;
+ - Ability to write to a file
+
+## Advantages over original OneShot
+ - Highlighting of a vulnerable WPS version (`1.0`) in the scanner
+ - Ability to kill/restore interfering processes using the same interface
+ - Minor changes (e.g, `WPA3TM` indication, better `vulnwsc` detection, `RF-Kill` handling)
+ - Improved Scanner reliability (retries, `up` detection, `lock` detection)
+ - Improved Android support
+ - Many new command arguments and features
+ - Works on modern python versions (`>3.11`)
+
+## Installing pre-requisites
+<details>
+<summary><b>On Termux:</b></summary>
+
+#### Use this script to install requirements, clone the repository, and put `ose.py` to `$PATH`:
+```shell
+curl -sL https://gist.githubusercontent.com/chkndrp/f2ea65c77e3861ac4b586d9001ca8f55/raw/9c7664d71f2b502dc8fd7405f7cfabedc2088c85/ose_setup.py | bash
+```
+
+#### Or do it manually:
+```shell
+pkg install -y root-repo
+pkg install -y git sudo python wpa-supplicant pixiewps iw openssl iproute2
+```
+
+---
+</details>
+
+<details>
+<summary><b>On Linux:</b></summary>
+
+#### Install these packages through your distribution's package manager:
+```shell
+python3 wpa-supplicant iw wget pixiewps iproute2
+```
+</details>
+
+## Downloading/Updating:
+<details>
+<summary><b>On Termux:</b></summary><p></p>
+
+#### The same script that was described in [#installing-pre-requisites](#installing-pre-requisites) can be used to clone/update the local repository.
+```shell
+curl -sL https://gist.githubusercontent.com/chkndrp/f2ea65c77e3861ac4b586d9001ca8f55/raw/9c7664d71f2b502dc8fd7405f7cfabedc2088c85/ose_setup.py | bash
+```
+
+---
+</details>
+
+<details>
+<summary><b>On Linux/manually:</b></summary>
+
+#### Cloning the source:
+ ```shell
+ cd ~
+ git clone https://github.com/chkndrp/OneShot-Extended ose
+ ```
+
+#### Updating the source after a recent commit:
+ ```shell
+ cd ose
+ git fetch
+ git reset --hard origin/master
+ ```
+</details>
+
+## Quick start
+#### Pixie Dust attack:
+ ```shell
+ sudo python ose.py -i wlan0 -P
+ ```
+
+#### Bruteforce attack:
+ ```shell
+ sudo python ose.py -i wlan0 -B
+ ```
+
+## Usage
+```
+Required arguments:
+  -i, --interface INTERFACE
+                        Name of the interface to use
+  -b, --bssid BSSID     BSSID of the target AP
+
+Attack Modes:
+  -p, --pin PIN         Use the specified pin (arbitrary string or 4/8 digit pin)
+  -N, --null-pin        Use a null pin
+  -P, --pixie-dust      Run Pixie Dust attack
+  -B, --bruteforce      Run online bruteforce attack
+  --pbc, --push-button-connect
+                        Run WPS push button connection
+
+Optional arguments:
+  -k, --kill            Automatically kill processes interfering with the wireless interface
+  -r, --restore         Restore killed interfering processes on exit (--kill)
+  -w, --write           Write credentials to the file on success
+  -l, --loop            Run in a loop
+  -c, --clear           Clear the screen on every wi-fi scan
+  -d, --delay DELAY     Set a delay between pin attempts in seconds (default: 0)
+  -t, --timeout TIMEOUT
+                        Set the timeout for retrying after WPS lock (default: 60)
+
+Advanced Arguments:
+  -F, --pixie-force     Run Pixiewps with --force option (bruteforce full range)
+  -S, --show-pixie      Print pixiewps command and related data
+  -I, --iface-down      Down network interface when the work is finished
+  -M, --mtk-wifi        Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
+  -D, --dont-touch-settings
+                        Don't touch the Android Wi-Fi settings on startup and exit
+  --reverse-scan        Reverse order of networks in the list of networks. Useful on small displays
+  --vuln-list VULN_LIST
+                        Use custom file with vulnerable devices list
+  -v, --verbose         Verbose output
+  -h, --help            Show this help message and exit
+```
+
+## Troubleshooting
+`Device or resource busy (-16)`
+- This happens because some other process is using the interface. 
+- Turn off Wi-Fi scanners/managers or use `--kill` argument to stop them.
+   - on Android, the Wi-Fi scanner is automatically disabled, and the use of `--kill` argument is not recommended
+
+`The wireless interface disappears when Wi-Fi is disabled on Android devices with MediaTek SoC`
+- Try running Oneshot-Extended with the `--mtk-wifi` flag to initialize Wi-Fi device driver.
+
+## Credits
+- [kimocoder](https://github.com/kimocoder/OneShot), [drygdryg](https://github.com/drygdryg) for the foundation of this project
+- [rofl0r](https://github.com/rofl0r/oneshot) for original oneshot
+
+## Disclaimer
+- This tool is intended for educational and authorized penetration testing purposes only.
+- It is not designed for, and must not be used for, illegal activities such as hacking, unauthorized access, or causing damage to systems or networks.
+- By using this tool, you agree to use it responsibly and ethically, and to comply with all applicable laws and regulations.
+- The developer assumes no responsibility for any misuse of this tool.

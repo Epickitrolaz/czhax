@@ -118,3 +118,46 @@ func TestDefaultOneShotAttack(t *testing.T) {
 		t.Fatalf("default OneShot attack = %q, want -P -k -F", OneShotDefaultAttack)
 	}
 }
+
+func TestEmbeddedOneShotIsDefault(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("CZHAX_ONESHOT_DIR", "")
+
+	o := FindOneShot("")
+	if !o.Found() {
+		t.Fatalf("expected embedded OneShot, got %+v", o)
+	}
+	if !o.Embedded {
+		t.Fatalf("expected Embedded=true, got %+v", o)
+	}
+	if _, err := os.Stat(o.Script); err != nil {
+		t.Fatalf("embedded ose.py missing at %s: %v", o.Script, err)
+	}
+	if _, err := os.Stat(o.VulnList); err != nil {
+		t.Fatalf("embedded vulnwsc.txt missing at %s: %v", o.VulnList, err)
+	}
+	if len(LoadVulnList(o.VulnList)) < 50 {
+		t.Fatalf("embedded vuln list looks truncated: %d entries", len(LoadVulnList(o.VulnList)))
+	}
+}
+
+func TestOneShotOverrideWins(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("CZHAX_ONESHOT_DIR", "")
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ose.py")
+	if err := os.WriteFile(script, []byte("#!/usr/bin/env python3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := FindOneShot(dir)
+	if !o.Found() || o.Embedded || o.Script != script {
+		t.Fatalf("expected local override, got %+v", o)
+	}
+
+	// A bad explicit path must not silently fall back to the embedded copy.
+	bad := FindOneShot(filepath.Join(dir, "missing"))
+	if bad.Found() || !strings.Contains(bad.Err, "unset oneshot_dir") {
+		t.Fatalf("expected explicit-path error, got %+v", bad)
+	}
+}

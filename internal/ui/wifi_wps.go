@@ -336,7 +336,11 @@ func (v WifiScanView) renderWPSMenu(w, h int, pal theme.Palette, focused bool) [
 	}
 	status := "OneShot"
 	if v.OneShot.Found() {
-		status = "OneShot · ready"
+		if v.OneShot.Embedded {
+			status = "OneShot · embedded " + wifi.EmbeddedOneShotCommit()
+		} else {
+			status = "OneShot · local"
+		}
 	} else {
 		status = "OneShot · missing"
 	}
