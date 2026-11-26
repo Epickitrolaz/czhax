@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/theme"
 )
 
 func TestFilesViewAllModesBounds(t *testing.T) {
@@ -107,6 +108,99 @@ func TestFilesViewAllModesBounds(t *testing.T) {
 		m.Files.StopRecording()
 		_ = ctx
 		m.Files.FinishRecording(m.Files.RecordSeq, nil)
+
+		// Audio playback screen.
+		pctx, _, _, pok := m.Files.StartPlayback(filepath.Join(root, "clip.wav"))
+		if !pok {
+			t.Fatalf("[%s] could not start playback", sz.name)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Files/Play")
+		m.Files.StopPlayback()
+		_ = pctx
+		m.Files.FinishPlayback(m.Files.PlaySeq, nil)
+	}
+}
+
+func TestFilesShortNamesDoNotTriggerMarquee(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "user", "audio"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user", "audio", "clip.mp3"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}} {
+		cfg := config.Default()
+		cfg.WorkDir = root
+		m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"), "v0.5.22")
+		next, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		m = next.(AppModel)
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+
+		var overflow bool
+		fv := m.Files
+		fv.Marquee = Marquee{Overflow: &overflow}
+		fv.Reload()
+		lines := fv.RenderLines(mainW, bodyH, pal, true)
+		if overflow {
+			t.Fatalf("[%s] short filenames in Files view triggered marquee overflow:\n%s", sz.name, strings.Join(lines, "\n"))
+		}
+
+		// Also verify Carwhisperer audio picker does not scroll short filenames.
+		var btOverflow bool
+		bv := m.BluetoothScan
+		bv.Marquee = Marquee{Overflow: &btOverflow}
+		bv.Devices = []bluetooth.Device{{Address: "84:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "Classic"}}
+		bv.OpenCWAudio()
+		btLines := bv.RenderLines(mainW, bodyH, pal, true)
+		if btOverflow {
+			t.Fatalf("[%s] short filenames in CW audio picker triggered marquee overflow:\n%s", sz.name, strings.Join(btLines, "\n"))
+		}
+	}
+}
+
+func TestCWAudioOnlyListsUserAudioDir(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(root, "captures", "carwhisperer-112233445566-1.wav"),
+		filepath.Join(root, "temp", "conv.wav"),
+		filepath.Join(root, "user", "recordings", "mic-1.wav"),
+		filepath.Join(root, "user", "audio", "rick.mp3"),
+		filepath.Join(root, "user", "audio", "sub", "horn.wav"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := NewBluetoothScanView()
+	v.WorkDir = root
+	if !v.OpenCWAudio() {
+		t.Fatal("expected OpenCWAudio to succeed")
+	}
+	if len(v.CWAudio) != 2 {
+		t.Fatalf("expected 2 files from user/audio only, got %d: %+v", len(v.CWAudio), v.CWAudio)
+	}
+	for _, e := range v.CWAudio {
+		if !strings.Contains(e.Path, filepath.Join("user", "audio")) {
+			t.Fatalf("unexpected non-user-audio entry %q", e.Path)
+		}
+	}
+	if got := v.ConvertPath(); got != filepath.Join(root, "temp", "playback.raw") {
+		t.Fatalf("ConvertPath() = %q, want temp/playback.raw", got)
+	}
+	if got := bluetooth.CarwhispererRecordPathIn(root, "84:D3:52:E8:E8:FB"); !strings.HasPrefix(got, filepath.Join(root, "captures")) {
+		t.Fatalf("CarwhispererRecordPathIn() = %q, want under captures/", got)
 	}
 }
 

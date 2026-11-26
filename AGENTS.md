@@ -48,7 +48,7 @@ internal/
   bluetooth/exec.go        # Privileged streaming command helper (sudo -n)
   audio/audio.go           # Mic recording (arecord/parecord), SCO conversion, media players
   files/files.go           # Working-directory browser, text/image/audio/video helpers
-  workdir/workdir.go       # ~/czhax working directory + captures/bt/recordings paths
+  workdir/workdir.go       # ~/czhax working directory + captures/temp/user paths
   ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
   ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
   ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit

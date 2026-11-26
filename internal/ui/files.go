@@ -29,6 +29,7 @@ const (
 	filesModeDelete
 	filesModeInput
 	filesModeRecord
+	filesModePlay
 )
 
 type filesInputAction int
@@ -75,6 +76,15 @@ type FilesView struct {
 	RecordPath    string
 	RecordErr     string
 	RecordCancel  context.CancelFunc
+
+	Playing     bool
+	PlaySeq     int
+	PlayStarted time.Time
+	PlayElapsed time.Duration
+	PlayPath    string
+	PlayName    string
+	PlayErr     string
+	PlayCancel  context.CancelFunc
 }
 
 func NewFilesView(root string) FilesView {
@@ -139,6 +149,13 @@ func (v *FilesView) HandleEsc() bool {
 	case filesModeRecord:
 		if v.Recording {
 			v.StopRecording()
+			return true
+		}
+		v.Mode = filesModeList
+		return true
+	case filesModePlay:
+		if v.Playing {
+			v.StopPlayback()
 			return true
 		}
 		v.Mode = filesModeList
@@ -373,6 +390,51 @@ func (v *FilesView) FinishRecording(seq int, err error) {
 	v.NoteIsErr = false
 }
 
+func (v *FilesView) StartPlayback(path string) (context.Context, int, string, bool) {
+	if v.Playing {
+		return nil, 0, "", false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	v.PlaySeq++
+	v.PlayPath = path
+	v.PlayName = filepath.Base(path)
+	v.Playing = true
+	v.PlayStarted = time.Now()
+	v.PlayElapsed = 0
+	v.PlayErr = ""
+	v.PlayCancel = cancel
+	v.Mode = filesModePlay
+	v.Note = ""
+	v.NoteIsErr = false
+	return ctx, v.PlaySeq, v.PlayPath, true
+}
+
+func (v *FilesView) StopPlayback() {
+	if v.PlayCancel != nil {
+		v.PlayCancel()
+	}
+}
+
+func (v *FilesView) FinishPlayback(seq int, err error) {
+	if seq != v.PlaySeq {
+		return
+	}
+	v.Playing = false
+	v.PlayCancel = nil
+	if !v.PlayStarted.IsZero() {
+		v.PlayElapsed = time.Since(v.PlayStarted)
+	}
+	v.Mode = filesModeList
+	if err != nil {
+		v.PlayErr = err.Error()
+		v.Note = err.Error()
+		v.NoteIsErr = true
+		return
+	}
+	v.Note = "Played " + v.PlayName
+	v.NoteIsErr = false
+}
+
 func (v *FilesView) TextKey(msg tea.KeyMsg) bool {
 	if v.Mode != filesModeText {
 		return false
@@ -495,6 +557,8 @@ func (v FilesView) RenderLines(w, h int, pal theme.Palette, focused bool) []stri
 		return v.renderInput(w, h, pal)
 	case filesModeRecord:
 		return v.renderRecord(w, h, pal)
+	case filesModePlay:
+		return v.renderPlay(w, h, pal)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -540,10 +604,17 @@ func (v FilesView) renderList(w, h int, pal theme.Palette, focused bool) []strin
 			if !e.Dir {
 				right = files.HumanSize(e.Size)
 			}
-			nameW := max(4, w-2-lipgloss.Width(right)-1)
+			// Prefix (" ▸ " / "   ") is 3 cells; when right != "", add 1 space gap.
+			nameW := max(4, w-3)
+			if right != "" {
+				nameW = max(4, w-4-lipgloss.Width(right))
+			}
 			nameTxt := v.Marquee.FitLine(name, nameW)
 			if selected && focused {
-				row := fmt.Sprintf(" ▸ %s %s", nameTxt, right)
+				row := " ▸ " + nameTxt
+				if right != "" {
+					row += " " + right
+				}
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
@@ -554,7 +625,11 @@ func (v FilesView) renderList(w, h int, pal theme.Palette, focused bool) []strin
 				if e.Dir {
 					style = sec
 				}
-				lines = append(lines, pfx+style.Render(nameTxt)+" "+muted.Render(right))
+				row := pfx + style.Render(nameTxt)
+				if right != "" {
+					row += " " + muted.Render(right)
+				}
+				lines = append(lines, row)
 			}
 		}
 	}
@@ -704,6 +779,25 @@ func (v FilesView) renderRecord(w, h int, pal theme.Palette) []string {
 	lines = append(lines, " "+warn.Render(fmt.Sprintf("● %ds", int(v.RecordElapsed.Seconds()))))
 	if v.RecordErr != "" {
 		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.RecordErr, max(6, w-2))))
+	}
+	for len(lines) < h-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, " "+muted.Render("Esc/⏎:stop"))
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v FilesView) renderPlay(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	lines := []string{" " + accent.Render("Playing audio")}
+	lines = append(lines, " "+sec.Render("File  ")+txt.Render(v.Marquee.Truncate(v.PlayName, max(6, w-8))))
+	lines = append(lines, " "+ok.Render(fmt.Sprintf("▶ %ds", int(v.PlayElapsed.Seconds()))))
+	if v.PlayErr != "" {
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.PlayErr, max(6, w-2))))
 	}
 	for len(lines) < h-1 {
 		lines = append(lines, "")

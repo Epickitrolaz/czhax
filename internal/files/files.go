@@ -218,15 +218,21 @@ func HumanSize(n int64) string {
 	}
 }
 
-// ListAudio walks the working directory (two levels deep) for audio files.
-func ListAudio(root string) ([]Entry, error) {
+// ListAudio walks dir (up to two levels deep) for audio files.
+func ListAudio(dir string) ([]Entry, error) {
 	var out []Entry
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(dir, path)
 		if err != nil {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") && rel != "." {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if d.IsDir() {

@@ -189,6 +189,78 @@ func convertWAVNative(input, output string) error {
 	return os.WriteFile(output, out.Bytes(), 0o644)
 }
 
+// PlayAudio plays an audio file until completion or ctx cancellation.
+// It validates readability up front, tries mpv / ffplay / aplay, and kills the
+// process group cleanly when ctx is canceled.
+func PlayAudio(ctx context.Context, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	info, statErr := f.Stat()
+	_ = f.Close()
+	if statErr == nil && info.Size() == 0 {
+		return errors.New("audio file is empty")
+	}
+
+	type candidate struct {
+		bin  string
+		args []string
+	}
+	var candidates []candidate
+	if _, err := exec.LookPath("mpv"); err == nil {
+		candidates = append(candidates, candidate{"mpv", []string{"--really-quiet", "--no-video", "--no-terminal", path}})
+	}
+	if _, err := exec.LookPath("ffplay"); err == nil {
+		candidates = append(candidates, candidate{"ffplay", []string{"-loglevel", "error", "-nodisp", "-autoexit", path}})
+	}
+	if strings.EqualFold(filepath.Ext(path), ".wav") {
+		if _, err := exec.LookPath("aplay"); err == nil {
+			candidates = append(candidates, candidate{"aplay", []string{"-q", path}})
+		}
+	}
+	if len(candidates) == 0 {
+		return errors.New("no audio player found (install mpv, ffmpeg, or alsa-utils)")
+	}
+	var lastErr error
+	for _, c := range candidates {
+		err := runPlayer(ctx, c.bin, c.args)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return err
+		}
+		lastErr = err
+	}
+	return lastErr
+}
+
+func runPlayer(ctx context.Context, bin string, args []string) error {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			// Take the last non-empty line so PipeWire noise doesn't hide the actual error.
+			lines := strings.Split(msg, "\n")
+			last := strings.TrimSpace(lines[len(lines)-1])
+			if last != "" {
+				return fmt.Errorf("%s: %s", bin, last)
+			}
+		}
+		return fmt.Errorf("%s: %w", bin, err)
+	}
+	return nil
+}
+
 // PlayerCommand returns an installed external player for audio/video.
 func PlayerCommand(path string, video bool) (string, []string, error) {
 	if bin, err := exec.LookPath("mpv"); err == nil {
@@ -208,6 +280,11 @@ func PlayerCommand(path string, video bool) (string, []string, error) {
 			args = append(args, "-nodisp")
 		}
 		return bin, append(args, path), nil
+	}
+	if !video && strings.EqualFold(filepath.Ext(path), ".wav") {
+		if bin, err := exec.LookPath("aplay"); err == nil {
+			return bin, []string{"-q", path}, nil
+		}
 	}
 	return "", nil, errors.New("no media player found (install mpv or ffmpeg)")
 }

@@ -1,6 +1,7 @@
 package hwctl
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,9 +49,68 @@ type Event struct {
 	Volume     VolumeState
 }
 
-// BrightnessLevel maps a raw backlight value in [0..maxB] to 10 discrete levels.
-// Non-zero values always map to at least level 1 so dim settings (e.g. 5/100)
-// remain visible as 1/10.
+// BrightnessRawForLevel maps a perceptual selector level in [0..10] to a raw
+// hardware backlight value in [0..maxB] using CIE 1931 lightness (L*).
+// Level 0 is always 0 (black), level 10 is maxB, and each step produces an
+// equal perceived brightness change across the full range.
+func BrightnessRawForLevel(level, maxB int) int {
+	if level <= 0 || maxB <= 0 {
+		return 0
+	}
+	if level >= BrightnessMaxLevel {
+		return maxB
+	}
+	lStar := float64(level) * 100.0 / float64(BrightnessMaxLevel)
+	var y float64
+	if lStar <= 8.0 {
+		y = lStar / 903.3
+	} else {
+		t := (lStar + 16.0) / 116.0
+		y = t * t * t
+	}
+	raw := int(math.Round(y * float64(maxB)))
+	if raw < 1 {
+		raw = 1
+	}
+	if raw > maxB {
+		raw = maxB
+	}
+	return raw
+}
+
+// BrightnessPercent maps a raw backlight value in [0..maxB] to a perceptually
+// linear percentage in [0..100] (matching CIE 1931 lightness L*).
+func BrightnessPercent(cur, maxB int) int {
+	if cur <= 0 || maxB <= 0 {
+		return 0
+	}
+	if cur >= maxB {
+		return 100
+	}
+	for lvl := 1; lvl < BrightnessMaxLevel; lvl++ {
+		if cur == BrightnessRawForLevel(lvl, maxB) {
+			return (lvl * 100) / BrightnessMaxLevel
+		}
+	}
+	y := float64(cur) / float64(maxB)
+	var lStar float64
+	if y <= 0.008856 {
+		lStar = y * 903.3
+	} else {
+		lStar = 116.0*math.Cbrt(y) - 16.0
+	}
+	pct := int(math.Round(lStar))
+	if pct < 1 {
+		pct = 1
+	}
+	if pct > 99 {
+		pct = 99
+	}
+	return pct
+}
+
+// BrightnessLevel maps a raw backlight value in [0..maxB] to 10 perceptually
+// linear discrete levels. Non-zero values always map to at least level 1.
 func BrightnessLevel(cur, maxB int) int {
 	if cur <= 0 || maxB <= 0 {
 		return 0
@@ -58,7 +118,13 @@ func BrightnessLevel(cur, maxB int) int {
 	if cur >= maxB {
 		return BrightnessMaxLevel
 	}
-	lvl := (cur*BrightnessMaxLevel + maxB - 1) / maxB
+	for lvl := 1; lvl < BrightnessMaxLevel; lvl++ {
+		if cur == BrightnessRawForLevel(lvl, maxB) {
+			return lvl
+		}
+	}
+	pct := BrightnessPercent(cur, maxB)
+	lvl := (pct + 5) / 10
 	if lvl < 1 {
 		lvl = 1
 	}
@@ -86,7 +152,7 @@ func ReadBacklight(sysRoot string) (BacklightState, bool) {
 		cur = maxB
 	}
 	lvl := BrightnessLevel(cur, maxB)
-	pct := (cur * 100) / maxB
+	pct := BrightnessPercent(cur, maxB)
 	return BacklightState{
 		Raw:      cur,
 		MaxRaw:   maxB,
@@ -96,33 +162,52 @@ func ReadBacklight(sysRoot string) (BacklightState, bool) {
 	}, true
 }
 
-// ExpectedBrightnessStep returns the target raw brightness on a clean
-// 10-level grid (0, step, 2*step, ..., maxB) when stepping from cur by delta.
+// ExpectedBrightnessStep returns the target raw brightness on the 10-level
+// perceptually linear grid when stepping from cur by delta.
 func ExpectedBrightnessStep(cur, maxB, delta int) int {
 	if maxB <= 0 {
 		return 0
 	}
-	step := max(1, maxB/BrightnessMaxLevel)
+	if cur < 0 {
+		cur = 0
+	}
+	if cur > maxB {
+		cur = maxB
+	}
+	curLvl := BrightnessLevel(cur, maxB)
 	if delta > 0 {
-		next := ((cur / step) + 1) * step
-		if next > maxB {
+		if cur >= maxB {
 			return maxB
 		}
-		return next
+		target := min(BrightnessMaxLevel, curLvl+1)
+		raw := BrightnessRawForLevel(target, maxB)
+		for raw <= cur && target < BrightnessMaxLevel {
+			target++
+			raw = BrightnessRawForLevel(target, maxB)
+		}
+		if raw <= cur {
+			return min(maxB, cur+1)
+		}
+		return raw
 	}
 	if cur <= 0 {
 		return 0
 	}
-	prev := ((cur - 1) / step) * step
-	if prev < 0 {
-		return 0
+	target := max(0, curLvl-1)
+	raw := BrightnessRawForLevel(target, maxB)
+	for raw >= cur && target > 0 {
+		target--
+		raw = BrightnessRawForLevel(target, maxB)
 	}
-	return prev
+	if raw >= cur {
+		return max(0, cur-1)
+	}
+	return raw
 }
 
 // StepBacklight adjusts sysfs brightness by delta levels (out of 10).
 // Used when no external brightness daemon is managing the backlight or to snap
-// legacy daemon clamps (such as MIN_BRIGHTNESS=5) onto the 0..100 grid.
+// legacy daemon clamps (such as MIN_BRIGHTNESS=5) onto the perceptual grid.
 func StepBacklight(sysRoot string, delta int) (BacklightState, bool) {
 	bPath, mPath, ok := findBacklightPaths(sysRoot)
 	if !ok {
@@ -146,7 +231,7 @@ func writeBacklightRaw(bPath string, next, maxB int) (BacklightState, bool) {
 		MaxRaw:   maxB,
 		Level:    BrightnessLevel(next, maxB),
 		MaxLevel: BrightnessMaxLevel,
-		Percent:  (next * 100) / maxB,
+		Percent:  BrightnessPercent(next, maxB),
 	}, true
 }
 
