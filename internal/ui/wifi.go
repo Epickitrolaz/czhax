@@ -15,6 +15,7 @@ type WifiView struct {
 	Scroll     int
 	Scanning   bool
 	Interfaces []wifi.Interface
+	Marquee    Marquee
 }
 
 func NewWifiView() WifiView {
@@ -79,7 +80,7 @@ func (v WifiView) BuildRows(w int, pal theme.Palette, inf wifi.Interface) []stri
 		stateView = ok.Render("UP")
 		if len(inf.Addrs) > 0 {
 			ip := strings.Split(inf.Addrs[0], "/")[0]
-			stateView += " " + txt.Render(Truncate(ip, max(4, valW-3)))
+			stateView += " " + txt.Render(v.Marquee.Truncate(ip, max(4, valW-3)))
 		}
 	} else {
 		stateView = danger.Render("DOWN")
@@ -102,23 +103,23 @@ func (v WifiView) BuildRows(w int, pal theme.Palette, inf wifi.Interface) []stri
 	}
 	vendorView := muted.Render("n/a")
 	if vendorStr != "" {
-		vendorView = txt.Render(Truncate(vendorStr, valW))
+		vendorView = txt.Render(v.Marquee.Truncate(vendorStr, valW))
 	}
 
 	// Driver / Bus line
 	driverView := muted.Render("n/a")
 	if inf.Driver != "" && inf.Bus != "" {
-		driverView = txt.Render(Truncate(inf.Driver+" ("+inf.Bus+")", valW))
+		driverView = txt.Render(v.Marquee.Truncate(inf.Driver+" ("+inf.Bus+")", valW))
 	} else if inf.Driver != "" {
-		driverView = txt.Render(Truncate(inf.Driver, valW))
+		driverView = txt.Render(v.Marquee.Truncate(inf.Driver, valW))
 	} else if inf.Bus != "" {
-		driverView = txt.Render(Truncate(inf.Bus, valW))
+		driverView = txt.Render(v.Marquee.Truncate(inf.Bus, valW))
 	}
 
 	// MAC line
 	macView := muted.Render("n/a")
 	if inf.MAC != "" {
-		macView = txt.Render(Truncate(inf.MAC, valW))
+		macView = txt.Render(v.Marquee.Truncate(inf.MAC, valW))
 	}
 
 	rows := []string{
@@ -131,23 +132,23 @@ func (v WifiView) BuildRows(w int, pal theme.Palette, inf wifi.Interface) []stri
 
 	if inf.Phy != "" || inf.Bands != "" {
 		phyStr := joinNonEmpty(" · ", inf.Phy, inf.Bands)
-		rows = append(rows, " "+sec.Render("Phy    ")+txt.Render(Truncate(phyStr, valW)))
+		rows = append(rows, " "+sec.Render("Phy    ")+txt.Render(v.Marquee.Truncate(phyStr, valW)))
 	}
 	if inf.SSID != "" {
-		rows = append(rows, " "+sec.Render("SSID   ")+ok.Render(Truncate(inf.SSID, valW)))
+		rows = append(rows, " "+sec.Render("SSID   ")+ok.Render(v.Marquee.Truncate(inf.SSID, valW)))
 	}
 	if inf.Channel != "" {
-		rows = append(rows, " "+sec.Render("Chan   ")+txt.Render(Truncate(inf.Channel, valW)))
+		rows = append(rows, " "+sec.Render("Chan   ")+txt.Render(v.Marquee.Truncate(inf.Channel, valW)))
 	}
 	if inf.TxPower != "" {
-		rows = append(rows, " "+sec.Render("TxPwr  ")+txt.Render(Truncate(inf.TxPower, valW)))
+		rows = append(rows, " "+sec.Render("TxPwr  ")+txt.Render(v.Marquee.Truncate(inf.TxPower, valW)))
 	}
 	if len(inf.Addrs) > 0 {
-		rows = append(rows, " "+sec.Render("IP     ")+txt.Render(Truncate(strings.Join(inf.Addrs, ", "), valW)))
+		rows = append(rows, " "+sec.Render("IP     ")+txt.Render(v.Marquee.Truncate(strings.Join(inf.Addrs, ", "), valW)))
 	}
 	if inf.VendorID != "" || inf.ProductID != "" {
 		hwID := strings.Trim(inf.VendorID+":"+inf.ProductID, ":")
-		rows = append(rows, " "+sec.Render("HW ID  ")+muted.Render(Truncate(hwID, valW)))
+		rows = append(rows, " "+sec.Render("HW ID  ")+muted.Render(v.Marquee.Truncate(hwID, valW)))
 	}
 	if inf.MTU > 0 {
 		rows = append(rows, " "+sec.Render("MTU    ")+muted.Render(strconv.Itoa(inf.MTU)))
@@ -200,7 +201,7 @@ func (v WifiView) RenderLines(w, h int, pal theme.Palette, focused bool) []strin
 	lines := make([]string, 0, h)
 	lines = append(lines, header)
 	lines = append(lines, visible...)
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func renderSelectorBar(names []string, selected, w int, pal theme.Palette, focused bool) string {

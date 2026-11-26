@@ -10,7 +10,11 @@ import (
 	"github.com/czhax/czhax/internal/theme"
 )
 
-func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, activeView ViewID, activeTab int, tabsFocused bool, overlayTitle string, snap sysinfo.Snapshot) string {
+func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, activeView ViewID, activeTab int, tabsFocused bool, overlayTitle string, snap sysinfo.Snapshot, mq ...Marquee) string {
+	var m Marquee
+	if len(mq) > 0 {
+		m = mq[0]
+	}
 	ascii := cfg.Border == config.BorderAscii
 	vbar := "│"
 	if ascii {
@@ -85,7 +89,7 @@ func RenderTopRow(sideW, mainW int, pal theme.Palette, cfg config.Config, active
 		availTabs = mainW
 		statusStr = ""
 	}
-	tabPart := FitLine(tabArea, availTabs)
+	tabPart := m.FitLine(tabArea, availTabs)
 	rightCell := tabPart
 	if statusStr != "" {
 		rightCell += " " + statusStr

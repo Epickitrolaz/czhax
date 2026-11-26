@@ -13,7 +13,11 @@ type Hint struct {
 	Desc string
 }
 
-func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, statusMsg string) string {
+func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, statusMsg string, mq ...Marquee) string {
+	var m Marquee
+	if len(mq) > 0 {
+		m = mq[0]
+	}
 	barStyle := lipgloss.NewStyle().
 		Foreground(pal.FooterFg).
 		Background(pal.FooterBg)
@@ -32,26 +36,16 @@ func RenderFooter(w int, pal theme.Palette, cfg config.Config, hints []Hint, sta
 		Foreground(pal.Warning).
 		Background(pal.FooterBg)
 
+	gap := barStyle.Render("   ")
 	if statusMsg != "" {
-		return barStyle.Width(w).Render(FitLine(msgStyle.Render(statusMsg), w))
+		return barStyle.Width(w).Render(m.FitLineWithGap(msgStyle.Render(statusMsg), w, gap))
 	}
 
 	var parts []string
-	used := 0
-	for i, h := range hints {
-		chunk := keyStyle.Render(h.Key) + descStyle.Render(":"+h.Desc)
-		chunkW := lipgloss.Width(chunk)
-		sepW := 0
-		if i > 0 {
-			sepW = 1
-		}
-		if used+sepW+chunkW > w {
-			break
-		}
-		parts = append(parts, chunk)
-		used += sepW + chunkW
+	for _, h := range hints {
+		parts = append(parts, keyStyle.Render(h.Key)+descStyle.Render(":"+h.Desc))
 	}
 
 	line := strings.Join(parts, barStyle.Render(" "))
-	return barStyle.Width(w).Render(FitLine(line, w))
+	return barStyle.Width(w).Render(m.FitLineWithGap(line, w, gap))
 }

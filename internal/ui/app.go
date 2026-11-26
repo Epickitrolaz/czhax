@@ -32,6 +32,8 @@ const (
 type tickMsg time.Time
 type clearStatusMsg struct{}
 type startupRedrawMsg struct{ step int }
+type marqueeStartMsg struct{ gen int }
+type marqueeTickMsg struct{ gen int }
 
 // startupRedrawDelays schedules full repaints while the system is still
 // settling after boot. Kernel/systemd console messages write straight to the
@@ -185,6 +187,9 @@ type AppModel struct {
 	ConfirmExit   bool
 	RestartOnQuit bool
 	StatusMsg     string
+
+	MarqueeGen  int
+	MarqueeStep int
 }
 
 func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
@@ -215,8 +220,26 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 	return m
 }
 
+func marqueeStartCmd(gen int) tea.Cmd {
+	return tea.Tick(marqueeDelay, func(time.Time) tea.Msg {
+		return marqueeStartMsg{gen: gen}
+	})
+}
+
+func marqueeTickCmd(gen int) tea.Cmd {
+	return tea.Tick(marqueeInterval, func(time.Time) tea.Msg {
+		return marqueeTickMsg{gen: gen}
+	})
+}
+
+func (m *AppModel) resetMarquee() tea.Cmd {
+	m.MarqueeStep = 0
+	m.MarqueeGen++
+	return marqueeStartCmd(m.MarqueeGen)
+}
+
 func (m AppModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd()}
+	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), marqueeStartCmd(m.MarqueeGen)}
 	if isLinuxConsole() {
 		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
@@ -418,7 +441,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.TermW = msg.Width
 		m.TermH = msg.Height
-		return m, nil
+		return m, m.resetMarquee()
+
+	case marqueeStartMsg:
+		if msg.gen != m.MarqueeGen {
+			return m, nil
+		}
+		_, overflow := m.renderScreen(0)
+		if !overflow {
+			return m, nil
+		}
+		m.MarqueeStep = 1
+		return m, marqueeTickCmd(m.MarqueeGen)
+
+	case marqueeTickMsg:
+		if msg.gen != m.MarqueeGen {
+			return m, nil
+		}
+		m.MarqueeStep++
+		return m, marqueeTickCmd(m.MarqueeGen)
 
 	case tickMsg:
 		m.Snap = sysinfo.Collect()
@@ -441,18 +482,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wifiNetworksScannedMsg:
 		m.WifiScan.SetScanResult(msg.iface, msg.nets, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("Scan failed")
+			return m, tea.Batch(m.setStatus("Scan failed"), m.resetMarquee())
 		}
-		return m, m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface))
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface)), m.resetMarquee())
 
 	case wifiConnectDoneMsg:
 		m.WifiScan.SetConnectResult(msg.req, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("Connect failed")
+			return m, tea.Batch(m.setStatus("Connect failed"), m.resetMarquee())
 		}
 		m.Snap = sysinfo.Collect()
 		scanIface := m.WifiScan.EffectiveScanIface()
-		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface))
+		return m, tea.Batch(m.setStatus("Connected "+msg.req.Iface), collectWifiCmd(), scanWifiNetworksCmd(scanIface), m.resetMarquee())
 
 	case wifiPentestDoneMsg:
 		m.WifiScan.SetPentestResult(msg.res, msg.err)
@@ -467,7 +508,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.res.DeauthFrames > 0:
 			status = fmt.Sprintf("Sent %d deauth", msg.res.DeauthFrames)
 		}
-		return m, tea.Batch(m.setStatus(status), collectWifiCmd())
+		return m, tea.Batch(m.setStatus(status), collectWifiCmd(), m.resetMarquee())
 
 	case wifiPentestProgressMsg:
 		if !m.WifiScan.PentestActive {
@@ -488,35 +529,35 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case irCaptureDoneMsg:
 		m.IR.ApplyCaptureResult(msg.seq, msg.sig, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("IR capture failed")
+			return m, tea.Batch(m.setStatus("IR capture failed"), m.resetMarquee())
 		}
-		return m, m.setStatus("IR signal captured")
+		return m, tea.Batch(m.setStatus("IR signal captured"), m.resetMarquee())
 
 	case irSendDoneMsg:
 		if msg.err != nil {
 			m.IR.Note = "Send failed: " + msg.err.Error()
 			m.IR.NoteIsErr = true
-			return m, m.setStatus("IR send failed")
+			return m, tea.Batch(m.setStatus("IR send failed"), m.resetMarquee())
 		}
 		m.IR.Note = "Sent " + msg.name
 		m.IR.NoteIsErr = false
-		return m, m.setStatus("IR sent")
+		return m, tea.Batch(m.setStatus("IR sent"), m.resetMarquee())
 
 	case irIndexDoneMsg:
 		m.IR.SetIndex(msg.entries, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("IR index failed")
+			return m, tea.Batch(m.setStatus("IR index failed"), m.resetMarquee())
 		}
-		return m, m.setStatus(fmt.Sprintf("%d IR remotes", len(msg.entries)))
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d IR remotes", len(msg.entries))), m.resetMarquee())
 
 	case irRemoteLoadedMsg:
 		if msg.err != nil {
 			m.IR.RemoteLoading = false
 			m.IR.RemoteErr = msg.err.Error()
-			return m, m.setStatus("IR load failed")
+			return m, tea.Batch(m.setStatus("IR load failed"), m.resetMarquee())
 		}
 		m.IR.SetRemote(msg.remote)
-		return m, m.setStatus(msg.remote.ProfileName())
+		return m, tea.Batch(m.setStatus(msg.remote.ProfileName()), m.resetMarquee())
 
 	case irLearnTickMsg:
 		if !m.IR.Capturing {
@@ -528,19 +569,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case irMatchCandidatesMsg:
 		m.IR.SetMatchCandidates(msg.cands, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("Match load failed")
+			return m, tea.Batch(m.setStatus("Match load failed"), m.resetMarquee())
 		}
-		return m, m.setStatus(fmt.Sprintf("%d Power codes", len(msg.cands)))
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d Power codes", len(msg.cands))), m.resetMarquee())
 
 	case irMatchSavedMsg:
 		if !m.IR.AcceptMatchedProfile(msg.profile, msg.err) {
-			return m, m.setStatus("Save remote failed")
+			return m, tea.Batch(m.setStatus("Save remote failed"), m.resetMarquee())
 		}
 		m.ActiveTabs[ViewIR] = int(IRTabRemote)
 		if m.IR.NoteIsErr {
-			return m, m.setStatus("IR save failed")
+			return m, tea.Batch(m.setStatus("IR save failed"), m.resetMarquee())
 		}
-		return m, m.setStatus("Saved " + msg.profile.Name)
+		return m, tea.Batch(m.setStatus("Saved "+msg.profile.Name), m.resetMarquee())
 
 	case irUniversalProgressMsg:
 		if !m.IR.UnivBlasting || msg.seq != m.IR.UnivSeq {
@@ -552,9 +593,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case irUniversalDoneMsg:
 		m.IR.ApplyUniversalDone(msg.seq, msg.target, msg.uniqueSent, msg.lastBrand, msg.err)
 		if msg.err != nil {
-			return m, m.setStatus("Universal stopped")
+			return m, tea.Batch(m.setStatus("Universal stopped"), m.resetMarquee())
 		}
-		return m, m.setStatus(fmt.Sprintf("Sent %d codes", msg.uniqueSent))
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("Sent %d codes", msg.uniqueSent)), m.resetMarquee())
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
@@ -562,7 +603,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearStatusMsg:
 		m.StatusMsg = ""
-		return m, nil
+		return m, m.resetMarquee()
 
 	case startupRedrawMsg:
 		cmds := []tea.Cmd{tea.ClearScreen}
@@ -575,61 +616,69 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.System.Updating = false
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, m.setStatus("Update failed")
+			return m, tea.Batch(m.setStatus("Update failed"), m.resetMarquee())
 		}
 		if !msg.res.Updated {
 			m.System.Note = "Already up to date (" + msg.res.CurrentVersion + ")"
-			return m, m.setStatus("Up to date")
+			return m, tea.Batch(m.setStatus("Up to date"), m.resetMarquee())
 		}
 		m.Version = msg.res.LatestVersion
 		m.System.Note = "Done! Select Restart CZHax"
-		return m, m.setStatus("Updated: " + msg.res.LatestVersion)
+		return m, tea.Batch(m.setStatus("Updated: "+msg.res.LatestVersion), m.resetMarquee())
 
 	case sudoUpdateDoneMsg:
 		m.System.Updating = false
 		if msg.err != nil {
 			m.System.Note = "Update canceled or failed"
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Update failed"))
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Update failed"), m.resetMarquee())
 		}
 		m.System.Note = "Done! Select Restart CZHax"
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Update finished"))
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Update finished"), m.resetMarquee())
 
 	case shellExitedMsg:
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"), collectWifiCmd(), collectBluetoothCmd())
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Returned from shell"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
 
 	case bootToggledMsg:
 		m.System.BootState = msg.state
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot toggle failed"))
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot toggle failed"), m.resetMarquee())
 		}
 		if msg.state.Enabled {
 			m.System.Note = "Start on boot: ON (" + string(msg.state.Method) + ")"
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: ON"))
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: ON"), m.resetMarquee())
 		}
 		m.System.Note = "Start on boot: OFF"
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: OFF"))
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Boot: OFF"), m.resetMarquee())
 
 	case sleepDoneMsg:
 		m.Snap = sysinfo.Collect()
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"), collectWifiCmd(), collectBluetoothCmd())
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("Sleep error"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
 		}
 		m.System.Note = "Woke from sleep"
-		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"), collectWifiCmd(), collectBluetoothCmd())
+		return m, tea.Batch(tea.ClearScreen, m.setStatus("Awake"), collectWifiCmd(), collectBluetoothCmd(), m.resetMarquee())
 
 	case powerActionDoneMsg:
 		if msg.err != nil {
 			m.System.Note = msg.err.Error()
-			return m, m.setStatus(msg.action + " failed")
+			return m, tea.Batch(m.setStatus(msg.action+" failed"), m.resetMarquee())
 		}
 		return m, nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		nextModel, cmd := m.handleKey(msg)
+		nm, ok := nextModel.(AppModel)
+		if !ok {
+			return nextModel, cmd
+		}
+		if msg.String() == "ctrl+c" {
+			return nm, cmd
+		}
+		return nm, tea.Batch(cmd, nm.resetMarquee())
 	}
 	return m, nil
 }
@@ -717,6 +766,22 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.IR.LearnErr = "Use a-z, 0-9, F1-F8, Enter, Bksp"
 			return m, nil
 		}
+		if m.IR.IsRemapKeyCaptureActive() {
+			if k == "esc" {
+				m.IR.HandleEsc()
+				return m, nil
+			}
+			bk := ir.NormalizeBindKey(k)
+			if ir.IsBindableKey(bk) && m.IR.ConfirmRemapKey(bk) {
+				if m.IR.Note != "" {
+					return m, m.setStatus(m.IR.Note)
+				}
+				return m, nil
+			}
+			m.IR.Note = "Use a-z, 0-9, F1-F8, Enter, Bksp"
+			m.IR.NoteIsErr = true
+			return m, nil
+		}
 	}
 
 	switch k {
@@ -735,7 +800,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.IR.UnivBlasting {
 				return m, m.setStatus("IR blast running")
 			}
-			if m.IR.Tab == IRTabRemote {
+			if m.IR.Tab == IRTabRemote && m.IR.RemoteMode == remoteModeUse {
 				if b, ok := m.IR.BindingForKey(k); ok {
 					return m.sendIR(b.Signal, b.Name)
 				}
@@ -1068,6 +1133,27 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 		switch m.IR.Tab {
 		case IRTabRemote:
+			if m.IR.RemoteMode == remoteModeRemap {
+				switch {
+				case m.isUp(k):
+					m.IR.MoveRemap(-1)
+				case m.isDown(k):
+					m.IR.MoveRemap(1)
+				case k == "enter" || k == " ":
+					m.IR.BeginRemapKey()
+				case k == "n":
+					m.IR.BeginRemapLabel()
+				case k == "t":
+					if b, ok := m.IR.SelectedRemapBinding(); ok {
+						return m.sendIR(b.Signal, b.Name)
+					}
+				case k == "x" || k == "backspace" || k == "delete":
+					if m.IR.DeleteRemapBinding() && m.IR.Note != "" {
+						return m, m.setStatus(m.IR.Note)
+					}
+				}
+				return m, nil
+			}
 			if m.IR.RemoteMode == remoteModeList {
 				switch {
 				case m.isUp(k):
@@ -1079,6 +1165,10 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 						m.IR.SelectRemoteFromList(m.IR.RemoteListCursor)
 					} else {
 						m.IR.BeginNewRemote(false)
+					}
+				case k == "e" || k == "m":
+					if m.IR.RemoteListCursor < len(m.IR.Store.Profiles) {
+						m.IR.OpenRemap(m.IR.RemoteListCursor, remoteModeList)
 					}
 				case k == "l":
 					if m.IR.RemoteListCursor < len(m.IR.Store.Profiles) {
@@ -1137,7 +1227,14 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if b, ok := m.IR.BindingForKey(k); ok {
+				return m.sendIR(b.Signal, b.Name)
+			}
 			switch {
+			case k == "=":
+				m.IR.OpenRemap(m.IR.Store.Active, remoteModeUse)
+			case k == "tab":
+				m.IR.OpenRemoteList()
 			case m.isUp(k):
 				if m.IR.RemoteScroll > 0 {
 					m.IR.RemoteScroll--
@@ -1148,16 +1245,11 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				m.IR.CycleProfile(-1)
 			case m.isRight(k) || k == "]":
 				m.IR.CycleProfile(1)
-			case k == "tab":
-				m.IR.OpenRemoteList()
-			default:
-				if p := m.IR.Store.ActiveProfile(); p != nil && len(p.Bindings) == 0 && k == "enter" {
+			case k == "enter":
+				if p := m.IR.Store.ActiveProfile(); p != nil && len(p.Bindings) == 0 {
 					m.ActiveTabs[ViewIR] = int(IRTabLearn)
 					m.IR.Tab = IRTabLearn
 					return m, nil
-				}
-				if b, ok := m.IR.BindingForKey(k); ok {
-					return m.sendIR(b.Signal, b.Name)
 				}
 			}
 			if p := m.IR.Store.ActiveProfile(); p != nil {
@@ -1619,6 +1711,11 @@ func (m AppModel) dimensions() (sideW, mainW, bodyH int) {
 }
 
 func (m AppModel) View() string {
+	out, _ := m.renderScreen(m.MarqueeStep)
+	return out
+}
+
+func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 	w, h, bezel := ResolveViewport(m.TermW, m.TermH, m.Cfg.Viewport)
 	pal := theme.Resolve(m.Cfg.Theme, false)
 
@@ -1626,36 +1723,52 @@ func (m AppModel) View() string {
 	showDivider := h >= 12
 	showFooter := m.Cfg.ShowKeyHints || m.ConfirmExit || m.StatusMsg != ""
 
+	var overflow bool
+	mq := Marquee{Step: marqueeStep, Overflow: &overflow}
+
 	overlayTitle := ""
 	if m.ShowHelp {
 		overlayTitle = "HELP"
 	}
 
 	tabsFocused := m.Focus == FocusTabs && !m.ShowHelp
-	topRow := RenderTopRow(sideW, mainW, pal, m.Cfg, m.ActiveView, m.ActiveTabs[m.ActiveView], tabsFocused, overlayTitle, m.Snap)
+	topRow := RenderTopRow(sideW, mainW, pal, m.Cfg, m.ActiveView, m.ActiveTabs[m.ActiveView], tabsFocused, overlayTitle, m.Snap, mq)
 	sideLines := RenderSidebarColumn(sideW, bodyH, pal, m.Cfg, m.ActiveView, tabsFocused)
 
 	var mainLines []string
 	switch {
 	case m.ShowHelp:
-		mainLines = m.Help.RenderLines(mainW, bodyH, pal)
+		helpView := m.Help
+		helpView.Marquee = mq
+		mainLines = helpView.RenderLines(mainW, bodyH, pal)
 	case m.ActiveView == ViewWiFi:
-		mainLines = m.WifiScan.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		scanView := m.WifiScan
+		scanView.Marquee = mq
+		mainLines = scanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewIR:
 		irView := m.IR
 		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
 		irView.ASCII = m.Cfg.Border == config.BorderAscii
+		irView.Marquee = mq
 		mainLines = irView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewSystem:
-		mainLines = m.System.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
+		sysView := m.System
+		sysView.Marquee = mq
+		mainLines = sysView.RenderLines(mainW, bodyH, pal, m.Version, m.Focus == FocusContent)
 	default:
 		switch m.ActiveTabs[ViewStatus] {
 		case StatusTabWiFi:
-			mainLines = m.Wifi.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+			wifiView := m.Wifi
+			wifiView.Marquee = mq
+			mainLines = wifiView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 		case StatusTabBT:
-			mainLines = m.Bluetooth.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+			btView := m.Bluetooth
+			btView.Marquee = mq
+			mainLines = btView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 		default:
-			mainLines = m.Status.RenderLines(mainW, bodyH, pal, m.Cfg, m.Snap, m.Focus == FocusContent)
+			statusView := m.Status
+			statusView.Marquee = mq
+			mainLines = statusView.RenderLines(mainW, bodyH, pal, m.Cfg, m.Snap, m.Focus == FocusContent)
 		}
 	}
 	bodyBlock := JoinPaneColumns(sideLines, mainLines, sideW, mainW, bodyH, pal, m.Cfg)
@@ -1673,13 +1786,13 @@ func (m AppModel) View() string {
 		} else if m.ActiveView == ViewSystem && m.System.Confirm != "" {
 			status = "Confirm " + m.System.Confirm + "? [y/Enter] Yes  [n/Esc] No"
 		}
-		parts = append(parts, RenderFooter(w, pal, m.Cfg, m.currentHints(), status))
+		parts = append(parts, RenderFooter(w, pal, m.Cfg, m.currentHints(), status, mq))
 	}
 
 	screen := strings.Join(parts, "\n")
 
 	if !bezel {
-		return screen
+		return screen, overflow
 	}
 
 	bdr := lipgloss.RoundedBorder()
@@ -1699,7 +1812,7 @@ func (m AppModel) View() string {
 		Render("↑↓ view · ←→ tab · ⏎ enter · Esc tabs · r refresh · ? help")
 
 	composed := lipgloss.JoinVertical(lipgloss.Center, label, frame, fnLegend)
-	return lipgloss.Place(m.TermW, m.TermH, lipgloss.Center, lipgloss.Center, composed)
+	return lipgloss.Place(m.TermW, m.TermH, lipgloss.Center, lipgloss.Center, composed), overflow
 }
 
 func (m AppModel) currentHints() []Hint {
@@ -1809,16 +1922,25 @@ func (m AppModel) currentHints() []Hint {
 			}
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "m", Desc: "match"}, {Key: "u", Desc: "univ"}, {Key: "/", Desc: "find"}, {Key: "⏎", Desc: "open"}}
 		default:
+			if m.IR.RemoteMode == remoteModeRemap {
+				if m.IR.RemapAwaitLabel {
+					return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
+				}
+				if m.IR.RemapAwaitKey {
+					return []Hint{{Key: "key", Desc: "bind"}, {Key: "Esc", Desc: "cancel"}}
+				}
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "remap"}, {Key: "n", Desc: "name"}, {Key: "x", Desc: "del"}, {Key: "Esc", Desc: "done"}}
+			}
 			if m.IR.RemoteMode == remoteModeNew {
 				return []Hint{{Key: "⏎", Desc: "create"}, {Key: "Esc", Desc: "cancel"}}
 			}
 			if m.IR.RemoteMode == remoteModeList {
-				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "use"}, {Key: "l", Desc: "learn"}, {Key: "x", Desc: "del"}}
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "use"}, {Key: "e", Desc: "map"}, {Key: "l", Desc: "learn"}, {Key: "x", Desc: "del"}}
 			}
 			if len(m.IR.Store.Profiles) == 0 {
 				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "open"}, {Key: "Esc", Desc: "tabs"}}
 			}
-			return []Hint{{Key: "key", Desc: "send"}, {Key: "←→", Desc: "rem"}, {Key: "Tab", Desc: "manage"}, {Key: "Esc", Desc: "tabs"}}
+			return []Hint{{Key: "key", Desc: "send"}, {Key: "←→", Desc: "rem"}, {Key: "=", Desc: "remap"}, {Key: "Tab", Desc: "list"}}
 		}
 	}
 	if m.ActiveView == ViewSystem {

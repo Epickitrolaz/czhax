@@ -214,6 +214,41 @@ func TestBundledCollectBrandPowerCandidatesEpson(t *testing.T) {
 	}
 }
 
+func TestBundledTVPowerBlastAllValid(t *testing.T) {
+	entries, err := LoadIndex(DefaultRoots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tvEntries := EntriesForCategory(entries, "TV", "")
+	if len(tvEntries) == 0 {
+		t.Fatal("expected bundled TV entries")
+	}
+	sent := 0
+	err = BlastUniversalWithSender(context.Background(), func(sig Signal) error {
+		if err := sig.Validate(); err != nil {
+			return err
+		}
+		if len(sig.Timings) > MaxTimings || len(sig.Timings)%2 == 0 {
+			return errors.New("invalid timing length")
+		}
+		total := 0
+		for _, d := range sig.Timings {
+			total += d
+		}
+		if total > maxDurationUS {
+			return errors.New("total duration exceeds LIRC IR_MAX_DURATION")
+		}
+		sent++
+		return nil
+	}, 0, tvEntries, "power", nil)
+	if err != nil {
+		t.Fatalf("TV universal power blast failed after %d sends: %v", sent, err)
+	}
+	if sent < 50 {
+		t.Fatalf("expected many unique TV power codes, got %d", sent)
+	}
+}
+
 func TestUniversalButtonsForCategory(t *testing.T) {
 	for _, cat := range []string{"AC", "TV", "Projector", "Fan", "Lights", "Audio", "DVD"} {
 		btns := UniversalButtonsForCategory(cat)

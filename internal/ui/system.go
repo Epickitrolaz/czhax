@@ -29,6 +29,7 @@ type SystemView struct {
 	Confirm   string // "", "reboot", or "shutdown"
 	Note      string
 	BootState boot.State
+	Marquee   Marquee
 }
 
 func NewSystemView() SystemView {
@@ -120,7 +121,7 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 		selected := int(it.opt) == v.Cursor
 		if selected && focused {
 			nameW := max(8, w-len(it.val)-5)
-			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+			row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
 			out = append(out, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			pfx := "   "
@@ -136,7 +137,7 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 				valStyle = warn
 			}
 			nameW := max(8, w-len(it.val)-5)
-			out = append(out, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+			out = append(out, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), valStyle.Render(it.val)))
 		}
 	}
 
@@ -145,9 +146,9 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 			out = append(out, "")
 		}
 		if v.Confirm != "" {
-			out = append(out, " "+danger.Render(Truncate("Confirm "+v.Confirm+"? [y/Enter] Yes [n/Esc] No", max(6, w-1))))
+			out = append(out, " "+danger.Render(v.Marquee.Truncate("Confirm "+v.Confirm+"? [y/Enter] Yes [n/Esc] No", max(6, w-1))))
 		} else if v.Note != "" {
-			out = append(out, " "+warn.Render(Truncate(v.Note, max(6, w-1))))
+			out = append(out, " "+warn.Render(v.Marquee.Truncate(v.Note, max(6, w-1))))
 		} else {
 			var hint string
 			switch SystemOption(v.Cursor) {
@@ -166,9 +167,9 @@ func (v SystemView) RenderLines(w, h int, pal theme.Palette, version string, foc
 			case SysOptShutdown:
 				hint = "⏎ power off unit (asks confirm)"
 			}
-			out = append(out, " "+muted.Render(Truncate(hint, max(6, w-1))))
+			out = append(out, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-1))))
 		}
 	}
 
-	return SplitLinesPadded(out, w, h)
+	return v.Marquee.SplitLinesPadded(out, w, h)
 }

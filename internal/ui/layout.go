@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/czhax/czhax/internal/config"
 )
 
@@ -103,46 +101,15 @@ func ResolveSidebarWidth(totalW int, mode config.SidebarMode) int {
 
 // FitLine ensures s fits strictly in maxW visible cells, truncating with "…" if needed and padding to maxW.
 func FitLine(s string, maxW int) string {
-	if maxW <= 0 {
-		return ""
-	}
-	w := lipgloss.Width(s)
-	if w > maxW {
-		if maxW == 1 {
-			return ansi.Truncate(s, 1, "")
-		}
-		s = ansi.Truncate(s, maxW-1, "…")
-		w = lipgloss.Width(s)
-	}
-	if w < maxW {
-		s += strings.Repeat(" ", maxW-w)
-	}
-	return s
+	return (Marquee{}).FitLine(s, maxW)
 }
 
 func Truncate(s string, maxW int) string {
-	if maxW <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	if maxW == 1 {
-		return ansi.Truncate(s, 1, "")
-	}
-	return ansi.Truncate(s, maxW-1, "…")
+	return truncateStatic(s, maxW)
 }
 
 func SplitLinesPadded(lines []string, width, height int) []string {
-	out := make([]string, 0, height)
-	for i := 0; i < height; i++ {
-		if i < len(lines) {
-			out = append(out, FitLine(lines[i], width))
-		} else {
-			out = append(out, strings.Repeat(" ", max(0, width)))
-		}
-	}
-	return out
+	return (Marquee{}).SplitLinesPadded(lines, width, height)
 }
 
 func MiniBar(ratio float64, width int, ascii bool) string {

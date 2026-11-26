@@ -38,6 +38,7 @@ const (
 	remoteModeUse irRemoteMode = iota
 	remoteModeList
 	remoteModeNew
+	remoteModeRemap
 )
 
 type learnMenuOption int
@@ -84,6 +85,13 @@ type IRView struct {
 	NewRemoteName    string
 	NewRemoteErr     string
 	NewRemoteInput   bool // when creating a remote from Learn tab
+
+	RemapCursor     int
+	RemapReturn     irRemoteMode
+	RemapAwaitKey   bool
+	RemapAwaitLabel bool
+	RemapLabelInput string
+	Marquee         Marquee
 
 	Capturing       bool
 	CaptureSeq      int
@@ -508,7 +516,7 @@ func (v *IRView) saveStore() error {
 func (v IRView) IsTextInput() bool {
 	switch v.Tab {
 	case IRTabRemote:
-		return v.RemoteMode == remoteModeNew
+		return v.RemoteMode == remoteModeNew || (v.RemoteMode == remoteModeRemap && v.RemapAwaitLabel)
 	case IRTabLearn:
 		return v.NewRemoteInput || v.AwaitBindLabel
 	case IRTabBrowse:
@@ -523,6 +531,144 @@ func (v IRView) IsTextInput() bool {
 
 func (v IRView) IsKeyCaptureActive() bool {
 	return v.Tab == IRTabLearn && v.AwaitKeyPress && !v.AwaitBindLabel && v.Learned != nil
+}
+
+func (v IRView) IsRemapKeyCaptureActive() bool {
+	return v.Tab == IRTabRemote && v.RemoteMode == remoteModeRemap && v.RemapAwaitKey && !v.RemapAwaitLabel
+}
+
+func (v *IRView) OpenRemap(profileIdx int, returnMode irRemoteMode) bool {
+	if profileIdx < 0 || profileIdx >= len(v.Store.Profiles) {
+		return false
+	}
+	v.Store.Active = profileIdx
+	v.RemapReturn = returnMode
+	v.RemoteMode = remoteModeRemap
+	v.RemapAwaitKey = false
+	v.RemapAwaitLabel = false
+	v.RemapLabelInput = ""
+	v.RemapCursor = clampIndex(v.RemapCursor, len(v.Store.Profiles[profileIdx].Bindings))
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *IRView) MoveRemap(delta int) {
+	p := v.Store.ActiveProfile()
+	if p == nil || len(p.Bindings) == 0 {
+		v.RemapCursor = 0
+		return
+	}
+	v.RemapCursor = (v.RemapCursor + delta + len(p.Bindings)) % len(p.Bindings)
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v IRView) SelectedRemapBinding() (ir.Binding, bool) {
+	p := v.Store.ActiveProfile()
+	if p == nil || v.RemapCursor < 0 || v.RemapCursor >= len(p.Bindings) {
+		return ir.Binding{}, false
+	}
+	return p.Bindings[v.RemapCursor], true
+}
+
+func (v *IRView) BeginRemapKey() bool {
+	if _, ok := v.SelectedRemapBinding(); !ok {
+		return false
+	}
+	v.RemapAwaitKey = true
+	v.RemapAwaitLabel = false
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *IRView) ConfirmRemapKey(key string) bool {
+	b, ok := v.SelectedRemapBinding()
+	if !ok {
+		v.RemapAwaitKey = false
+		return false
+	}
+	bk := ir.NormalizeBindKey(key)
+	if !ir.IsBindableKey(bk) {
+		return false
+	}
+	oldKey := b.Key
+	swapped, newIdx, ok := v.Store.RebindKey(v.Store.Active, v.RemapCursor, bk)
+	if !ok {
+		return false
+	}
+	v.RemapCursor = newIdx
+	v.RemapAwaitKey = false
+	if v.saveStore() == nil {
+		switch {
+		case oldKey == bk:
+			v.Note = "Kept " + ir.KeyLabel(bk) + " → " + b.Name
+		case swapped != "":
+			v.Note = "Swapped " + ir.KeyLabel(bk) + " ↔ " + ir.KeyLabel(oldKey)
+		default:
+			v.Note = "Mapped " + ir.KeyLabel(bk) + " → " + b.Name
+		}
+		v.NoteIsErr = false
+	}
+	return true
+}
+
+func (v *IRView) BeginRemapLabel() bool {
+	b, ok := v.SelectedRemapBinding()
+	if !ok {
+		return false
+	}
+	v.RemapAwaitLabel = true
+	v.RemapAwaitKey = false
+	v.RemapLabelInput = b.Name
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *IRView) ConfirmRemapLabel() bool {
+	b, ok := v.SelectedRemapBinding()
+	if !ok {
+		v.RemapAwaitLabel = false
+		return false
+	}
+	name := strings.TrimSpace(v.RemapLabelInput)
+	if name == "" {
+		name = b.Name
+	}
+	if !v.Store.RenameBinding(v.Store.Active, v.RemapCursor, name) {
+		v.RemapAwaitLabel = false
+		return false
+	}
+	v.RemapAwaitLabel = false
+	v.RemapLabelInput = ""
+	if v.saveStore() == nil {
+		v.Note = "Renamed → " + name
+		v.NoteIsErr = false
+	}
+	return true
+}
+
+func (v *IRView) DeleteRemapBinding() bool {
+	b, ok := v.SelectedRemapBinding()
+	if !ok {
+		return false
+	}
+	if !v.Store.DeleteBinding(v.Store.Active, b.Key) {
+		return false
+	}
+	p := v.Store.ActiveProfile()
+	if p == nil || len(p.Bindings) == 0 {
+		v.RemapCursor = 0
+	} else {
+		v.RemapCursor = clampIndex(v.RemapCursor, len(p.Bindings))
+	}
+	if v.saveStore() == nil {
+		v.Note = "Removed " + b.Name
+		v.NoteIsErr = false
+	}
+	return true
 }
 
 func (v *IRView) MoveRemoteList(delta int) {
@@ -945,6 +1091,26 @@ func (v *IRView) HandleTextKey(msg tea.KeyMsg) (handled bool) {
 		}
 		return true
 
+	case v.Tab == IRTabRemote && v.RemoteMode == remoteModeRemap && v.RemapAwaitLabel:
+		switch msg.Type {
+		case tea.KeyEnter:
+			v.ConfirmRemapLabel()
+			return true
+		case tea.KeyBackspace, tea.KeyDelete:
+			v.RemapLabelInput = dropLastRune(v.RemapLabelInput)
+			return true
+		case tea.KeyCtrlU:
+			v.RemapLabelInput = ""
+			return true
+		case tea.KeySpace:
+			v.RemapLabelInput += " "
+			return true
+		case tea.KeyRunes:
+			v.RemapLabelInput += string(msg.Runes)
+			return true
+		}
+		return true
+
 	case v.Tab == IRTabLearn && v.AwaitBindLabel:
 		switch msg.Type {
 		case tea.KeyEnter:
@@ -1213,6 +1379,27 @@ func (v IRView) BindingForKey(key string) (ir.Binding, bool) {
 func (v *IRView) HandleEsc() bool {
 	switch v.Tab {
 	case IRTabRemote:
+		if v.RemoteMode == remoteModeRemap {
+			if v.RemapAwaitLabel {
+				v.RemapAwaitLabel = false
+				v.RemapLabelInput = ""
+				return true
+			}
+			if v.RemapAwaitKey {
+				v.RemapAwaitKey = false
+				v.Note = ""
+				v.NoteIsErr = false
+				return true
+			}
+			v.Note = ""
+			v.NoteIsErr = false
+			if v.RemapReturn == remoteModeList && len(v.Store.Profiles) > 0 {
+				v.RemoteMode = remoteModeList
+			} else {
+				v.RemoteMode = remoteModeUse
+			}
+			return true
+		}
 		if v.RemoteMode == remoteModeNew {
 			v.NewRemoteName = ""
 			v.NewRemoteErr = ""
@@ -1363,20 +1550,144 @@ func (v IRView) renderNewRemote(w, h int, pal theme.Palette) []string {
 	fieldW := max(6, w-5)
 	lines = append(lines, " > "+txt.Render(tailWindow(v.NewRemoteName, fieldW-1)+"_"))
 	if v.NewRemoteErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.NewRemoteErr, max(6, w-2))))
+		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.NewRemoteErr, max(6, w-2))))
 	}
 	if h >= 5 {
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate("⏎:create  Esc:cancel", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:create  Esc:cancel", max(6, w-2))))
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v IRView) renderRemap(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	p := v.Store.ActiveProfile()
+	if p == nil {
+		return v.Marquee.SplitLinesPadded([]string{" " + muted.Render("No active remote")}, w, h)
+	}
+
+	if v.RemapAwaitLabel {
+		b, has := v.SelectedRemapBinding()
+		curName := ""
+		keyLbl := ""
+		if has {
+			curName = b.Name
+			keyLbl = ir.KeyLabel(b.Key)
+		}
+		lines := []string{
+			" " + accent.Render(v.Marquee.Truncate("Rename ["+keyLbl+"] · "+p.Name, max(6, w-2))),
+			" " + sec.Render(v.Marquee.Truncate("Name (Enter="+curName+"):", max(6, w-2))),
+		}
+		fieldW := max(6, w-5)
+		lines = append(lines, " > "+txt.Render(tailWindow(v.RemapLabelInput, fieldW-1)+"_"))
+		if h >= 5 {
+			for len(lines) < h-1 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:save  Esc:cancel", max(6, w-2))))
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	if v.RemapAwaitKey {
+		b, has := v.SelectedRemapBinding()
+		btnDesc := ""
+		if has {
+			btnDesc = b.Name + " [" + ir.KeyLabel(b.Key) + "]"
+		}
+		lines := []string{
+			" " + accent.Render(v.Marquee.Truncate("Remap: "+p.Name, max(6, w-2))),
+			" " + sec.Render("Btn ") + txt.Render(v.Marquee.Truncate(btnDesc, max(6, w-6))),
+		}
+		if h >= 7 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+warn.Render(v.Marquee.Truncate("Press new key to bind:", max(6, w-2))))
+		lines = append(lines, " "+txt.Render(v.Marquee.Truncate("1-9, 0, a-z, F1-F8, Enter, Bksp", max(6, w-2))))
+		if h >= 6 {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Swaps if key already used", max(6, w-2))))
+		}
+		if h >= 4 {
+			for len(lines) < h-1 {
+				lines = append(lines, "")
+			}
+			if v.Note != "" {
+				st := ok
+				if v.NoteIsErr {
+					st = danger
+				}
+				lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+			} else {
+				lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Esc:cancel", max(6, w-2))))
+			}
+			if len(lines) > h {
+				lines = append(lines[:h-1], lines[len(lines)-1])
+			}
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	counter := ScrollBadge(clampIndex(v.RemapCursor, len(p.Bindings)), len(p.Bindings))
+	titleW := max(6, w-len(counter)-3)
+	lines := []string{
+		" " + accent.Render(v.Marquee.FitLine("Remap: "+p.Name, titleW)) + " " + muted.Render(counter),
+	}
+	if len(p.Bindings) == 0 {
+		lines = append(lines, " "+muted.Render("No bindings in this remote"))
+		lines = append(lines, " "+txt.Render(v.Marquee.Truncate("Use Learn or Browse to add", max(6, w-2))))
+	} else {
+		listH := max(1, h-2)
+		cursor := clampIndex(v.RemapCursor, len(p.Bindings))
+		start, end := ScrollWindow(len(p.Bindings), cursor, listH)
+		nameW := max(6, w-10)
+		for i := start; i < end; i++ {
+			b := p.Bindings[i]
+			keyLbl := ir.KeyLabel(b.Key)
+			if i == cursor && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(keyLbl, 5), v.Marquee.Truncate(b.Name, nameW))
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if i == cursor {
+					pfx = accent.Render(" ▸ ")
+				}
+				lines = append(lines, pfx+sec.Render(FitLine(keyLbl, 5))+" "+txt.Render(v.Marquee.Truncate(b.Name, nameW)))
+			}
+		}
+	}
+	if h >= 3 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:sel ⏎:remap n:name t:try x:del", max(6, w-2))))
+		}
+	}
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string {
 	if v.RemoteMode == remoteModeNew {
 		return v.renderNewRemote(w, h, pal)
+	}
+	if v.RemoteMode == remoteModeRemap {
+		return v.renderRemap(w, h, pal, focused)
 	}
 
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
@@ -1419,7 +1730,7 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 			}
 			nameW := max(8, w-len(it.val)-5)
 			if selected && focused {
-				row := fmt.Sprintf("▸%s%s %s", mark, FitLine(it.name, nameW), it.val)
+				row := fmt.Sprintf("▸%s%s %s", mark, v.Marquee.FitLine(it.name, nameW), it.val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := " "
@@ -1434,7 +1745,7 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 				if it.isNew {
 					vSty = ok
 				}
-				lines = append(lines, pfx+mSty.Render(mark)+txt.Render(FitLine(it.name, nameW))+" "+vSty.Render(it.val))
+				lines = append(lines, pfx+mSty.Render(mark)+txt.Render(v.Marquee.FitLine(it.name, nameW))+" "+vSty.Render(it.val))
 			}
 		}
 		if h >= 3 {
@@ -1446,18 +1757,18 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 				if v.NoteIsErr {
 					st = danger
 				}
-				lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+				lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 			} else {
-				lines = append(lines, " "+muted.Render(Truncate("↑↓:sel ⏎:use l:learn x:del", max(6, w-2))))
+				lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:sel ⏎:use e:map l:learn x:del", max(6, w-2))))
 			}
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	if len(v.Store.Profiles) == 0 {
 		lines := []string{
 			" " + accent.Render("IR Remotes"),
-			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate(irHardwareLine(v), max(6, w-2))),
 		}
 		type emptyItem struct {
 			name string
@@ -1482,7 +1793,7 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 			selected := i == cursor
 			nameW := max(8, w-len(it.val)-5)
 			if selected && focused {
-				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
@@ -1493,7 +1804,7 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 				if it.ok {
 					vSty = ok
 				}
-				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), vSty.Render(it.val)))
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), vSty.Render(it.val)))
 			}
 		}
 		if h >= 4 {
@@ -1505,12 +1816,12 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 				if v.NoteIsErr {
 					st = danger
 				}
-				lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+				lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 			} else {
-				lines = append(lines, " "+muted.Render(Truncate("↑↓:sel  ⏎:open  Esc:tabs", max(6, w-2))))
+				lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:sel  ⏎:open  Esc:tabs", max(6, w-2))))
 			}
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	p := v.Store.ActiveProfile()
@@ -1521,11 +1832,11 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 		title += " · " + p.Source
 	}
 	lines := []string{
-		" " + accent.Render(FitLine(Truncate(title, titleW), titleW)) + " " + muted.Render(counter),
+		" " + accent.Render(v.Marquee.FitLine(title, titleW)) + " " + muted.Render(counter),
 	}
 	if len(p.Bindings) == 0 {
 		lines = append(lines, " "+muted.Render("No keys bound yet"))
-		lines = append(lines, " "+txt.Render(Truncate("Press ⏎ to learn keys", max(6, w-2))))
+		lines = append(lines, " "+txt.Render(v.Marquee.Truncate("Press ⏎ to learn keys", max(6, w-2))))
 	} else {
 		visible := max(1, h-2)
 		maxScroll := max(0, len(p.Bindings)-visible)
@@ -1533,7 +1844,7 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 		end := min(len(p.Bindings), sc+visible)
 		for _, b := range p.Bindings[sc:end] {
 			key := ir.KeyLabel(b.Key)
-			line := " " + sec.Render(FitLine(key, 6)) + txt.Render(Truncate(b.Name, max(6, w-9)))
+			line := " " + sec.Render(FitLine(key, 6)) + txt.Render(v.Marquee.Truncate(b.Name, max(6, w-9)))
 			lines = append(lines, line)
 		}
 	}
@@ -1546,12 +1857,12 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 			if v.NoteIsErr {
 				st = danger
 			}
-			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("key:send ←→:rem Tab:manage", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("key:send ←→:rem Tab:list =:remap", max(6, w-2))))
 		}
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string {
@@ -1584,18 +1895,18 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 	case v.Capturing:
 		lines = []string{
 			" " + accent.Render("IR Learn"),
-			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate(irHardwareLine(v), max(6, w-2))),
 			" " + warn.Render("Listening…"),
-			" " + muted.Render(Truncate(fmt.Sprintf("%ds / %ds", int(v.CaptureElapsed.Seconds()), 5), max(6, w-2))),
-			" " + txt.Render(Truncate("Point remote at receiver", max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate(fmt.Sprintf("%ds / %ds", int(v.CaptureElapsed.Seconds()), 5), max(6, w-2))),
+			" " + txt.Render(v.Marquee.Truncate("Point remote at receiver", max(6, w-2))),
 		}
 		hint = "Esc:cancel"
 
 	case v.AwaitBindLabel && v.Learned != nil:
 		defLbl := "Key " + ir.KeyLabel(v.PendingBindKey)
 		lines = []string{
-			" " + accent.Render(Truncate("Bind ["+ir.KeyLabel(v.PendingBindKey)+"] → "+profName, max(6, w-2))),
-			" " + sec.Render(Truncate("Label (Enter="+defLbl+"):", max(6, w-2))),
+			" " + accent.Render(v.Marquee.Truncate("Bind ["+ir.KeyLabel(v.PendingBindKey)+"] → "+profName, max(6, w-2))),
+			" " + sec.Render(v.Marquee.Truncate("Label (Enter="+defLbl+"):", max(6, w-2))),
 		}
 		fieldW := max(6, w-5)
 		lines = append(lines, " > "+txt.Render(tailWindow(v.PendingBindName, fieldW-1)+"_"))
@@ -1604,20 +1915,20 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 	case v.AwaitKeyPress && v.Learned != nil:
 		sig := v.Learned
 		lines = []string{
-			" " + accent.Render(Truncate("Bind → "+profName, max(6, w-2))),
-			" " + muted.Render(Truncate(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency), max(6, w-2))),
+			" " + accent.Render(v.Marquee.Truncate("Bind → "+profName, max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency), max(6, w-2))),
 		}
 		if h >= 7 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+warn.Render(Truncate("Press any key to bind:", max(6, w-2))))
-		lines = append(lines, " "+txt.Render(Truncate("a-z, 0-9, F1-F8, Enter, Bksp", max(6, w-2))))
+		lines = append(lines, " "+warn.Render(v.Marquee.Truncate("Press any key to bind:", max(6, w-2))))
+		lines = append(lines, " "+txt.Render(v.Marquee.Truncate("a-z, 0-9, F1-F8, Enter, Bksp", max(6, w-2))))
 		hint = "Esc:back"
 
 	case v.AwaitBinding && v.Learned != nil:
 		sig := v.Learned
 		lines = []string{
-			" " + ok.Render(Truncate(fmt.Sprintf("Captured! %dt · %dHz", len(sig.Timings), sig.Frequency), max(6, w-2))),
+			" " + ok.Render(v.Marquee.Truncate(fmt.Sprintf("Captured! %dt · %dHz", len(sig.Timings), sig.Frequency), max(6, w-2))),
 		}
 		type capItem struct {
 			name string
@@ -1642,7 +1953,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 			selected := i == cursor
 			nameW := max(8, w-len([]rune(it.val))-5)
 			if selected && focused {
-				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
@@ -1653,7 +1964,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 				if it.ok {
 					valStyle = ok
 				}
-				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), valStyle.Render(it.val)))
 			}
 		}
 		hint = "↑↓:sel  ⏎:run  Esc:discard"
@@ -1661,7 +1972,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 	default:
 		lines = []string{
 			" " + accent.Render("IR Learn"),
-			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate(irHardwareLine(v), max(6, w-2))),
 		}
 		profVal := fmt.Sprintf("%dk", keyCount)
 		if len(v.Store.Profiles) > 1 {
@@ -1682,7 +1993,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 			selected := i == cursor
 			nameW := max(8, w-len([]rune(it.val))-5)
 			if selected && focused {
-				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
@@ -1693,11 +2004,11 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 				if it.ok {
 					valStyle = ok
 				}
-				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), valStyle.Render(it.val)))
 			}
 		}
 		if v.HW.RXPath == "" && v.HW.Err != "" {
-			lines = append(lines, " "+danger.Render(Truncate(v.HW.Err, max(6, w-2))))
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.HW.Err, max(6, w-2))))
 		}
 		hint = "↑↓:sel  ⏎:run  Esc:tabs"
 	}
@@ -1708,15 +2019,15 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 		}
 		switch {
 		case v.LearnErr != "":
-			lines = append(lines, " "+danger.Render(Truncate(v.LearnErr, max(6, w-2))))
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.LearnErr, max(6, w-2))))
 		case v.Note != "":
 			st := ok
 			if v.NoteIsErr {
 				st = danger
 			}
-			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 		default:
-			lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 		}
 		// Keep within exact height if error/note pushed lines over h.
 		if len(lines) > h {
@@ -1724,7 +2035,7 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 		}
 	}
 	_ = sec
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string {
@@ -1752,15 +2063,15 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 			" " + accent.Render(title),
 			" " + warn.Render("Indexing databases…"),
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if v.IndexErr != "" {
 		lines := []string{
 			" " + accent.Render("IR Browse"),
-			" " + danger.Render(Truncate(v.IndexErr, max(6, w-2))),
-			" " + muted.Render(Truncate("Set CZHAX_IR_FLIPPER / CZHAX_IR_MI", max(6, w-2))),
+			" " + danger.Render(v.Marquee.Truncate(v.IndexErr, max(6, w-2))),
+			" " + muted.Render(v.Marquee.Truncate("Set CZHAX_IR_FLIPPER / CZHAX_IR_MI", max(6, w-2))),
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if len(v.Index) == 0 && !v.RemoteLoading && v.RemoteErr == "" {
 		lines := []string{
@@ -1769,7 +2080,7 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 			" " + muted.Render("Set CZHAX_IR_FLIPPER or CZHAX_IR_MI"),
 			" " + muted.Render("or use Learn to copy a remote"),
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	switch v.BrowseMode {
@@ -1791,15 +2102,15 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 	}
 	titleW := max(6, w-len(countStr)-3)
 	lines := []string{
-		" " + accent.Render(FitLine("IR Browse", titleW)) + " " + muted.Render(countStr),
+		" " + accent.Render(v.Marquee.FitLine("IR Browse", titleW)) + " " + muted.Render(countStr),
 	}
 	if v.RemoteLoading {
 		lines = append(lines, " "+warn.Render("Loading remote…"))
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if v.RemoteErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.RemoteErr, max(6, w-2))))
-		return SplitLinesPadded(lines, w, h)
+		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.RemoteErr, max(6, w-2))))
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	switch {
@@ -1807,9 +2118,9 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		fieldW := max(6, w-8)
 		lines = append(lines, " "+sec.Render("Find: ")+txt.Render(tailWindow(v.BrowseQuery, fieldW-1)+"_"))
 	case v.BrowseQuery != "":
-		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 8))+sec.Render("Find ")+warn.Render(Truncate(v.BrowseQuery, max(4, w-19))))
+		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 8))+sec.Render("Find ")+warn.Render(v.Marquee.Truncate(v.BrowseQuery, max(4, w-19))))
 	default:
-		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 9))+sec.Render("Type ")+txt.Render(Truncate(v.CategoryLabel(), max(4, w-19))))
+		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 9))+sec.Render("Type ")+txt.Render(v.Marquee.Truncate(v.CategoryLabel(), max(4, w-19))))
 	}
 	showModeStrip := !v.BrowseSearching && v.BrowseQuery == "" && h >= 6
 	if showModeStrip {
@@ -1821,11 +2132,11 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 			lines = append(lines, "")
 		}
 		if v.BrowseSearching {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:done  Esc:clear", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:done  Esc:clear", max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("←→:type p:src /:find Esc:clear", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("←→:type p:src /:find Esc:clear", max(6, w-2))))
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	reserved := 3
 	if showModeStrip {
@@ -1839,22 +2150,22 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		if e.Provider == "mi" {
 			mark = "M"
 		}
-		row := fmt.Sprintf("▸%s %s", mark, Truncate(e.Display(), max(6, w-6)))
 		if i == v.BrowseCursor && focused {
+			row := fmt.Sprintf("▸%s %s", mark, v.Marquee.Truncate(e.Display(), max(6, w-4)))
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
-			lines = append(lines, " "+muted.Render(mark)+" "+txt.Render(Truncate(e.Display(), max(6, w-4))))
+			lines = append(lines, " "+muted.Render(mark)+" "+txt.Render(v.Marquee.Truncate(e.Display(), max(6, w-4))))
 		}
 	}
 	for len(lines) < h-1 {
 		lines = append(lines, "")
 	}
 	if v.BrowseSearching {
-		lines = append(lines, " "+muted.Render(Truncate("⏎:done  Esc:clear", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:done  Esc:clear", max(6, w-2))))
 	} else {
-		lines = append(lines, " "+muted.Render(Truncate("↑↓:sel m:match u:univ ⏎:open", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:sel m:match u:univ ⏎:open", max(6, w-2))))
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderTypePicker(w, h int, pal theme.Palette, focused bool, title, hint string) []string {
@@ -1866,7 +2177,7 @@ func (v IRView) renderTypePicker(w, h int, pal theme.Palette, focused bool, titl
 	countStr := fmt.Sprintf("%d", len(v.CategoryStats))
 	titleW := max(6, w-len(countStr)-3)
 	lines := []string{
-		" " + accent.Render(FitLine(Truncate(title, titleW), titleW)) + " " + muted.Render(countStr),
+		" " + accent.Render(v.Marquee.FitLine(title, titleW)) + " " + muted.Render(countStr),
 	}
 	if len(v.CategoryStats) == 0 {
 		lines = append(lines, " "+muted.Render("No device types available"))
@@ -1879,14 +2190,14 @@ func (v IRView) renderTypePicker(w, h int, pal theme.Palette, focused bool, titl
 			val := fmt.Sprintf("%d", cat.Count)
 			nameW := max(8, w-len(val)-5)
 			if i == cursor && focused {
-				row := fmt.Sprintf(" ▸ %s %s", FitLine(cat.Name, nameW), val)
+				row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(cat.Name, nameW), val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
 				if i == cursor {
 					pfx = accent.Render(" ▸ ")
 				}
-				lines = append(lines, pfx+txt.Render(FitLine(cat.Name, nameW))+" "+muted.Render(val))
+				lines = append(lines, pfx+txt.Render(v.Marquee.FitLine(cat.Name, nameW))+" "+muted.Render(val))
 			}
 		}
 	}
@@ -1894,9 +2205,9 @@ func (v IRView) renderTypePicker(w, h int, pal theme.Palette, focused bool, titl
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderMatchBrand(w, h int, pal theme.Palette, focused bool) []string {
@@ -1911,16 +2222,16 @@ func (v IRView) renderMatchBrand(w, h int, pal theme.Palette, focused bool) []st
 	countStr := fmt.Sprintf("%d", len(v.MatchBrands))
 	titleW := max(6, w-len(countStr)-3)
 	lines := []string{
-		" " + accent.Render(FitLine(Truncate("Match: "+v.MatchCategory, titleW), titleW)) + " " + muted.Render(countStr),
+		" " + accent.Render(v.Marquee.FitLine("Match: "+v.MatchCategory, titleW)) + " " + muted.Render(countStr),
 	}
 	switch {
 	case v.MatchBrandSearching:
 		fieldW := max(6, w-8)
 		lines = append(lines, " "+sec.Render("Find: ")+txt.Render(tailWindow(v.MatchBrandQuery, fieldW-1)+"_"))
 	case v.MatchBrandQuery != "":
-		lines = append(lines, " "+sec.Render("Find: ")+warn.Render(Truncate(v.MatchBrandQuery, max(6, w-8))))
+		lines = append(lines, " "+sec.Render("Find: ")+warn.Render(v.Marquee.Truncate(v.MatchBrandQuery, max(6, w-8))))
 	default:
-		lines = append(lines, " "+muted.Render(Truncate("/:find  [/]:A-Z  ⏎:test", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("/:find  [/]:A-Z  ⏎:test", max(6, w-2))))
 	}
 
 	if len(v.MatchBrands) == 0 {
@@ -1934,14 +2245,14 @@ func (v IRView) renderMatchBrand(w, h int, pal theme.Palette, focused bool) []st
 			val := fmt.Sprintf("%d", b.Count)
 			nameW := max(8, w-len(val)-5)
 			if i == cursor && focused {
-				row := fmt.Sprintf(" ▸ %s %s", FitLine(b.Name, nameW), val)
+				row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(b.Name, nameW), val)
 				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 			} else {
 				pfx := "   "
 				if i == cursor {
 					pfx = accent.Render(" ▸ ")
 				}
-				lines = append(lines, pfx+txt.Render(FitLine(b.Name, nameW))+" "+muted.Render(val))
+				lines = append(lines, pfx+txt.Render(v.Marquee.FitLine(b.Name, nameW))+" "+muted.Render(val))
 			}
 		}
 	}
@@ -1954,12 +2265,12 @@ func (v IRView) renderMatchBrand(w, h int, pal theme.Palette, focused bool) []st
 			hint = "⏎:done  Esc:clear"
 		}
 		if v.MatchErr != "" {
-			lines = append(lines, " "+danger.Render(Truncate(v.MatchErr, max(6, w-2))))
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.MatchErr, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 		}
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []string {
@@ -1975,17 +2286,17 @@ func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []str
 	header := v.MatchCategory + " · " + v.MatchBrand
 	if v.MatchLoading {
 		lines := []string{
-			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
+			" " + accent.Render(v.Marquee.Truncate("Match: "+header, max(6, w-2))),
 			" " + warn.Render("Loading Power codes…"),
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if v.MatchSaving {
 		lines := []string{
-			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
+			" " + accent.Render(v.Marquee.Truncate("Match: "+header, max(6, w-2))),
 			" " + warn.Render("Saving full remote…"),
 		}
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if len(v.MatchCandidates) == 0 {
 		errTxt := v.MatchErr
@@ -1993,14 +2304,14 @@ func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []str
 			errTxt = "No Power candidates found"
 		}
 		lines := []string{
-			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
-			" " + danger.Render(Truncate(errTxt, max(6, w-2))),
+			" " + accent.Render(v.Marquee.Truncate("Match: "+header, max(6, w-2))),
+			" " + danger.Render(v.Marquee.Truncate(errTxt, max(6, w-2))),
 		}
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate("Esc:back", max(6, w-2))))
-		return SplitLinesPadded(lines, w, h)
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Esc:back", max(6, w-2))))
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	cand := v.MatchCandidates[v.MatchCursor]
@@ -2011,19 +2322,19 @@ func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []str
 		proto = "raw"
 	}
 	lines := []string{
-		" " + accent.Render(FitLine(Truncate(header, titleW), titleW)) + " " + muted.Render(counter),
-		" " + sec.Render("Model ") + txt.Render(Truncate(cand.Entry.Model+" ("+cand.Entry.Provider+")", max(6, w-8))),
+		" " + accent.Render(v.Marquee.FitLine(header, titleW)) + " " + muted.Render(counter),
+		" " + sec.Render("Model ") + txt.Render(v.Marquee.Truncate(cand.Entry.Model+" ("+cand.Entry.Provider+")", max(6, w-8))),
 	}
 	if v.Note != "" {
 		st := ok
 		if v.NoteIsErr {
 			st = danger
 		}
-		lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 	} else if v.MatchErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.MatchErr, max(6, w-2))))
+		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.MatchErr, max(6, w-2))))
 	} else {
-		lines = append(lines, " "+muted.Render(Truncate(fmt.Sprintf("%s · %dt · %dHz (%dk)", proto, len(cand.Signal.Timings), cand.Signal.Frequency, cand.SignalCount), max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(fmt.Sprintf("%s · %dt · %dHz (%dk)", proto, len(cand.Signal.Timings), cand.Signal.Frequency, cand.SignalCount), max(6, w-2))))
 	}
 
 	type actItem struct {
@@ -2044,7 +2355,7 @@ func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []str
 		it := items[i]
 		nameW := max(8, w-len([]rune(it.val))-5)
 		if i == cursor && focused {
-			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+			row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			pfx := "   "
@@ -2055,19 +2366,19 @@ func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []str
 			if it.ok {
 				vSty = ok
 			}
-			lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), vSty.Render(it.val)))
+			lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), vSty.Render(it.val)))
 		}
 	}
 	if h >= 4 {
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate("⏎:run ←→:step p:try y:save", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:run ←→:step p:try y:save", max(6, w-2))))
 		if len(lines) > h {
 			lines = append(lines[:h-1], lines[len(lines)-1])
 		}
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []string {
@@ -2103,26 +2414,26 @@ func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []st
 			sigLine = "Preparing IR transmitter…"
 		}
 		lines := []string{
-			" " + accent.Render(FitLine(Truncate("Univ: "+v.UnivCategory, titleW), titleW)) + " " + warn.Render(badge),
-			" " + sec.Render("Btn ") + txt.Render(Truncate(v.univTargetLabel(v.UnivBlastTarget), max(6, w-6))),
+			" " + accent.Render(v.Marquee.FitLine("Univ: "+v.UnivCategory, titleW)) + " " + warn.Render(badge),
+			" " + sec.Render("Btn ") + txt.Render(v.Marquee.Truncate(v.univTargetLabel(v.UnivBlastTarget), max(6, w-6))),
 			" " + accent.Render(MiniBar(ratio, barW, v.ASCII)) + " " + muted.Render(count),
-			" " + sec.Render("Try ") + txt.Render(Truncate(curName, max(6, w-6))),
-			" " + muted.Render(Truncate(sigLine, max(6, w-2))),
+			" " + sec.Render("Try ") + txt.Render(v.Marquee.Truncate(curName, max(6, w-6))),
+			" " + muted.Render(v.Marquee.Truncate(sigLine, max(6, w-2))),
 		}
 		if h >= 7 {
-			lines = append(lines, " "+txt.Render(Truncate("Point IR at device", max(6, w-2))))
+			lines = append(lines, " "+txt.Render(v.Marquee.Truncate("Point IR at device", max(6, w-2))))
 		}
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+warn.Render(Truncate("Esc / Space: STOP", max(6, w-2))))
-		return SplitLinesPadded(lines, w, h)
+		lines = append(lines, " "+warn.Render(v.Marquee.Truncate("Esc / Space: STOP", max(6, w-2))))
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	badge := "TEMP"
 	titleW := max(6, w-len(badge)-3)
 	lines := []string{
-		" " + accent.Render(FitLine(Truncate("Univ: "+v.UnivCategory, titleW), titleW)) + " " + muted.Render(badge),
+		" " + accent.Render(v.Marquee.FitLine("Univ: "+v.UnivCategory, titleW)) + " " + muted.Render(badge),
 	}
 	hasStatus := v.UnivBlastErr != "" || v.Note != ""
 	reserved := 2
@@ -2136,14 +2447,14 @@ func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []st
 		b := v.UnivButtons[i]
 		keyLbl := ir.KeyLabel(b.Key)
 		if i == cursor && focused {
-			row := fmt.Sprintf(" ▸ %s %s", FitLine(keyLbl, 5), b.Label)
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(keyLbl, 5), v.Marquee.Truncate(b.Label, max(6, w-10)))
 			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
 		} else {
 			pfx := "   "
 			if i == cursor {
 				pfx = accent.Render(" ▸ ")
 			}
-			lines = append(lines, pfx+sec.Render(FitLine(keyLbl, 5))+" "+txt.Render(Truncate(b.Label, max(6, w-10))))
+			lines = append(lines, pfx+sec.Render(FitLine(keyLbl, 5))+" "+txt.Render(v.Marquee.Truncate(b.Label, max(6, w-10))))
 		}
 	}
 	if h >= 3 {
@@ -2152,21 +2463,21 @@ func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []st
 		}
 		switch {
 		case v.UnivBlastErr != "":
-			lines = append(lines, " "+danger.Render(Truncate(v.UnivBlastErr, max(6, w-2))))
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.UnivBlastErr, max(6, w-2))))
 		case v.Note != "":
 			st := ok
 			if v.NoteIsErr {
 				st = danger
 			}
-			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 		default:
-			lines = append(lines, " "+muted.Render(Truncate("key/⏎:blast ↑↓:sel Esc:back", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("key/⏎:blast ↑↓:sel Esc:back", max(6, w-2))))
 		}
 		if len(lines) > h {
 			lines = append(lines[:h-1], lines[len(lines)-1])
 		}
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
 func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []string {
@@ -2186,19 +2497,19 @@ func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []
 		title = r.Name
 	}
 	lines := []string{
-		" " + accent.Render(Truncate(title, max(6, w-2))),
+		" " + accent.Render(v.Marquee.Truncate(title, max(6, w-2))),
 	}
 	if v.RemoteLoading {
 		lines = append(lines, " "+warn.Render("Loading remote…"))
-		return SplitLinesPadded(lines, w, h)
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 	if v.RemoteErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.RemoteErr, max(6, w-2))))
-		return SplitLinesPadded(lines, w, h)
+		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.RemoteErr, max(6, w-2))))
+		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
 	if v.GridMode {
-		lines = append(lines, " "+sec.Render("Grid ")+muted.Render("press a key to send / next"))
+		lines = append(lines, " "+sec.Render("Grid ")+muted.Render(v.Marquee.Truncate("press a key to send / next", max(6, w-7))))
 		visible := max(1, h-3)
 		for i, b := range v.GridButtons {
 			if i >= visible {
@@ -2212,7 +2523,7 @@ func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []
 				idx = idx % len(b.Signals)
 			}
 			count := fmt.Sprintf("%d/%d", idx+1, len(b.Signals))
-			row := " " + sec.Render(FitLine(ir.KeyLabel(b.Key), 5)) + txt.Render(FitLine(b.Name, max(5, w-15))) + muted.Render(count)
+			row := " " + sec.Render(FitLine(ir.KeyLabel(b.Key), 5)) + txt.Render(v.Marquee.FitLine(b.Name, max(5, w-15))) + muted.Render(count)
 			lines = append(lines, row)
 		}
 	} else {
@@ -2236,8 +2547,8 @@ func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []
 			if sig.Comment != "" {
 				desc += " · " + sig.Comment
 			}
-			lines = append(lines, " "+txt.Render(Truncate(desc, max(6, w-2))))
-			lines = append(lines, " "+muted.Render(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency)))
+			lines = append(lines, " "+txt.Render(v.Marquee.Truncate(desc, max(6, w-2))))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency), max(6, w-2))))
 		} else {
 			lines = append(lines, " "+danger.Render("No candidate signals"))
 		}
@@ -2247,7 +2558,7 @@ func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []
 		if v.NoteIsErr {
 			st = danger
 		}
-		lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
 	}
 	if h >= 4 {
 		for len(lines) < h-1 {
@@ -2257,7 +2568,7 @@ func (v IRView) renderRemoteDetail(w, h int, pal theme.Palette, focused bool) []
 		if v.GridMode {
 			hint = "key:send/next a:accept g:probe Esc:back"
 		}
-		lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 	}
-	return SplitLinesPadded(lines, w, h)
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }

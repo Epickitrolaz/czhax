@@ -239,12 +239,81 @@ func TestNormalizeTimings(t *testing.T) {
 	if len(got) != 3 || got[2] != 560 {
 		t.Fatalf("normalizeTimings odd = %v", got)
 	}
-	got = normalizeTimings([]int{9000, 900000, 560})
-	if got[1] != maxDurationUS {
-		t.Fatalf("normalizeTimings clamp = %v", got)
+	// Cumulative duration cap (Linux IR_MAX_DURATION = 500000 us): keeps repeats
+	// that fit within 500ms and ends on an odd pulse.
+	got = normalizeTimings([]int{9000, 4500, 560, 95000, 9000, 2250, 560, 400000, 9000, 2250, 560})
+	if len(got) != 7 {
+		t.Fatalf("normalizeTimings cumulative trim len = %d (%v)", len(got), got)
+	}
+	sum := 0
+	for _, d := range got {
+		sum += d
+	}
+	if sum > maxDurationUS {
+		t.Fatalf("normalizeTimings cumulative sum = %d > %d", sum, maxDurationUS)
 	}
 	if err := (Signal{Timings: []int{9000, 4500, 560, 560}}).Validate(); err == nil {
 		t.Fatal("expected Validate() to reject even timing count")
+	}
+	if err := (Signal{Timings: []int{9000, 495000, 560}}).Validate(); err == nil {
+		t.Fatal("expected Validate() to reject cumulative duration > maxDurationUS")
+	}
+}
+
+func TestStoreRebindAndRename(t *testing.T) {
+	s := NewStore()
+	pwr, _ := EncodeProtocol("NEC", 0x08, 0x05)
+	pwr.Name = "Power"
+	okSig, _ := EncodeProtocol("NEC", 0x08, 0x06)
+	okSig.Name = "OK"
+	oneSig, _ := EncodeProtocol("NEC", 0x08, 0x07)
+	oneSig.Name = "1"
+
+	prof := BindSignals("My TV", "flipper", "TV", "Acme", "X1", []Signal{pwr, okSig, oneSig})
+	s.AddProfile(prof)
+
+	// Remap OK (currently on enter) to free key 'k'.
+	okIdx := -1
+	for i, b := range s.Profiles[0].Bindings {
+		if b.Name == "OK" {
+			okIdx = i
+		}
+	}
+	if okIdx < 0 {
+		t.Fatal("missing OK binding")
+	}
+	swapped, newIdx, ok := s.RebindKey(0, okIdx, "K")
+	if !ok || swapped != "" || s.Profiles[0].Bindings[newIdx].Key != "k" {
+		t.Fatalf("RebindKey(OK->K) = swapped=%q newIdx=%d ok=%v bindings=%+v", swapped, newIdx, ok, s.Profiles[0].Bindings)
+	}
+
+	// Remap button "1" to occupied key '1' (Power) -> swaps keys cleanly.
+	oneIdx := -1
+	oldOneKey := ""
+	for i, b := range s.Profiles[0].Bindings {
+		if b.Name == "1" {
+			oneIdx = i
+			oldOneKey = b.Key
+		}
+	}
+	swapped, newIdx, ok = s.RebindKey(0, oneIdx, "1")
+	if !ok || swapped != "Power" || s.Profiles[0].Bindings[newIdx].Key != "1" || s.Profiles[0].Bindings[newIdx].Name != "1" {
+		t.Fatalf("RebindKey(1->1 swap) = swapped=%q newIdx=%d ok=%v bindings=%+v", swapped, newIdx, ok, s.Profiles[0].Bindings)
+	}
+	// Power should now live on oldOneKey rather than being deleted.
+	foundPower := false
+	for _, b := range s.Profiles[0].Bindings {
+		if b.Name == "Power" && b.Key == oldOneKey {
+			foundPower = true
+		}
+	}
+	if !foundPower {
+		t.Fatalf("expected Power swapped to key %q, got %+v", oldOneKey, s.Profiles[0].Bindings)
+	}
+
+	// Rename binding
+	if !s.RenameBinding(0, newIdx, "Ch 1") || s.Profiles[0].Bindings[newIdx].Name != "Ch 1" {
+		t.Fatalf("RenameBinding failed: %+v", s.Profiles[0].Bindings[newIdx])
 	}
 }
 
