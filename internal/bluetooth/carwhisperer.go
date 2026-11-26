@@ -71,7 +71,10 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if err := prepareCarwhispererAdapter(hciName); err != nil {
 		emit("Adapter warning: %v", err)
 	}
-	channel, svc := discoverRFCOMMChannel(address)
+	channel, svc, sdpErr := discoverRFCOMMChannel(address)
+	if sdpErr != "" {
+		emit("SDP: %s", sdpErr)
+	}
 	if svc != "" {
 		emit("SDP: %s on RFCOMM channel %d", svc, channel)
 	} else {
@@ -110,21 +113,44 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	}
 
 	rfd, err := openRFCOMM(addr, channel)
-	if err != nil && errors.Is(err, unix.EACCES) {
-		// Dual-mode/consumer devices sometimes reject RFCOMM while another
-		// profile is connected or until they are bonded. Only take these
-		// disruptive steps after a real permission failure.
-		emit("RFCOMM permission denied; disconnecting and trying to pair %s...", NormalizeAddr(address))
+	if err != nil && (errors.Is(err, unix.EACCES) || errors.Is(err, unix.ECONNREFUSED)) {
+		// A refused RFCOMM channel is often an unpaired device or an SDP
+		// lookup that failed for the same reason. Pair, re-read SDP, retry.
+		emit("RFCOMM channel %d failed (%v); disconnecting and trying to pair %s...", channel, err, NormalizeAddr(address))
 		disconnectForCW(address, emit)
 		pairCarwhispererDevice(hciName, address, emit)
+		if ch, svc2, perr := discoverRFCOMMChannel(address); ch > 0 {
+			channel = ch
+			svc = svc2
+			if svc2 != "" {
+				emit("SDP after pairing: %s on RFCOMM channel %d", svc2, channel)
+			}
+		} else if perr != "" {
+			emit("SDP after pairing: %s", perr)
+		}
 		rfd, err = openRFCOMM(addr, channel)
+	}
+	if err != nil && svc == "" {
+		// SDP gave us nothing. A few headsets expose HFP on a non-standard
+		// channel; try a small range before giving up.
+		for ch := 2; ch <= 5; ch++ {
+			emit("Trying RFCOMM channel %d...", ch)
+			if rfd, err = openRFCOMM(addr, ch); err == nil {
+				channel = ch
+				break
+			}
+		}
 	}
 	if err != nil {
 		info := bluetoothInfo(address)
 		if info != "" {
 			emit("Device info: %s", info)
 		}
-		return fmt.Errorf("connect RFCOMM channel %d: %w (check the adapter is powered and the device is paired; CZHax needs root)", channel, err)
+		hint := "check the adapter is powered and the device is paired; CZHax needs root"
+		if svc == "" {
+			hint = "no hands-free (HFP/HSP) service was found; the device may be A2DP-only"
+		}
+		return fmt.Errorf("connect RFCOMM channel %d: %w (%s)", channel, err, hint)
 	}
 	defer unix.Close(rfd)
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
@@ -173,19 +199,35 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	return nil
 }
 
-func discoverRFCOMMChannel(address string) (int, string) {
+func discoverRFCOMMChannel(address string) (int, string, string) {
 	if _, err := exec.LookPath("sdptool"); err != nil {
-		return 1, ""
+		return 1, "", "sdptool not installed (install bluez-deprecated-tools)"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "sdptool", "browse", NormalizeAddr(address)).CombinedOutput()
-	if err != nil && strings.TrimSpace(string(out)) == "" {
-		return 1, ""
+	text := string(out)
+	lowText := strings.ToLower(text)
+	if strings.Contains(lowText, "failed to connect to sdp server") ||
+		strings.Contains(lowText, "permission denied") {
+		msg := ""
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) != "" {
+				msg = strings.TrimSpace(line)
+				break
+			}
+		}
+		if msg == "" {
+			msg = "SDP lookup failed"
+		}
+		return 1, "", msg
+	}
+	if err != nil && strings.TrimSpace(text) == "" {
+		return 1, "", err.Error()
 	}
 	service := ""
 	hfp := false
-	for _, raw := range strings.Split(string(out), "\n") {
+	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "Service Name:") {
 			service = strings.TrimSpace(strings.TrimPrefix(line, "Service Name:"))
@@ -201,11 +243,11 @@ func discoverRFCOMMChannel(address string) (int, string) {
 		if hfp && strings.HasPrefix(low, "channel:") {
 			v := strings.TrimSpace(strings.TrimPrefix(low, "channel:"))
 			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 30 {
-				return n, service
+				return n, service, ""
 			}
 		}
 	}
-	return 1, ""
+	return 1, "", ""
 }
 
 func disconnectForCW(address string, emit func(string, ...any)) {
