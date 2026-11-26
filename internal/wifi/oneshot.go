@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/czhax/czhax/internal/oneshot"
 )
 
 // OneShotDefaultAttack is the default OneShot-Extended argument set:
@@ -187,52 +188,63 @@ type OneShot struct {
 	Script   string
 	VulnList string
 	Err      string
+	Embedded bool
 }
 
 // Found reports whether the ose.py entrypoint was located.
 func (o OneShot) Found() bool { return strings.TrimSpace(o.Script) != "" }
 
-// FindOneShot locates OneShot-Extended. preferred may be a repo directory, a
-// path to ose.py, or empty for auto-detection.
+// FindOneShot resolves OneShot-Extended. An explicit directory (config
+// oneshot_dir or CZHAX_ONESHOT_DIR) overrides the copy embedded in CZHax.
 func FindOneShot(preferred string) OneShot {
-	o := OneShot{}
 	preferred = strings.TrimSpace(preferred)
 	if preferred == "" {
 		preferred = strings.TrimSpace(os.Getenv("CZHAX_ONESHOT_DIR"))
 	}
 	if preferred != "" {
-		o = oneShotFromPath(preferred)
-		if o.Found() {
+		if o := oneShotFromPath(preferred); o.Found() {
 			return o.finish()
 		}
+		return OneShot{Err: "OneShot-Extended not found at " + preferred + " (unset oneshot_dir to use the embedded copy)"}
 	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, "OneShot-Extended"),
-		filepath.Join(home, "oneshot-extended"),
-		filepath.Join(home, "OneShot"),
-		filepath.Join(home, "tools", "OneShot-Extended"),
-		"/opt/OneShot-Extended",
-		"/opt/oneshot-extended",
-		"/usr/local/share/OneShot-Extended",
-		"/usr/local/share/oneshot-extended",
-		"/usr/share/oneshot-extended",
-	}
-	for _, c := range candidates {
-		if c == "" {
-			continue
+
+	// Default: the pinned upstream tree baked into the binary.
+	if src, err := oneshot.Extract(); err == nil {
+		return OneShot{
+			Dir:      src.Dir,
+			Script:   src.Script,
+			VulnList: src.VulnList,
+			Embedded: true,
 		}
-		if found := oneShotFromPath(c); found.Found() {
-			return found.finish()
+	} else {
+		extractErr := err
+		// Fall back to a system/library copy if extraction is impossible
+		// (for example a read-only home directory).
+		home, _ := os.UserHomeDir()
+		candidates := []string{
+			filepath.Join(home, "OneShot-Extended"),
+			filepath.Join(home, "oneshot-extended"),
+			filepath.Join(home, "OneShot"),
+			filepath.Join(home, "tools", "OneShot-Extended"),
+			"/opt/OneShot-Extended",
+			"/opt/oneshot-extended",
+			"/usr/local/share/OneShot-Extended",
+			"/usr/local/share/oneshot-extended",
+			"/usr/share/oneshot-extended",
 		}
+		for _, c := range candidates {
+			if c == "" {
+				continue
+			}
+			if found := oneShotFromPath(c); found.Found() {
+				return found.finish()
+			}
+		}
+		if p, err := exec.LookPath("ose.py"); err == nil {
+			return OneShot{Dir: filepath.Dir(p), Script: p}.finish()
+		}
+		return OneShot{Err: "embedded OneShot-Extended unavailable (" + extractErr.Error() + ")"}
 	}
-	if p, err := exec.LookPath("ose.py"); err == nil {
-		o.Script = p
-		o.Dir = filepath.Dir(p)
-		return o.finish()
-	}
-	o.Err = "OneShot-Extended not found (clone it and set oneshot_dir in config.json or CZHAX_ONESHOT_DIR)"
-	return o
 }
 
 func oneShotFromPath(path string) OneShot {
@@ -256,6 +268,9 @@ func (o OneShot) finish() OneShot {
 	}
 	return o
 }
+
+// EmbeddedOneShotCommit reports the pinned upstream snapshot baked into CZHax.
+func EmbeddedOneShotCommit() string { return oneshot.ShortCommit() }
 
 // DefaultVulnListPath locates OneShot's vulnwsc.txt vulnerable device list.
 func DefaultVulnListPath(oneShotDir string) string {
@@ -314,21 +329,57 @@ func RunOneShot(ctx context.Context, o OneShot, iface, bssid string, attackArgs 
 		}
 		return errors.New("OneShot-Extended not found")
 	}
-	args := []string{o.Script, "-i", iface, "-b", bssid}
-	args = append(args, attackArgs...)
-	if strings.TrimSpace(o.VulnList) != "" {
-		args = append(args, "--vuln-list", o.VulnList)
-	}
-	bin := "python3"
-	if _, err := exec.LookPath(bin); err != nil {
-		bin = "python"
-	}
-	if os.Geteuid() != 0 {
-		args = append([]string{"-n", bin}, args...)
-		bin = "sudo"
+
+	var bin string
+	var args []string
+	workDir := ""
+
+	if o.Embedded {
+		// Execute via the privileged helper, which re-extracts the embedded
+		// snapshot into a root-owned private directory. This keeps sudo from
+		// running Python files from a user-writable cache.
+		exe, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate czhax binary: %w", err)
+		}
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+			exe = resolved
+		}
+		runArgs := []string{
+			"oneshot", "run",
+			"--iface", iface,
+			"--bssid", bssid,
+			"--attack", strings.Join(attackArgs, " "),
+		}
+		if os.Geteuid() != 0 {
+			bin = "sudo"
+			args = append([]string{"-n", exe}, runArgs...)
+		} else {
+			bin = exe
+			args = runArgs
+		}
+	} else {
+		py, err := oneshot.FindPython()
+		if err != nil {
+			return err
+		}
+		workDir = o.Dir
+		args = []string{o.Script, "-i", iface, "-b", bssid}
+		args = append(args, attackArgs...)
+		if strings.TrimSpace(o.VulnList) != "" {
+			args = append(args, "--vuln-list", o.VulnList)
+		}
+		bin = py
+		if os.Geteuid() != 0 {
+			args = append([]string{"-n", py}, args...)
+			bin = "sudo"
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {

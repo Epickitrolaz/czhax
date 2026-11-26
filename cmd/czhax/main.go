@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/console"
 	"github.com/czhax/czhax/internal/ir"
+	"github.com/czhax/czhax/internal/oneshot"
 	"github.com/czhax/czhax/internal/power"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
@@ -92,6 +94,22 @@ func main() {
 			fmt.Printf("enabled=%v method=%s\n", st.Enabled, st.Method)
 		}
 		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "oneshot" {
+		if len(os.Args) > 2 && os.Args[2] == "run" {
+			fs := flag.NewFlagSet("oneshot run", flag.ExitOnError)
+			iface := fs.String("iface", "wlan0", "Wireless interface")
+			bssid := fs.String("bssid", "", "Target AP BSSID")
+			attack := fs.String("attack", "-P -k -F", "OneShot attack arguments")
+			_ = fs.Parse(os.Args[3:])
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			code := oneshot.RunAsRoot(ctx, *iface, *bssid, strings.Fields(*attack), os.Stdout, os.Stderr)
+			os.Exit(code)
+		}
+		fmt.Fprintln(os.Stderr, "usage: czhax oneshot run --iface wlan0 --bssid AA:BB:.. [--attack \"-P -k -F\"]")
+		os.Exit(1)
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "wifi" {

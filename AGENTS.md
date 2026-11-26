@@ -36,6 +36,7 @@ internal/
   wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
   wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
   wifi/oneshot.go          # OneShot-Extended discovery + WPS scan/vulnwsc DB + streaming runner
+  oneshot/                 # Embedded OneShot-Extended snapshot (GPL-2.0, extracted to cache)
   ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
   ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
   ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit
