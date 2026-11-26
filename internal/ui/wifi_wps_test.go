@@ -285,3 +285,36 @@ func TestWPSRunLineBoundsAndSeq(t *testing.T) {
 		t.Fatal("expected WPS run inactive after done")
 	}
 }
+
+// Regression: the actions menu used to dispatch by row index while the WPS
+// action lived at a different enum value, so selecting "WPS Attack (OneShot)"
+// opened the details/connect flow instead.
+func TestActionsMenuRowsDispatchToTheirOwnAction(t *testing.T) {
+	m := newWPSTestModel(t, 53, 14)
+	m = sendKey(m, "enter")
+	if m.WifiScan.Mode != scanModeActions {
+		t.Fatalf("expected actions, got %v", m.WifiScan.Mode)
+	}
+	for i, row := range wifiActions {
+		act, ok := m.WifiScan.SelectedAction()
+		if !ok || act != row.act {
+			t.Fatalf("row %d (%s) selected %v", i, row.name, act)
+		}
+		next := sendKey(m, "enter")
+		switch row.act {
+		case wifiActWPS:
+			if next.WifiScan.Mode != scanModeWPSMenu {
+				t.Fatalf("WPS row %d opened mode %v instead of the WPS menu", i, next.WifiScan.Mode)
+			}
+		case wifiActDetail:
+			if next.WifiScan.Mode != scanModeDetail {
+				t.Fatalf("Details row %d opened mode %v instead of details", i, next.WifiScan.Mode)
+			}
+		case wifiActConnect:
+			if next.WifiScan.Mode != scanModePickIface {
+				t.Fatalf("Connect row %d opened mode %v instead of the interface picker", i, next.WifiScan.Mode)
+			}
+		}
+		m = sendKey(m, "down")
+	}
+}
