@@ -50,9 +50,9 @@ func FormatBDAddr(addr [6]byte) string {
 }
 
 // Carwhisperer opens the hands-free RFCOMM channel and the SCO audio link to a
-// Classic headset/car kit, injects silence (or playPath) and records the
-// microphone/audio stream as raw 8 kHz CVSD. It needs root or CAP_NET_ADMIN.
-func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string, onLine func(string)) error {
+// Classic headset/car kit, injects silence (or playPath) and optionally records
+// the microphone/audio stream as raw 8 kHz CVSD. It needs root or CAP_NET_ADMIN.
+func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string, recordAudio bool, onLine func(string)) error {
 	emit := func(format string, args ...any) {
 		if onLine != nil {
 			onLine(fmt.Sprintf(format, args...))
@@ -67,17 +67,29 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(recordPath) == "" {
-		recordPath = CarwhispererRecordPath(address)
+	if err := prepareCarwhispererAdapter(hciName); err != nil {
+		emit("Adapter warning: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
-		return err
+	if !devicePaired(address) {
+		emit("Pairing %s...", NormalizeAddr(address))
+		pairCarwhispererDevice(hciName, address, emit)
 	}
-	record, err := newWAVWriter(recordPath)
-	if err != nil {
-		return fmt.Errorf("open record file: %w", err)
+
+	var record io.Writer
+	if recordAudio {
+		if strings.TrimSpace(recordPath) == "" {
+			recordPath = CarwhispererRecordPath(address)
+		}
+		if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+			return err
+		}
+		w, err := newWAVWriter(recordPath)
+		if err != nil {
+			return fmt.Errorf("open record file: %w", err)
+		}
+		defer w.Close()
+		record = w
 	}
-	defer record.Close()
 
 	var play *os.File
 	if strings.TrimSpace(playPath) != "" {
@@ -105,7 +117,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		return fmt.Errorf("bind RFCOMM: %w", err)
 	}
 	if err := unix.Connect(rfd, &unix.SockaddrRFCOMM{Addr: addr, Channel: 1}); err != nil {
-		return fmt.Errorf("connect RFCOMM channel 1: %w", err)
+		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered and the device is paired; CZHax needs root)", err)
 	}
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
 
@@ -151,6 +163,63 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		return ctx.Err()
 	}
 	return nil
+}
+
+func devicePaired(address string) bool {
+	if _, err := exec.LookPath("bluetoothctl"); err != nil {
+		return true // don't warn when we cannot tell
+	}
+	out, err := exec.Command("bluetoothctl", "info", NormalizeAddr(address)).CombinedOutput()
+	if err != nil {
+		return true
+	}
+	return strings.Contains(string(out), "Paired: yes")
+}
+
+func pairCarwhispererDevice(hciName, address string, emit func(string, ...any)) {
+	if _, err := exec.LookPath("btmgmt"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		out, err := exec.CommandContext(ctx, "btmgmt", "-i", hciName, "pair", "-c", "NoInputNoOutput", NormalizeAddr(address)).CombinedOutput()
+		cancel()
+		if err == nil {
+			emit("Paired with btmgmt")
+			return
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			emit("btmgmt pair: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	if _, err := exec.LookPath("bluetoothctl"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		out, err := exec.CommandContext(ctx, "bluetoothctl", "--timeout", "20", "pair", NormalizeAddr(address)).CombinedOutput()
+		cancel()
+		if err == nil {
+			emit("Paired with bluetoothctl")
+			_ = exec.Command("bluetoothctl", "trust", NormalizeAddr(address)).Run()
+			return
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			emit("bluetoothctl pair: %s", strings.TrimSpace(string(out)))
+		}
+	}
+}
+
+func prepareCarwhispererAdapter(hciName string) error {
+	var first error
+	if _, err := exec.LookPath("rfkill"); err == nil {
+		if out, err := exec.Command("rfkill", "unblock", "bluetooth").CombinedOutput(); err != nil && first == nil {
+			first = fmt.Errorf("rfkill: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	if _, err := exec.LookPath("hciconfig"); err == nil {
+		out, _ := exec.Command("hciconfig", hciName).CombinedOutput()
+		if !strings.Contains(string(out), "UP") {
+			if out2, err := exec.Command("hciconfig", hciName, "up").CombinedOutput(); err != nil && first == nil {
+				first = fmt.Errorf("hciconfig %s up: %s", hciName, strings.TrimSpace(string(out2)))
+			}
+		}
+	}
+	return first
 }
 
 func openSCO(addr [6]byte) (int, error) {
@@ -268,11 +337,13 @@ func carwhispererSCO(ctx context.Context, fd int, record io.Writer, play *os.Fil
 	for ctx.Err() == nil {
 		n, err := unix.Read(fd, buf)
 		if n > 0 {
-			if _, werr := record.Write(buf[:n]); werr != nil {
-				emit("Record write failed: %v", werr)
-				return
+			if record != nil {
+				if _, werr := record.Write(buf[:n]); werr != nil {
+					emit("Record write failed: %v", werr)
+					return
+				}
+				total += n
 			}
-			total += n
 
 			out := silence[:n]
 			if play != nil {
@@ -282,7 +353,7 @@ func carwhispererSCO(ctx context.Context, fd int, record io.Writer, play *os.Fil
 				}
 			}
 			scoWrite(fd, out)
-			if time.Since(lastReport) >= 10*time.Second {
+			if record != nil && time.Since(lastReport) >= 10*time.Second {
 				emit("Captured %d bytes", total)
 				lastReport = time.Now()
 			}

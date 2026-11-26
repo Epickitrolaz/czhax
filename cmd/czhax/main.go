@@ -280,6 +280,7 @@ func main() {
 			addr := fs.String("addr", "", "Target Bluetooth address")
 			record := fs.String("record", "", "Raw audio output path")
 			play := fs.String("play", "", "Optional raw audio to inject")
+			noRecord := fs.Bool("no-record", false, "Do not save captured audio")
 			_ = fs.Parse(os.Args[3:])
 			if strings.TrimSpace(*addr) == "" {
 				fmt.Fprintln(os.Stderr, "bt carwhisperer: --addr is required")
@@ -287,7 +288,7 @@ func main() {
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
-			err := bluetooth.Carwhisperer(ctx, *hci, *addr, *record, *play, func(line string) {
+			err := bluetooth.Carwhisperer(ctx, *hci, *addr, *record, *play, !*noRecord, func(line string) {
 				fmt.Println(line)
 			})
 			if err != nil {
