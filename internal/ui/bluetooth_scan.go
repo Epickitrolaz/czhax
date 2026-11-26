@@ -360,9 +360,23 @@ func (v *BluetoothScanView) OpenCWMenu() bool {
 	v.CWPlayName = ""
 	v.CWTarget = dev.Address
 	v.CWTargetInput = dev.Address
+	if dev.Kind != "Classic" {
+		for _, other := range v.Devices {
+			if other.Kind != "Classic" {
+				continue
+			}
+			if sameSuffix(dev.Address, other.Address) || (dev.DisplayName() != "" && strings.EqualFold(dev.DisplayName(), other.DisplayName())) {
+				v.CWTarget = other.Address
+				v.CWTargetInput = other.Address
+				break
+			}
+		}
+	}
 	v.Note = ""
 	v.NoteIsErr = false
-	if dev.Kind == "BLE" {
+	if v.CWTarget != dev.Address {
+		v.Note = "Using Classic address " + v.CWTarget
+	} else if dev.Kind == "BLE" {
 		v.Note = "BLE address: set Target to the public Classic address if RFCOMM fails"
 	}
 	return true
@@ -1211,6 +1225,15 @@ func (v BluetoothScanView) renderCWMenu(w, h int, pal theme.Palette, focused boo
 		}
 	}
 	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func sameSuffix(a, b string) bool {
+	pa := strings.Split(strings.ToUpper(a), ":")
+	pb := strings.Split(strings.ToUpper(b), ":")
+	if len(pa) != 6 || len(pb) != 6 {
+		return false
+	}
+	return strings.Join(pa[1:], ":") == strings.Join(pb[1:], ":")
 }
 
 func checkbox(on bool) string {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/czhax/czhax/internal/oui"
 )
 
 // ScanMode selects which Bluetooth transports are queried.
@@ -199,7 +201,7 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 		if needsEnrichment(devices) {
 			devices = enrichWithInfo(ctx, devices)
 		}
-		return coalesceBleClassic(devices), nil
+		return applyOUI(devices), nil
 	}
 
 	if ctx.Err() != nil {
@@ -208,7 +210,7 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 
 	devices, hciErr := scanWithHCITool(ctx, req, timeout)
 	if len(devices) > 0 {
-		return coalesceBleClassic(devices), nil
+		return applyOUI(devices), nil
 	}
 	if hciErr != nil {
 		// bluetoothctl ran fine but found nothing; a missing hcitool is not an
@@ -594,73 +596,20 @@ func classicNamesMissing(devices []Device) bool {
 	return false
 }
 
-func coalesceBleClassic(devices []Device) []Device {
-	out := append([]Device(nil), devices...)
-	remove := make([]bool, len(out))
-	classicBySuffix := make(map[string]int)
-	classicByName := make(map[string]int)
-	for i, d := range out {
+func applyOUI(devices []Device) []Device {
+	for i := range devices {
+		d := &devices[i]
 		if d.Kind != "Classic" {
 			continue
 		}
-		if suf := addressSuffix(d.Address); suf != "" {
-			classicBySuffix[suf] = i
-		}
-		if n := strings.ToLower(d.DisplayName()); n != "" && n != strings.ToLower(d.Address) {
-			classicByName[n] = i
-		}
-	}
-	for i, d := range out {
-		if d.Kind != "BLE" {
+		if strings.TrimSpace(d.Name) != "" || strings.TrimSpace(d.Alias) != "" {
 			continue
 		}
-		target := -1
-		if j, ok := classicBySuffix[addressSuffix(d.Address)]; ok {
-			target = j
-		} else if j, ok := classicByName[strings.ToLower(d.DisplayName())]; ok {
-			target = j
-		}
-		if target < 0 {
-			continue
-		}
-		c := &out[target]
-		if c.Name == "" {
-			c.Name = d.Name
-		}
-		if c.Alias == "" {
-			c.Alias = d.Alias
-		}
-		if d.FastPair {
-			c.FastPair = true
-		}
-		if d.HasModelID {
-			c.ModelID = d.ModelID
-			c.HasModelID = true
-		}
-		if len(c.UUIDs) == 0 {
-			c.UUIDs = d.UUIDs
-		}
-		if !c.HasRSSI && d.HasRSSI {
-			c.RSSI = d.RSSI
-			c.HasRSSI = true
-		}
-		remove[i] = true
-	}
-	result := make([]Device, 0, len(out))
-	for i, d := range out {
-		if !remove[i] {
-			result = append(result, d)
+		if v := oui.Lookup(d.Address); v != "" {
+			d.Name = v
 		}
 	}
-	return SortDevices(result)
-}
-
-func addressSuffix(addr string) string {
-	parts := strings.Split(NormalizeAddr(addr), ":")
-	if len(parts) != 6 {
-		return ""
-	}
-	return strings.Join(parts[1:], ":")
+	return SortDevices(devices)
 }
 
 func needsEnrichment(devices []Device) bool {

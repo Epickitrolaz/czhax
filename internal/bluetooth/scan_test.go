@@ -49,18 +49,20 @@ func TestScanFailureMessages(t *testing.T) {
 	}
 }
 
-func TestCoalesceBleClassicBySuffix(t *testing.T) {
+func TestApplyOUINamesUnnamedClassic(t *testing.T) {
 	devices := []Device{
-		{Address: "FB:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "BLE", FastPair: true, HasModelID: true, ModelID: 0x345678, RSSI: -70, HasRSSI: true},
 		{Address: "84:D3:52:E8:E8:FB", Kind: "Classic", RSSI: -60, HasRSSI: true},
+		{Address: "FB:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "BLE"},
 	}
-	got := coalesceBleClassic(devices)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 coalesced device, got %+v", got)
+	got := applyOUI(devices)
+	var classic Device
+	for _, d := range got {
+		if d.Kind == "Classic" {
+			classic = d
+		}
 	}
-	d := got[0]
-	if d.Address != "84:D3:52:E8:E8:FB" || d.Name != "SRS-XB100" || d.Kind != "Classic" || d.RSSI != -60 || !d.FastPair || d.ModelID != 0x345678 {
-		t.Fatalf("unexpected coalesced device: %+v", d)
+	if classic.Name != "Tonly Technology Co. Ltd" {
+		t.Fatalf("expected OUI vendor name for classic device, got %+v", classic)
 	}
 }
 
