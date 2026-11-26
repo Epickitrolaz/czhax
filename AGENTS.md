@@ -28,6 +28,8 @@ internal/
   boot/boot.go             # Start-on-boot toggle (systemd tty1 service or ~/.bash_profile hook)
   config/config.go         # Persistent JSON config (~/.config/czhax/config.json)
   console/console.go       # Kernel printk console log suppression during TUI / sleep
+  hwctl/hwctl.go           # Evdev + sysfs watcher for brightness (10 levels) and volume/mute
+  hwctl/volume.go          # 20-level volume controller (wpctl/pactl/amixer/ES8389/soft fallback)
   power/power.go           # Power management (Sleep mode + evdev/GPIO/key wake, Reboot, Shutdown)
   sysinfo/sysinfo.go       # Linux /proc & /sys telemetry + battery time-to-empty estimation
   theme/theme.go           # High Contrast palette (4-role color hierarchy)
@@ -57,6 +59,7 @@ internal/
     bluetooth.go           # Status -> Bluetooth view
     ir.go                  # IR -> Remote/Learn/Browse, probe + grid discovery modes
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)
+    osd.go                 # Centered Brightness (10-level) and Volume (20-level) OSD popups
     help.go                # Help overlay
     app.go                 # Root Bubble Tea model (FocusTabs <-> FocusContent)
     app_test.go            # Mandatory bounds & navigation tests across 40x10, 45x10, 53x14, 100x30
