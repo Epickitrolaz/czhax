@@ -162,22 +162,29 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 
 	out, err := runBluetoothctlScan(scanCtx, req, timeout)
 	devices := ParseScanOutput(out, req.Mode)
-	if len(devices) > 0 && !needsEnrichment(devices) {
-		return devices, nil
-	}
 
-	// btmgmt reports both BR/EDR and LE RSSI (and names from the EIR), which
-	// bluetoothctl does not expose for Classic devices.
-	if bdevs, _ := scanWithBtmgmt(ctx, req, timeout); len(bdevs) > 0 {
-		if len(devices) > 0 {
+	// Always run a br/edr-capable btmgmt discovery for Both/Classic. The
+	// classic public address is required for RFCOMM even when the same device
+	// also advertises a BLE random address. bluetoothctl can return only the
+	// BLE entry, so don't skip this when names/RSSI are already complete.
+	if req.Mode != ScanLE || needsEnrichment(devices) {
+		if bdevs, _ := scanWithBtmgmt(ctx, req, timeout); len(bdevs) > 0 {
+			if len(devices) > 0 {
+				devices = mergeDeviceLists(devices, bdevs)
+			} else {
+				devices = bdevs
+			}
+		}
+	}
+	// If the dual pass produced no Classic entries, try a BR/EDR-only inquiry.
+	// Some controllers/BlueZ builds don't return inquiry results in the
+	// default "find" pass.
+	if req.Mode == ScanBoth && !hasClassicDevice(devices) {
+		creq := req
+		creq.Mode = ScanClassic
+		if bdevs, _ := scanWithBtmgmt(ctx, creq, timeout); len(bdevs) > 0 {
 			devices = mergeDeviceLists(devices, bdevs)
-		} else {
-			devices = bdevs
 		}
-		if needsEnrichment(devices) {
-			devices = enrichWithInfo(ctx, devices)
-		}
-		return devices, nil
 	}
 	if len(devices) > 0 {
 		if needsEnrichment(devices) {
@@ -555,6 +562,15 @@ func ParseBtmgmtOutput(out string) []Device {
 		}
 	}
 	return SortDevices(dedupeDevices(devices))
+}
+
+func hasClassicDevice(devices []Device) bool {
+	for _, d := range devices {
+		if d.Kind == "Classic" {
+			return true
+		}
+	}
+	return false
 }
 
 func needsEnrichment(devices []Device) bool {
@@ -1077,6 +1093,15 @@ func mergeDevices(lists ...[]Device) []Device {
 func SortDevices(devices []Device) []Device {
 	sort.SliceStable(devices, func(i, j int) bool {
 		a, b := devices[i], devices[j]
+		// When the same physical device appears twice (BLE random + Classic
+		// public), show the Classic public entry first so RFCOMM targets work.
+		if strings.EqualFold(a.DisplayName(), b.DisplayName()) && a.DisplayName() != "" {
+			aClassic := a.Kind == "Classic"
+			bClassic := b.Kind == "Classic"
+			if aClassic != bClassic {
+				return aClassic
+			}
+		}
 		if a.FastPair != b.FastPair {
 			return a.FastPair
 		}

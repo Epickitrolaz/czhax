@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/files"
@@ -25,6 +26,7 @@ const (
 	btModeCWMenu
 	btModeCWAudio
 	btModeCWRecord
+	btModeCWTarget
 )
 
 type BTActionKind int
@@ -50,6 +52,7 @@ const (
 	cwTap cwActionKind = iota
 	cwPlayAudio
 	cwRecordMessage
+	cwTarget
 	cwStart
 	cwBack
 )
@@ -66,6 +69,7 @@ var cwActions = []cwActionItem{
 	{kind: cwTap, name: "Tap (record mic)", val: "toggle"},
 	{kind: cwPlayAudio, name: "Play audio", val: "select"},
 	{kind: cwRecordMessage, name: "Record message", val: "toggle", warn: true},
+	{kind: cwTarget, name: "Target", val: "edit"},
 	{kind: cwStart, name: "Start", val: "run", ok: true},
 	{kind: cwBack, name: "Back", val: "esc"},
 }
@@ -116,6 +120,8 @@ type BluetoothScanView struct {
 	CWPlayPath     string
 	CWPlayName     string
 	CWStartTap     bool
+	CWTarget       string
+	CWTargetInput  string
 	CWAudio        []files.Entry
 	CWAudioCur     int
 	CWRecord       bool
@@ -352,10 +358,12 @@ func (v *BluetoothScanView) OpenCWMenu() bool {
 	v.CWRecordMsg = false
 	v.CWPlayPath = ""
 	v.CWPlayName = ""
+	v.CWTarget = dev.Address
+	v.CWTargetInput = dev.Address
 	v.Note = ""
 	v.NoteIsErr = false
 	if dev.Kind == "BLE" {
-		v.Note = "BLE device: attempting RFCOMM anyway"
+		v.Note = "BLE address: set Target to the public Classic address if RFCOMM fails"
 	}
 	return true
 }
@@ -371,6 +379,40 @@ func (v BluetoothScanView) SelectedCW() (cwActionKind, bool) {
 		return 0, false
 	}
 	return cwActions[v.CWCursor].kind, true
+}
+
+func (v *BluetoothScanView) StartCWTargetEdit() {
+	v.CWTargetInput = v.CWTarget
+	v.Mode = btModeCWTarget
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *BluetoothScanView) HandleCWTargetKey(msg tea.KeyMsg) {
+	switch msg.Type {
+	case tea.KeyBackspace, tea.KeyDelete:
+		v.CWTargetInput = dropLastRune(v.CWTargetInput)
+	case tea.KeyCtrlU:
+		v.CWTargetInput = ""
+	case tea.KeySpace:
+		v.CWTargetInput += " "
+	case tea.KeyRunes:
+		v.CWTargetInput += string(msg.Runes)
+	}
+}
+
+func (v *BluetoothScanView) ConfirmCWTarget() bool {
+	addr := strings.ToUpper(strings.TrimSpace(v.CWTargetInput))
+	if !bluetooth.IsBDAddr(addr) {
+		v.Note = "Enter a valid AA:BB:CC:DD:EE:FF address"
+		v.NoteIsErr = true
+		return false
+	}
+	v.CWTarget = addr
+	v.Mode = btModeCWMenu
+	v.Note = "Target: " + addr
+	v.NoteIsErr = false
+	return true
 }
 
 func (v *BluetoothScanView) OpenCWAudio() bool {
@@ -600,6 +642,9 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind, opts ...BTActionOptio
 	v.Mode = btModeRunning
 	v.RunKind = kind
 	v.RunDevice = dev
+	if kind == btActCarwhisperer && bluetooth.IsBDAddr(v.CWTarget) {
+		v.RunDevice.Address = strings.ToUpper(strings.TrimSpace(v.CWTarget))
+	}
 	v.RunActive = true
 	v.RunStopping = false
 	v.RunSeq++
@@ -627,7 +672,7 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind, opts ...BTActionOptio
 	req := bluetooth.AttackRequest{
 		Kind:       backendKind,
 		HCI:        v.EffectiveHCI(),
-		Address:    dev.Address,
+		Address:    v.RunDevice.Address,
 		AddrType:   dev.AddrType,
 		Name:       dev.DisplayName(),
 		Record:     opt.Record,
@@ -720,6 +765,9 @@ func (v BluetoothScanView) attackLabel() string {
 
 func (v *BluetoothScanView) HandleEsc() bool {
 	switch v.Mode {
+	case btModeCWTarget:
+		v.Mode = btModeCWMenu
+		return true
 	case btModeCWRecord:
 		if v.CWRecord {
 			v.StopCWRecord()
@@ -772,6 +820,8 @@ func (v BluetoothScanView) RenderLines(w, h int, pal theme.Palette, focused bool
 		return v.renderCWAudio(w, h, pal, focused)
 	case btModeCWRecord:
 		return v.renderCWRecord(w, h, pal)
+	case btModeCWTarget:
+		return v.renderCWTarget(w, h, pal)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -1126,6 +1176,9 @@ func (v BluetoothScanView) renderCWMenu(w, h int, pal theme.Palette, focused boo
 		if it.kind == cwPlayAudio && v.CWPlay && v.CWPlayName != "" {
 			val = filepath.Base(v.CWPlayName)
 		}
+		if it.kind == cwTarget && v.CWTarget != "" {
+			val = v.CWTarget
+		}
 		nameW := max(8, w-len(val)-5)
 		if selected && focused {
 			lines = append(lines, sel.Width(w).Render(Truncate(fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(name, nameW), val), w)))
@@ -1218,6 +1271,30 @@ func (v BluetoothScanView) renderCWAudio(w, h int, pal theme.Palette, focused bo
 		}
 	}
 	_ = sec
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) renderCWTarget(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	lines := []string{" " + accent.Render("Carwhisperer target address")}
+	lines = append(lines, " "+sec.Render("AA:BB:CC:DD:EE:FF"))
+	fieldW := max(6, w-5)
+	lines = append(lines, " > "+txt.Render(tailWindow(v.CWTargetInput, fieldW-1)+"_"))
+	if v.Note != "" {
+		st := muted
+		if v.NoteIsErr {
+			st = danger
+		}
+		lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+	}
+	for len(lines) < h-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, " "+muted.Render("⏎:save  Esc:cancel"))
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 

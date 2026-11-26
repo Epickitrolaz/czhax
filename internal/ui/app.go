@@ -1314,6 +1314,18 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.Focus == FocusContent && m.ActiveView == ViewBluetooth && m.BluetoothScan.Mode == btModeCWTarget {
+		if k == "esc" {
+			m.BluetoothScan.HandleEsc()
+			return m, nil
+		}
+		if k == "enter" {
+			m.BluetoothScan.ConfirmCWTarget()
+			return m, m.resetMarquee()
+		}
+		m.BluetoothScan.HandleCWTargetKey(msg)
+		return m, m.resetMarquee()
+	}
 
 	// Never leave a monitor interface behind: stop a run before quitting.
 	if m.WifiScan.PentestActive && (k == "ctrl+c" || k == "q") {
@@ -2175,6 +2187,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					if !wasOn {
 						m.BluetoothScan.OpenCWAudio()
 					}
+				case cwTarget:
+					m.BluetoothScan.StartCWTargetEdit()
 				case cwStart:
 					return m.startCW()
 				}
@@ -3080,6 +3094,8 @@ func (m AppModel) currentHints() []Hint {
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "play"}, {Key: "Esc", Desc: "back"}}
 		case btModeCWRecord:
 			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
+		case btModeCWTarget:
+			return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
 		case btModeDetail:
 			return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "Esc", Desc: "back"}}
 		case btModeRunning:

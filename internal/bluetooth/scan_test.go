@@ -49,6 +49,17 @@ func TestScanFailureMessages(t *testing.T) {
 	}
 }
 
+func TestSortDevicesPrefersClassicDuplicate(t *testing.T) {
+	devices := []Device{
+		{Address: "FB:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "BLE", FastPair: true},
+		{Address: "84:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "Classic"},
+	}
+	SortDevices(devices)
+	if devices[0].Address != "84:D3:52:E8:E8:FB" {
+		t.Fatalf("expected classic public entry first, got %+v", devices)
+	}
+}
+
 func TestParseBtmgmtOutput(t *testing.T) {
 	out := `hci0 dev_found: AA:BB:CC:DD:EE:10 type BR/EDR rssi -79 flags 0x0000
 AD flags 0x06

@@ -141,7 +141,7 @@ func TestBluetoothCarwhispererMenuBounds(t *testing.T) {
 		}
 		view := m.View()
 		assertFitsBounds(t, view, sz.w, sz.h, sz.name+"/BT/CWMenu")
-		for _, want := range []string{"Carwhisperer", "Tap", "Record message", "Play audio", "Start", "[ ]"} {
+		for _, want := range []string{"Carwhisperer", "Tap", "Record message", "Play audio", "Start", "[ ]", "Target"} {
 			if !strings.Contains(view, want) {
 				t.Fatalf("[%s] expected %q in CW menu:\n%s", sz.name, want, view)
 			}
@@ -152,6 +152,12 @@ func TestBluetoothCarwhispererMenuBounds(t *testing.T) {
 			t.Fatalf("[%s] expected checked Tap row:\n%s", sz.name, tapView)
 		}
 		m.BluetoothScan.CWTap = false
+		m.BluetoothScan.StartCWTargetEdit()
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/BT/CWTarget")
+		m.BluetoothScan.CWTargetInput = "84:D3:52:E8:E8:FB"
+		if !m.BluetoothScan.ConfirmCWTarget() || m.BluetoothScan.CWTarget != "84:D3:52:E8:E8:FB" {
+			t.Fatalf("[%s] target address not confirmed", sz.name)
+		}
 		m.BluetoothScan.OpenCWAudio()
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/BT/CWAudio")
 		m.BluetoothScan.Mode = btModeCWMenu
