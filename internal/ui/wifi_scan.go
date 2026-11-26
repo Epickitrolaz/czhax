@@ -139,6 +139,11 @@ type WifiScanView struct {
 	WPSErr        string
 	WPSDone       string
 	WPSOutput     string
+
+	WPSFoundPIN  string
+	WPSFoundPSK  string
+	WPSFoundSSID string
+	UseWPSCreds  bool
 }
 
 // ActiveLink reports the network associated on iface (if any).
@@ -522,6 +527,11 @@ func (v *WifiScanView) ConfirmConnectIface() (startConnect bool) {
 		v.Mode = scanModeList
 		return false
 	}
+	if v.UseWPSCreds && strings.TrimSpace(v.WPSFoundPSK) != "" {
+		v.Password = v.WPSFoundPSK
+		v.Connecting = true
+		return true
+	}
 	if strings.TrimSpace(net.SSID) == "" {
 		v.Mode = scanModeSSID
 		v.SSIDInput = ""
@@ -629,7 +639,11 @@ func (v WifiScanView) BuildConnectRequest() wifi.ConnectRequest {
 	ssid := net.SSID
 	hidden := false
 	if strings.TrimSpace(ssid) == "" {
-		ssid = strings.TrimSpace(v.SSIDInput)
+		if v.UseWPSCreds && strings.TrimSpace(v.WPSFoundSSID) != "" {
+			ssid = strings.TrimSpace(v.WPSFoundSSID)
+		} else {
+			ssid = strings.TrimSpace(v.SSIDInput)
+		}
 		hidden = true
 	}
 	iface := strings.TrimSpace(v.ConnectIface)
@@ -654,6 +668,7 @@ func (v *WifiScanView) SetConnectResult(req wifi.ConnectRequest, err error) {
 		v.NoteIsErr = true
 		return
 	}
+	v.UseWPSCreds = false
 	v.Password = ""
 	v.SSIDInput = ""
 	v.ConnectErr = ""
@@ -730,6 +745,7 @@ func (v *WifiScanView) HandleEsc() bool {
 	case scanModePickIface:
 		v.ConnectErr = ""
 		v.Connecting = false
+		v.UseWPSCreds = false
 		v.Mode = v.PrevMode
 		return true
 	case scanModeDetail:

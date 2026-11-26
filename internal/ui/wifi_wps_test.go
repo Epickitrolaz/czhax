@@ -318,3 +318,138 @@ func TestActionsMenuRowsDispatchToTheirOwnAction(t *testing.T) {
 		m = sendKey(m, "down")
 	}
 }
+
+func TestOneShotCredentialParsing(t *testing.T) {
+	var v WifiScanView
+	v.captureWPSCredentials("[+] WPS PIN: '12345670'")
+	v.captureWPSCredentials("[+] WPA PSK: 'my secret pass'")
+	v.captureWPSCredentials("[+] AP SSID: 'LabNet'")
+	if v.WPSFoundPIN != "12345670" || v.WPSFoundPSK != "my secret pass" || v.WPSFoundSSID != "LabNet" {
+		t.Fatalf("parsed credentials = PIN %q PSK %q SSID %q", v.WPSFoundPIN, v.WPSFoundPSK, v.WPSFoundSSID)
+	}
+	// Pixiewps-style lowercase line.
+	var p WifiScanView
+	p.captureWPSCredentials("[+] WPS pin: '87654321'")
+	if p.WPSFoundPIN != "87654321" {
+		t.Fatalf("lowercase PIN parse = %q", p.WPSFoundPIN)
+	}
+	// Empty placeholder must not overwrite.
+	p.WPSFoundPSK = "keep"
+	p.captureWPSCredentials("[+] WPA PSK: '<empty>'")
+	if p.WPSFoundPSK != "keep" {
+		t.Fatalf("empty placeholder overwrote PSK: %q", p.WPSFoundPSK)
+	}
+}
+
+func TestWPSConnectWithRecoveredPSK(t *testing.T) {
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}} {
+		m := newWPSTestModel(t, sz.w, sz.h)
+		m.WifiScan.Mode = scanModeWPSMenu
+		m = sendKey(m, "enter")
+		if !m.WifiScan.WPSActive {
+			t.Fatalf("[%s] expected run to start", sz.name)
+		}
+		for _, line := range []string{
+			"[+] WPS PIN: '12345670'",
+			"[+] WPA PSK: 's3cret-psk'",
+			"[+] AP SSID: 'LabNet'",
+		} {
+			next, _ := m.Update(wpsRunLineMsg{seq: m.WifiScan.WPSSeq, line: line})
+			m = next.(AppModel)
+		}
+		next, _ := m.Update(wpsRunDoneMsg{seq: m.WifiScan.WPSSeq})
+		m = next.(AppModel)
+		view := m.View()
+		assertFitsBounds(t, view, sz.w, sz.h, sz.name+"/WiFi/WPSPSK")
+		if !strings.Contains(view, "s3cret-psk") || !strings.Contains(view, "connect") {
+			t.Fatalf("[%s] expected PSK and connect hint:\n%s", sz.name, view)
+		}
+
+		// 'c' opens the interface picker, then Enter connects using the PSK.
+		m = sendKey(m, "c")
+		if m.WifiScan.Mode != scanModePickIface || !m.WifiScan.UseWPSCreds {
+			t.Fatalf("[%s] expected picker with WPS creds, mode=%v use=%v", sz.name, m.WifiScan.Mode, m.WifiScan.UseWPSCreds)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/WPSConnectPicker")
+		m = sendKey(m, "enter")
+		if !m.WifiScan.Connecting || m.WifiScan.Password != "s3cret-psk" {
+			t.Fatalf("[%s] expected connect with recovered PSK, connecting=%v pass=%q", sz.name, m.WifiScan.Connecting, m.WifiScan.Password)
+		}
+		req := m.WifiScan.BuildConnectRequest()
+		if req.SSID != "LabNet" || req.Password != "s3cret-psk" || req.BSSID != "AA:BB:CC:DD:EE:FF" {
+			t.Fatalf("[%s] connect request = %+v", sz.name, req)
+		}
+
+		next, _ = m.Update(wifiConnectDoneMsg{req: req})
+		m = next.(AppModel)
+		if m.WifiScan.Mode != scanModeList || m.WifiScan.UseWPSCreds {
+			t.Fatalf("[%s] expected list after connect, mode=%v use=%v", sz.name, m.WifiScan.Mode, m.WifiScan.UseWPSCreds)
+		}
+		if !m.WifiScan.NetworkInUse(wifi.Network{SSID: "LabNet", BSSID: "AA:BB:CC:DD:EE:FF"}) {
+			t.Fatalf("[%s] expected LabNet to be marked connected after PSK connect", sz.name)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/WPSConnected")
+	}
+}
+
+func TestWPSRetryWithPIN(t *testing.T) {
+	m := newWPSTestModel(t, 53, 14)
+	m.WifiScan.Mode = scanModeWPSMenu
+	m = sendKey(m, "enter")
+	next, _ := m.Update(wpsRunLineMsg{seq: m.WifiScan.WPSSeq, line: "[+] WPS PIN: '12345670'"})
+	m = next.(AppModel)
+	next, _ = m.Update(wpsRunDoneMsg{seq: m.WifiScan.WPSSeq})
+	m = next.(AppModel)
+	if m.WifiScan.WPSFoundPSK != "" {
+		t.Fatal("test expects PIN-only result")
+	}
+	view := m.View()
+	assertFitsBounds(t, view, 53, 14, "WiFi/WPSPinOnly")
+	if !strings.Contains(view, "retry psk") {
+		t.Fatalf("expected retry hint:\n%s", view)
+	}
+
+	// 'p' reruns OneShot with the saved PIN.
+	m = sendKey(m, "p")
+	if !m.WifiScan.WPSActive || strings.Join(m.WifiScan.WPSArgs, " ") != "-p 12345670 -k" {
+		t.Fatalf("expected PIN retry run, active=%v args=%v", m.WifiScan.WPSActive, m.WifiScan.WPSArgs)
+	}
+	// Stop, then return to the menu: a retry entry remains available.
+	m = sendKey(m, "q")
+	next, _ = m.Update(wpsRunDoneMsg{seq: m.WifiScan.WPSSeq, err: context.Canceled})
+	m = next.(AppModel)
+	m = sendKey(m, "esc")
+	if m.WifiScan.Mode != scanModeWPSMenu {
+		t.Fatalf("expected WPS menu, got %v", m.WifiScan.Mode)
+	}
+	method, ok := m.WifiScan.SelectedWPSMethod()
+	if !ok || !strings.Contains(method.Label, "Retry") {
+		t.Fatalf("expected retry entry at top of menu, got %+v", method)
+	}
+	assertFitsBounds(t, m.View(), 53, 14, "WiFi/WPSRetryMenu")
+}
+
+func TestWPSNoCredentialsNoActions(t *testing.T) {
+	m := newWPSTestModel(t, 53, 14)
+	m.WifiScan.Mode = scanModeWPSMenu
+	m = sendKey(m, "enter")
+	next, _ := m.Update(wpsRunDoneMsg{seq: m.WifiScan.WPSSeq})
+	m = next.(AppModel)
+	pin, psk := m.WifiScan.HasWPSCredentials()
+	if pin || psk {
+		t.Fatalf("expected no credentials, got pin=%v psk=%v", pin, psk)
+	}
+	if m.WifiScan.BeginWPSConnect() {
+		t.Fatal("connect must not be available without a PSK")
+	}
+	if _, ok := m.WifiScan.RetryWithPINArgs(); ok {
+		t.Fatal("retry must not be available without a PIN")
+	}
+	view := m.View()
+	if strings.Contains(view, "c:connect") || strings.Contains(view, "retry psk") {
+		t.Fatalf("unexpected post-attack actions:\n%s", view)
+	}
+}

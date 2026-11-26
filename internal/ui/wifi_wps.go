@@ -209,19 +209,35 @@ func (v *WifiScanView) BeginWPSMenu(returnMode WifiScanMode) bool {
 	v.WPSMenuCursor = 0
 	v.WPSPinInput = ""
 	v.WPSNote = ""
+	v.UseWPSCreds = false
 	return true
 }
 
+// wpsMenuItems returns the method list, prepending a retry entry when a PIN was
+// recovered without a PSK.
+func (v WifiScanView) wpsMenuItems() []wpsMethod {
+	items := make([]wpsMethod, 0, len(wpsMethods)+1)
+	if v.WPSFoundPIN != "" && v.WPSFoundPSK == "" {
+		items = append(items, wpsMethod{
+			Label: "Retry with PIN",
+			Args:  []string{"-p", v.WPSFoundPIN, "-k"},
+		})
+	}
+	return append(items, wpsMethods...)
+}
+
 func (v *WifiScanView) MoveWPSMenu(delta int) {
-	v.WPSMenuCursor = (v.WPSMenuCursor + delta + len(wpsMethods)) % len(wpsMethods)
+	items := v.wpsMenuItems()
+	v.WPSMenuCursor = (v.WPSMenuCursor + delta + len(items)) % len(items)
 	v.WPSNote = ""
 }
 
 func (v WifiScanView) SelectedWPSMethod() (wpsMethod, bool) {
-	if v.WPSMenuCursor < 0 || v.WPSMenuCursor >= len(wpsMethods) {
+	items := v.wpsMenuItems()
+	if v.WPSMenuCursor < 0 || v.WPSMenuCursor >= len(items) {
 		return wpsMethod{}, false
 	}
-	return wpsMethods[v.WPSMenuCursor], true
+	return items[v.WPSMenuCursor], true
 }
 
 // StartWPSPin enters custom PIN input.
@@ -258,6 +274,10 @@ func (v *WifiScanView) StartWPSRun(method string, args []string) (context.Contex
 	v.WPSLines = nil
 	v.WPSErr = ""
 	v.WPSDone = ""
+	v.WPSFoundPIN = ""
+	v.WPSFoundPSK = ""
+	v.WPSFoundSSID = ""
+	v.UseWPSCreds = false
 	v.WPSStarted = time.Now()
 	v.WPSElapsed = 0
 	v.WPSProgressCh = make(chan string, 64)
@@ -286,6 +306,65 @@ func (v *WifiScanView) ApplyWPSLine(seq int, line string) {
 		v.WPSLines = v.WPSLines[len(v.WPSLines)-200:]
 	}
 	v.WPSOutput = line
+	v.captureWPSCredentials(line)
+}
+
+// captureWPSCredentials extracts OneShot's credential lines:
+//
+//	[+] WPS PIN: '12345670'
+//	[+] WPA PSK: 'secret'
+//	[+] AP SSID: 'MyNet'
+func (v *WifiScanView) captureWPSCredentials(line string) {
+	for _, field := range []struct {
+		label string
+		dst   *string
+	}{
+		{"WPS PIN:", &v.WPSFoundPIN},
+		{"WPA PSK:", &v.WPSFoundPSK},
+		{"AP SSID:", &v.WPSFoundSSID},
+	} {
+		val, ok := oneShotValue(line, field.label)
+		if ok && val != "" && val != "<empty>" {
+			*field.dst = val
+		}
+	}
+}
+
+func oneShotValue(line, label string) (string, bool) {
+	low := strings.ToLower(line)
+	idx := strings.Index(low, strings.ToLower(label))
+	if idx < 0 {
+		return "", false
+	}
+	val := strings.TrimSpace(line[idx+len(label):])
+	val = strings.Trim(val, "'\"` ")
+	return val, true
+}
+
+// HasWPSCredentials reports whether a PSK or PIN was recovered.
+func (v WifiScanView) HasWPSCredentials() (pin, psk bool) {
+	return v.WPSFoundPIN != "", v.WPSFoundPSK != ""
+}
+
+// BeginWPSConnect opens the interface picker and connects with the recovered PSK.
+func (v *WifiScanView) BeginWPSConnect() bool {
+	if strings.TrimSpace(v.WPSFoundPSK) == "" {
+		return false
+	}
+	if !v.BeginConnect(scanModeWPSRun) {
+		return false
+	}
+	v.UseWPSCreds = true
+	return true
+}
+
+// RetryWithPIN relaunches OneShot using the PIN it recovered, to capture the PSK.
+func (v WifiScanView) RetryWithPINArgs() ([]string, bool) {
+	pin := strings.TrimSpace(v.WPSFoundPIN)
+	if pin == "" {
+		return nil, false
+	}
+	return []string{"-p", pin, "-k"}, true
 }
 
 func (v *WifiScanView) StopWPSRun() {
@@ -318,7 +397,6 @@ func (v *WifiScanView) FinishWPSRun(seq int, err error) {
 		v.WPSErr = err.Error()
 	}
 }
-
 func (v WifiScanView) renderWPSMenu(w, h int, pal theme.Palette, focused bool) []string {
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
@@ -352,10 +430,11 @@ func (v WifiScanView) renderWPSMenu(w, h int, pal theme.Palette, focused bool) [
 	if v.WPSNote != "" {
 		listH = max(1, h-4)
 	}
-	cursor := clampIndex(v.WPSMenuCursor, len(wpsMethods))
-	start, end := ScrollWindow(len(wpsMethods), cursor, listH)
+	items := v.wpsMenuItems()
+	cursor := clampIndex(v.WPSMenuCursor, len(items))
+	start, end := ScrollWindow(len(items), cursor, listH)
 	for i := start; i < end; i++ {
-		m := wpsMethods[i]
+		m := items[i]
 		val := strings.Join(m.Args, " ")
 		if m.Custom {
 			val = "pin"
@@ -460,6 +539,12 @@ func (v WifiScanView) renderWPSRun(w, h int, pal theme.Palette) []string {
 	if v.WPSErr != "" {
 		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.WPSErr, max(6, w-2))))
 	}
+	if v.WPSFoundPIN != "" {
+		lines = append(lines, " "+sec.Render("PIN ")+ok.Render(v.Marquee.Truncate(v.WPSFoundPIN, max(6, w-6))))
+	}
+	if v.WPSFoundPSK != "" {
+		lines = append(lines, " "+sec.Render("PSK ")+ok.Render(v.Marquee.Truncate(v.WPSFoundPSK, max(6, w-6))))
+	}
 	// Output tail fills the remaining rows above the hint.
 	avail := h - len(lines) - 1
 	if avail < 0 {
@@ -477,7 +562,14 @@ func (v WifiScanView) renderWPSRun(w, h int, pal theme.Palette) []string {
 	}
 	hint := "Esc:stop"
 	if !v.WPSActive {
-		hint = "Esc:back"
+		switch {
+		case v.WPSFoundPSK != "":
+			hint = "c:connect  Esc:back"
+		case v.WPSFoundPIN != "":
+			hint = "p:retry psk  Esc:back"
+		default:
+			hint = "Esc:back"
+		}
 	}
 	lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 	if len(lines) > h && h >= 2 {
