@@ -1,10 +1,12 @@
 package bluetooth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,12 +153,10 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 		timeout = 10 * time.Second
 	}
 	req.Timeout = timeout
-	scanCtx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
+	scanCtx, cancel := context.WithTimeout(ctx, timeout*2+4*time.Second)
 	defer cancel()
 
-	tryPowerOn(scanCtx, req)
-
-	out, err := runBluetoothctlScan(scanCtx, req)
+	out, err := runBluetoothctlScan(scanCtx, req, timeout)
 	if err == nil || strings.TrimSpace(out) != "" {
 		if devices := ParseScanOutput(out, req.Mode); len(devices) > 0 {
 			return devices, nil
@@ -186,49 +186,182 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 	return nil, nil
 }
 
-func tryPowerOn(ctx context.Context, req ScanRequest) {
-	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	if req.Controller != "" {
-		script := "select " + strings.ToUpper(req.Controller) + "\npower on\n"
-		_, _ = commandOutputInput(cctx, "bluetoothctl", script, "--timeout", "3")
-		return
-	}
-	_, _ = commandOutput(cctx, "bluetoothctl", "power", "on")
-}
-
-func runBluetoothctlScan(ctx context.Context, req ScanRequest) (string, error) {
+// runBluetoothctlScan uses an interactive bluetoothctl session with stdin held
+// open for the scan window. BlueZ versions around 5.75 exit immediately from
+// "--timeout N scan on" (they only set the discovery filter), which silently
+// returns zero devices; keeping the session alive avoids that.
+func runBluetoothctlScan(ctx context.Context, req ScanRequest, timeout time.Duration) (string, error) {
 	if _, err := exec.LookPath("bluetoothctl"); err != nil {
 		return "", err
 	}
-	secs := int(req.Timeout / time.Second)
+	prepareAdapter(ctx, req)
+	out, err := interactiveBluetoothctlScan(ctx, req, timeout)
+	if len(ParseScanOutput(out, req.Mode)) > 0 {
+		return out, nil
+	}
+	// A PTY keeps bluetoothctl in interactive mode even on BlueZ versions
+	// that otherwise exit right after "scan on".
+	if _, lookErr := exec.LookPath("script"); lookErr == nil {
+		if out2, err2 := ptyBluetoothctlScan(ctx, req, timeout); len(ParseScanOutput(out2, req.Mode)) > 0 {
+			return out2, nil
+		} else if strings.TrimSpace(out2) != "" && err2 == nil {
+			out = out2
+		}
+	}
+
+	secs := int(timeout / time.Second)
 	if secs <= 0 {
 		secs = 10
 	}
-
-	if req.Controller != "" {
-		script := "select " + strings.ToUpper(req.Controller) + "\nscan " + req.Mode.Arg() + "\n"
-		out, err := commandOutputInput(ctx, "bluetoothctl", script, "--timeout", strconv.Itoa(secs))
-		if err == nil || strings.TrimSpace(out) != "" {
-			return out, err
-		}
-	}
-
 	args := []string{"--timeout", strconv.Itoa(secs), "scan", req.Mode.Arg()}
-	out, err := commandOutput(ctx, "bluetoothctl", args...)
-	if err == nil && strings.TrimSpace(out) != "" {
-		return out, nil
+	out2, err2 := commandOutput(ctx, "bluetoothctl", args...)
+	if len(ParseScanOutput(out2, req.Mode)) > 0 {
+		return out2, nil
 	}
-	// Older bluetoothctl releases only understand "scan on".
-	if req.Mode != ScanBoth {
-		fallback := []string{"--timeout", strconv.Itoa(secs), "scan", "on"}
-		if out2, err2 := commandOutput(ctx, "bluetoothctl", fallback...); strings.TrimSpace(out2) != "" || err2 == nil {
-			if strings.TrimSpace(out2) != "" {
-				return out2, nil
+	if msg := scanFailure(out2); msg != "" {
+		return out2, errors.New(msg)
+	}
+	if strings.TrimSpace(out2) != "" || err2 == nil {
+		return out2, err2
+	}
+	if msg := scanFailure(out); msg != "" {
+		return out, errors.New(msg)
+	}
+	return out, err
+}
+
+func scanFailure(out string) string {
+	low := strings.ToLower(out)
+	for _, line := range strings.Split(out, "\n") {
+		l := strings.ToLower(line)
+		for _, marker := range []string{
+			"failed to start discovery",
+			"no default controller available",
+			"waiting to connect to bluetoothd",
+			"org.bluez.error.notready",
+			"org.bluez.error.inprogress",
+		} {
+			if strings.Contains(l, marker) {
+				return strings.TrimSpace(stripANSI(line))
 			}
 		}
 	}
-	return out, err
+	if strings.Contains(low, "failed to start discovery") {
+		return "bluetoothctl: failed to start discovery"
+	}
+	return ""
+}
+
+// ScanRaw runs the same bluetoothctl discovery as ScanDevices and returns the
+// raw session output for troubleshooting.
+func ScanRaw(ctx context.Context, req ScanRequest) (string, error) {
+	req.HCI = NormalizeHCI(req.HCI)
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, timeout+3*time.Second)
+	defer cancel()
+	prepareAdapter(scanCtx, req)
+	return interactiveBluetoothctlScan(scanCtx, req, timeout)
+}
+
+func prepareAdapter(ctx context.Context, req ScanRequest) {
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if exec.CommandContext(cctx, "systemctl", "is-active", "--quiet", "bluetooth").Run() != nil {
+			_, _ = capturePrivileged(cctx, "systemctl", "start", "bluetooth")
+		}
+	}
+	if _, err := exec.LookPath("rfkill"); err == nil {
+		_, _ = capturePrivileged(cctx, "rfkill", "unblock", "bluetooth")
+	}
+	if _, err := exec.LookPath("hciconfig"); err == nil {
+		_, _ = capturePrivileged(cctx, "hciconfig", req.HCI, "up")
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func interactiveBluetoothctlScan(ctx context.Context, req ScanRequest, timeout time.Duration) (string, error) {
+	cmd := exec.CommandContext(ctx, "bluetoothctl")
+	return runBluetoothctlSession(ctx, cmd, req, timeout)
+}
+
+func ptyBluetoothctlScan(ctx context.Context, req ScanRequest, timeout time.Duration) (string, error) {
+	cmd := exec.CommandContext(ctx, "script", "-q", "-c", "bluetoothctl", "/dev/null")
+	return runBluetoothctlSession(ctx, cmd, req, timeout)
+}
+
+func runBluetoothctlSession(ctx context.Context, cmd *exec.Cmd, req ScanRequest, timeout time.Duration) (string, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", err
+	}
+	var buf lockedBuffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+
+	write := func(s string) {
+		_, _ = stdin.Write([]byte(s + "\n"))
+	}
+	if req.Controller != "" {
+		write("select " + strings.ToUpper(req.Controller))
+		time.Sleep(150 * time.Millisecond)
+	}
+	write("power on")
+	time.Sleep(350 * time.Millisecond)
+	write("scan " + req.Mode.Arg())
+
+	timer := time.NewTimer(timeout)
+	exited := false
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	case <-wait:
+		exited = true
+	}
+	timer.Stop()
+
+	if !exited {
+		write("scan off")
+		write("devices")
+		write("quit")
+		_ = stdin.Close()
+		select {
+		case <-wait:
+		case <-time.After(2 * time.Second):
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-wait
+		}
+	}
+	if ctx.Err() != nil {
+		return buf.String(), ctx.Err()
+	}
+	return buf.String(), nil
 }
 
 func scanWithHCITool(ctx context.Context, req ScanRequest, timeout time.Duration) ([]Device, error) {
@@ -285,6 +418,7 @@ func ParseHCIToolOutput(out, kind string) []Device {
 	var devices []Device
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		line = stripANSI(line)
 		if line == "" || strings.HasPrefix(line, "Scanning") {
 			continue
 		}
@@ -302,9 +436,16 @@ func ParseHCIToolOutput(out, kind string) []Device {
 	return dedupeDevices(devices)
 }
 
+var reANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+func stripANSI(s string) string {
+	return reANSI.ReplaceAllString(s, "")
+}
+
 // ParseScanOutput parses `bluetoothctl scan` output, merging repeated
 // [NEW]/[CHG] records for the same address.
 func ParseScanOutput(out string, mode ScanMode) []Device {
+	out = strings.ReplaceAll(out, "\r", "\n")
 	type state struct {
 		dev        *Device
 		sdActive   bool
@@ -337,6 +478,7 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		line = stripANSI(line)
 		if line == "" {
 			continue
 		}
@@ -381,7 +523,7 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 		}
 		// "[NEW] Device AA:BB:.. Headset" carries the initial name without a
 		// "Name:" prefix.
-		if tag == "new" && !strings.Contains(attr, ":") && st.dev.Name == "" {
+		if (tag == "new" || tag == "") && !strings.Contains(attr, ":") && st.dev.Name == "" {
 			st.dev.Name = cleanName(attr)
 		}
 
@@ -471,9 +613,11 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 
 // ParseDeviceInfo parses `bluetoothctl info <address>` output.
 func ParseDeviceInfo(out string) Device {
+	out = strings.ReplaceAll(out, "\r", "\n")
 	var d Device
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		line = stripANSI(line)
 		if line == "" {
 			continue
 		}
