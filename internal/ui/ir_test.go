@@ -395,3 +395,166 @@ func TestIRBrowseSearchAndBrandJump(t *testing.T) {
 		t.Fatalf("expected Esc to clear query, got query=%q len=%d", m.IR.BrowseQuery, len(m.IR.Filtered))
 	}
 }
+
+func TestIRGuidedMatchFlow(t *testing.T) {
+	p1, _ := ir.EncodeProtocol("NEC", 0x10, 0x01)
+	p1.Name = "Power"
+	p2, _ := ir.EncodeProtocol("NEC", 0x10, 0x02)
+	p2.Name = "Power"
+	tUp, _ := ir.EncodeProtocol("NEC", 0x10, 0x03)
+	tUp.Name = "Temp+"
+
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}, {"Wide_100x30", 100, 30}} {
+		m := newIRTestModel(t, sz.w, sz.h)
+		m.IR.SetIndex([]ir.Entry{
+			{Provider: "mi", Category: "AC", Brand: "Daikin", Model: "D1", Path: "d1.ir"},
+			{Provider: "mi", Category: "AC", Brand: "Epson", Model: "E1", Path: "e1.ir"},
+			{Provider: "flipper", Category: "TV", Brand: "LG", Model: "C1", Path: "c1.ir"},
+		}, nil)
+
+		// Launch Guided Match from Browse via 'm'.
+		m.ActiveTabs[ViewIR] = int(IRTabBrowse)
+		m.IR.Tab = IRTabBrowse
+		m = sendKey(m, "m")
+		if m.IR.BrowseMode != browseModeMatchType {
+			t.Fatalf("[%s] expected browseModeMatchType, got %v", sz.name, m.IR.BrowseMode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/Type")
+
+		// Pick AC (second after TV).
+		m = sendKey(m, "down")
+		m = sendKey(m, "enter")
+		if m.IR.BrowseMode != browseModeMatchBrand || m.IR.MatchCategory != "AC" {
+			t.Fatalf("[%s] expected match brand for AC, got mode=%v cat=%q", sz.name, m.IR.BrowseMode, m.IR.MatchCategory)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/Brand")
+
+		// Search '/' -> "eps" narrows to Epson; Enter locks filter.
+		m = sendKey(m, "/")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/BrandSearch")
+		for _, ch := range []string{"e", "p", "s"} {
+			m = sendKey(m, ch)
+		}
+		m = sendKey(m, "enter")
+		if len(m.IR.MatchBrands) != 1 || m.IR.MatchBrands[0].Name != "Epson" {
+			t.Fatalf("[%s] expected Epson brand after filter, got %+v", sz.name, m.IR.MatchBrands)
+		}
+
+		// Open Epson -> loading -> deliver candidates -> step & confirm.
+		m = sendKey(m, "enter")
+		if m.IR.BrowseMode != browseModeMatchTest || !m.IR.MatchLoading {
+			t.Fatalf("[%s] expected match test loading, got mode=%v loading=%v", sz.name, m.IR.BrowseMode, m.IR.MatchLoading)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/Loading")
+
+		next, _ := m.Update(irMatchCandidatesMsg{
+			cands: []ir.MatchCandidate{
+				{Entry: m.IR.Index[1], Signal: p1, SignalCount: 2},
+				{Entry: m.IR.Index[1], Signal: p2, SignalCount: 2},
+			},
+		})
+		m = next.(AppModel)
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/Test")
+
+		// Test Power, step to #2, step back to #1.
+		m = sendKey(m, "enter")
+		m = sendKey(m, "right")
+		if m.IR.MatchCursor != 1 {
+			t.Fatalf("[%s] expected MatchCursor 1 after right, got %d", sz.name, m.IR.MatchCursor)
+		}
+		m = sendKey(m, "left")
+		if m.IR.MatchCursor != 0 {
+			t.Fatalf("[%s] expected MatchCursor 0 after left, got %d", sz.name, m.IR.MatchCursor)
+		}
+
+		// Confirm match via 'y' -> deliver saved profile -> switches to Remote tab.
+		m = sendKey(m, "y")
+		if !m.IR.MatchSaving {
+			t.Fatalf("[%s] expected MatchSaving after 'y'", sz.name)
+		}
+		prof := ir.BindSignals("Epson E1", "mi", "AC", "Epson", "E1", []ir.Signal{p1, tUp})
+		next, _ = m.Update(irMatchSavedMsg{profile: prof})
+		m = next.(AppModel)
+		if m.ActiveTabs[ViewIR] != int(IRTabRemote) || len(m.IR.Store.Profiles) != 1 {
+			t.Fatalf("[%s] expected saved remote on Remote tab, tab=%d profiles=%d", sz.name, m.ActiveTabs[ViewIR], len(m.IR.Store.Profiles))
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Match/SavedRemote")
+	}
+}
+
+func TestIRUniversalRemoteFlow(t *testing.T) {
+	sig := irTestSignal(t)
+	for _, sz := range []struct {
+		name string
+		w, h int
+	}{{"CZ_40x10", 40, 10}, {"CZ_45x10", 45, 10}, {"CZ_53x14", 53, 14}, {"Wide_100x30", 100, 30}} {
+		m := newIRTestModel(t, sz.w, sz.h)
+		m.IR.SetIndex([]ir.Entry{
+			{Provider: "mi", Category: "AC", Brand: "Daikin", Model: "D1", Path: "d1.ir"},
+			{Provider: "flipper", Category: "TV", Brand: "LG", Model: "C1", Path: "c1.ir"},
+		}, nil)
+
+		// Launch Universal Remote from empty Remote menu (index 4: "Universal remote").
+		for i := 0; i < 4; i++ {
+			m = sendKey(m, "down")
+		}
+		m = sendKey(m, "enter")
+		if m.ActiveTabs[ViewIR] != int(IRTabBrowse) || m.IR.BrowseMode != browseModeUnivType {
+			t.Fatalf("[%s] expected browseModeUnivType from empty menu, tab=%d mode=%v", sz.name, m.ActiveTabs[ViewIR], m.IR.BrowseMode)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Univ/Type")
+
+		// Pick AC -> opens temporary Universal remote (does not save a profile).
+		m = sendKey(m, "down")
+		m = sendKey(m, "enter")
+		if m.IR.BrowseMode != browseModeUnivRemote || m.IR.UnivCategory != "AC" {
+			t.Fatalf("[%s] expected browseModeUnivRemote for AC, got mode=%v cat=%q", sz.name, m.IR.BrowseMode, m.IR.UnivCategory)
+		}
+		if len(m.IR.Store.Profiles) != 0 {
+			t.Fatalf("[%s] universal remote must remain temporary (profiles=%d)", sz.name, len(m.IR.Store.Profiles))
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Univ/Remote")
+
+		// Press '1' (Power) to start blasting; feed live progress; stop with Space.
+		m = sendKey(m, "1")
+		if !m.IR.UnivBlasting {
+			t.Fatalf("[%s] expected UnivBlasting after pressing 1", sz.name)
+		}
+		next, _ := m.Update(irUniversalProgressMsg{
+			seq: m.IR.UnivSeq,
+			prog: ir.UniversalProgress{
+				Target:       "power",
+				EntryIndex:   1,
+				TotalEntries: 1,
+				UniqueSent:   1,
+				Current:      m.IR.Index[0],
+				Signal:       sig,
+			},
+		})
+		m = next.(AppModel)
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Univ/Blasting")
+
+		m = sendKey(m, " ")
+		if m.IR.UnivBlasting || m.IR.UnivLastBrand != "Daikin" {
+			t.Fatalf("[%s] expected blast stopped with UnivLastBrand=Daikin, blasting=%v brand=%q", sz.name, m.IR.UnivBlasting, m.IR.UnivLastBrand)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Univ/Stopped")
+
+		// Esc pops UnivRemote -> UnivType -> BrowseList -> FocusTabs.
+		m = sendKey(m, "esc")
+		if m.IR.BrowseMode != browseModeUnivType {
+			t.Fatalf("[%s] expected Esc to pop to UnivType, got %v", sz.name, m.IR.BrowseMode)
+		}
+		m = sendKey(m, "esc")
+		if m.IR.BrowseMode != browseModeList {
+			t.Fatalf("[%s] expected Esc to pop to BrowseList, got %v", sz.name, m.IR.BrowseMode)
+		}
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("[%s] expected Esc to return to FocusTabs", sz.name)
+		}
+	}
+}

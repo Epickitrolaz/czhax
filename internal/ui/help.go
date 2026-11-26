@@ -30,7 +30,7 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("pcap      ") + txt.Render("Saved ~/czhax-captures"),
 		" " + sec.Render("IR Remote ") + txt.Render("keys:send ←→:rem Tab:list"),
 		" " + sec.Render("IR Learn  ") + txt.Render("⏎:listen/remote/bind key"),
-		" " + sec.Render("IR Browse ") + txt.Render("/:find [/]:brand a:save"),
+		" " + sec.Render("IR Browse ") + txt.Render("m:match u:univ /:find [/]:brand"),
 		" " + sec.Render("?         ") + txt.Render("Toggle help"),
 		" " + sec.Render("q / ^C    ") + txt.Render("Quit CZHax"),
 	}

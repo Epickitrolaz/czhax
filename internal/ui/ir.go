@@ -21,6 +21,17 @@ const (
 	IRTabBrowse
 )
 
+type irBrowseMode int
+
+const (
+	browseModeList irBrowseMode = iota
+	browseModeMatchType
+	browseModeMatchBrand
+	browseModeMatchTest
+	browseModeUnivType
+	browseModeUnivRemote
+)
+
 type irRemoteMode int
 
 const (
@@ -100,6 +111,35 @@ type IRView struct {
 	BrowseSearching bool
 	Filtered        []ir.Entry
 	BrowseCursor    int
+	BrowseMode      irBrowseMode
+	ASCII           bool
+
+	CategoryStats       []ir.CategoryCount
+	TypeCursor          int
+	MatchCategory       string
+	MatchBrand          string
+	MatchBrandQuery     string
+	MatchBrandSearching bool
+	MatchBrands         []ir.BrandCount
+	MatchBrandCursor    int
+	MatchLoading        bool
+	MatchSaving         bool
+	MatchErr            string
+	MatchCandidates     []ir.MatchCandidate
+	MatchCursor         int
+	MatchActionCursor   int
+
+	UnivCategory    string
+	UnivButtons     []ir.UniversalButton
+	UnivCursor      int
+	UnivBlasting    bool
+	UnivSeq         int
+	UnivBlastTarget string
+	UnivBlastCancel context.CancelFunc
+	UnivProgressCh  chan ir.UniversalProgress
+	UnivProgress    ir.UniversalProgress
+	UnivLastBrand   string
+	UnivBlastErr    string
 
 	Remote          *ir.Remote
 	RemoteLoading   bool
@@ -209,11 +249,16 @@ func (v *IRView) SetIndex(entries []ir.Entry, err error) {
 	v.Index = entries
 	v.IndexDone = true
 	v.Categories = ir.Categories(entries)
+	v.CategoryStats = ir.CategoryCounts(entries)
+	v.TypeCursor = clampIndex(v.TypeCursor, len(v.CategoryStats))
 	if v.CategoryIdx > len(v.Categories) {
 		v.CategoryIdx = 0
 	}
 	v.refilter()
 	v.BrowseCursor = 0
+	if v.BrowseMode == browseModeMatchBrand {
+		v.refreshMatchBrands()
+	}
 }
 
 func (v *IRView) CycleProvider(delta int) {
@@ -467,7 +512,11 @@ func (v IRView) IsTextInput() bool {
 	case IRTabLearn:
 		return v.NewRemoteInput || v.AwaitBindLabel
 	case IRTabBrowse:
-		return v.Remote == nil && v.BrowseSearching
+		if v.Remote != nil {
+			return false
+		}
+		return (v.BrowseMode == browseModeList && v.BrowseSearching) ||
+			(v.BrowseMode == browseModeMatchBrand && v.MatchBrandSearching)
 	}
 	return false
 }
@@ -484,9 +533,299 @@ func (v *IRView) MoveRemoteList(delta int) {
 }
 
 func (v *IRView) MoveEmptyMenu(delta int) {
-	v.EmptyMenuCursor = (v.EmptyMenuCursor + delta + 3) % 3
+	v.EmptyMenuCursor = (v.EmptyMenuCursor + delta + 5) % 5
 	v.Note = ""
 	v.NoteIsErr = false
+}
+
+func (v *IRView) StartMatchWizard() {
+	v.Remote = nil
+	v.RemoteErr = ""
+	v.BrowseSearching = false
+	v.MatchBrandSearching = false
+	v.MatchErr = ""
+	v.MatchLoading = false
+	v.MatchSaving = false
+	v.Note = ""
+	v.NoteIsErr = false
+	v.CategoryStats = ir.CategoryCounts(v.Index)
+	v.TypeCursor = clampIndex(v.TypeCursor, len(v.CategoryStats))
+	v.BrowseMode = browseModeMatchType
+}
+
+func (v *IRView) StartUniversalWizard() {
+	v.Remote = nil
+	v.RemoteErr = ""
+	v.BrowseSearching = false
+	v.MatchBrandSearching = false
+	v.UnivBlastErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	v.CategoryStats = ir.CategoryCounts(v.Index)
+	v.TypeCursor = clampIndex(v.TypeCursor, len(v.CategoryStats))
+	v.BrowseMode = browseModeUnivType
+}
+
+func (v *IRView) MoveType(delta int) {
+	if len(v.CategoryStats) == 0 {
+		v.TypeCursor = 0
+		return
+	}
+	v.TypeCursor = (v.TypeCursor + delta + len(v.CategoryStats)) % len(v.CategoryStats)
+}
+
+func (v *IRView) ConfirmMatchType() bool {
+	if v.TypeCursor < 0 || v.TypeCursor >= len(v.CategoryStats) {
+		return false
+	}
+	v.MatchCategory = v.CategoryStats[v.TypeCursor].Name
+	v.MatchBrandQuery = ""
+	v.MatchBrandSearching = false
+	v.MatchBrandCursor = 0
+	v.MatchErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	v.refreshMatchBrands()
+	v.BrowseMode = browseModeMatchBrand
+	return true
+}
+
+func (v *IRView) ConfirmUnivType() bool {
+	if v.TypeCursor < 0 || v.TypeCursor >= len(v.CategoryStats) {
+		return false
+	}
+	v.UnivCategory = v.CategoryStats[v.TypeCursor].Name
+	v.UnivButtons = ir.UniversalButtonsForCategory(v.UnivCategory)
+	v.UnivCursor = 0
+	v.UnivBlastErr = ""
+	v.UnivLastBrand = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	v.BrowseMode = browseModeUnivRemote
+	return true
+}
+
+func (v *IRView) refreshMatchBrands() {
+	v.MatchBrands = ir.BrandsForCategory(v.Index, v.MatchCategory, v.MatchBrandQuery)
+	v.MatchBrandCursor = clampIndex(v.MatchBrandCursor, len(v.MatchBrands))
+}
+
+func (v *IRView) MoveMatchBrand(delta int) {
+	if len(v.MatchBrands) == 0 {
+		v.MatchBrandCursor = 0
+		return
+	}
+	v.MatchBrandCursor = (v.MatchBrandCursor + delta + len(v.MatchBrands)) % len(v.MatchBrands)
+}
+
+func (v *IRView) JumpMatchBrandLetter(delta int) {
+	if len(v.MatchBrands) <= 1 || delta == 0 {
+		return
+	}
+	firstLetter := func(s string) byte {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			return 0
+		}
+		return s[0]
+	}
+	cur := firstLetter(v.MatchBrands[v.MatchBrandCursor].Name)
+	n := len(v.MatchBrands)
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for off := 1; off < n; off++ {
+		idx := (v.MatchBrandCursor + off*step + n) % n
+		if firstLetter(v.MatchBrands[idx].Name) != cur {
+			v.MatchBrandCursor = idx
+			return
+		}
+	}
+}
+
+func (v IRView) SelectedMatchBrand() (ir.BrandCount, bool) {
+	if v.MatchBrandCursor < 0 || v.MatchBrandCursor >= len(v.MatchBrands) {
+		return ir.BrandCount{}, false
+	}
+	return v.MatchBrands[v.MatchBrandCursor], true
+}
+
+func (v *IRView) BeginMatchCandidates() (category, brand string, ok bool) {
+	bc, ok := v.SelectedMatchBrand()
+	if !ok {
+		return "", "", false
+	}
+	v.MatchBrand = bc.Name
+	v.MatchBrandSearching = false
+	v.MatchLoading = true
+	v.MatchSaving = false
+	v.MatchErr = ""
+	v.MatchCandidates = nil
+	v.MatchCursor = 0
+	v.MatchActionCursor = 0
+	v.Note = ""
+	v.NoteIsErr = false
+	v.BrowseMode = browseModeMatchTest
+	return v.MatchCategory, v.MatchBrand, true
+}
+
+func (v *IRView) SetMatchCandidates(cands []ir.MatchCandidate, err error) {
+	v.MatchLoading = false
+	v.MatchCursor = 0
+	v.MatchActionCursor = 0
+	if err != nil {
+		v.MatchErr = err.Error()
+		v.MatchCandidates = nil
+		return
+	}
+	v.MatchErr = ""
+	v.MatchCandidates = cands
+}
+
+func (v *IRView) MoveMatchAction(delta int) {
+	v.MatchActionCursor = (v.MatchActionCursor + delta + 3) % 3
+}
+
+func (v IRView) CurrentMatchCandidate() (ir.MatchCandidate, bool) {
+	if v.MatchCursor < 0 || v.MatchCursor >= len(v.MatchCandidates) {
+		return ir.MatchCandidate{}, false
+	}
+	return v.MatchCandidates[v.MatchCursor], true
+}
+
+func (v *IRView) StepMatchCandidate(delta int) (ir.MatchCandidate, bool) {
+	n := len(v.MatchCandidates)
+	if n == 0 {
+		return ir.MatchCandidate{}, false
+	}
+	v.MatchCursor = (v.MatchCursor + delta + n) % n
+	return v.MatchCandidates[v.MatchCursor], true
+}
+
+func (v *IRView) AcceptMatchedProfile(p ir.Profile, err error) bool {
+	v.MatchSaving = false
+	if err != nil {
+		v.MatchErr = err.Error()
+		return false
+	}
+	v.Store.AddProfile(p)
+	if v.saveStore() == nil {
+		v.Note = "Saved " + p.Name
+		v.NoteIsErr = false
+	}
+	v.RemoteScroll = 0
+	v.RemoteMode = remoteModeUse
+	v.BrowseMode = browseModeList
+	v.Tab = IRTabRemote
+	return true
+}
+
+func (v *IRView) MoveUnivButton(delta int) {
+	if len(v.UnivButtons) == 0 {
+		v.UnivCursor = 0
+		return
+	}
+	v.UnivCursor = (v.UnivCursor + delta + len(v.UnivButtons)) % len(v.UnivButtons)
+}
+
+func (v IRView) SelectedUnivButton() (ir.UniversalButton, bool) {
+	if v.UnivCursor < 0 || v.UnivCursor >= len(v.UnivButtons) {
+		return ir.UniversalButton{}, false
+	}
+	return v.UnivButtons[v.UnivCursor], true
+}
+
+func (v IRView) UnivButtonForKey(key string) (ir.UniversalButton, int, bool) {
+	key = ir.NormalizeBindKey(key)
+	for i, b := range v.UnivButtons {
+		if b.Key == key {
+			return b, i, true
+		}
+	}
+	return ir.UniversalButton{}, -1, false
+}
+
+func (v *IRView) StartUniversalBlast(target string) (context.Context, int, chan ir.UniversalProgress, bool) {
+	if v.UnivBlasting {
+		return nil, 0, nil, false
+	}
+	if v.HW.TXPath == "" {
+		v.UnivBlastErr = "No IR transmitter: " + v.HW.Err
+		return nil, 0, nil, false
+	}
+	v.UnivSeq++
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan ir.UniversalProgress, 1)
+	v.UnivBlasting = true
+	v.UnivBlastTarget = target
+	v.UnivBlastCancel = cancel
+	v.UnivProgressCh = ch
+	v.UnivProgress = ir.UniversalProgress{Target: target}
+	v.UnivBlastErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	return ctx, v.UnivSeq, ch, true
+}
+
+func (v *IRView) StopUniversalBlast() {
+	if !v.UnivBlasting {
+		return
+	}
+	if v.UnivBlastCancel != nil {
+		v.UnivBlastCancel()
+		v.UnivBlastCancel = nil
+	}
+	v.UnivBlasting = false
+	if v.UnivProgress.Current.Brand != "" {
+		v.UnivLastBrand = v.UnivProgress.Current.Brand
+	}
+	v.Note = fmt.Sprintf("Stopped (%d sent)", v.UnivProgress.UniqueSent)
+	v.NoteIsErr = false
+}
+
+func (v *IRView) ApplyUniversalProgress(seq int, prog ir.UniversalProgress) {
+	if !v.UnivBlasting || seq != v.UnivSeq {
+		return
+	}
+	v.UnivProgress = prog
+	if prog.Current.Brand != "" {
+		v.UnivLastBrand = prog.Current.Brand
+	}
+}
+
+func (v *IRView) ApplyUniversalDone(seq int, target string, uniqueSent int, lastBrand string, err error) {
+	if seq != v.UnivSeq {
+		return
+	}
+	wasBlasting := v.UnivBlasting
+	v.UnivBlasting = false
+	v.UnivBlastCancel = nil
+	if lastBrand != "" {
+		v.UnivLastBrand = lastBrand
+	}
+	if errors.Is(err, context.Canceled) {
+		if wasBlasting {
+			v.Note = fmt.Sprintf("Stopped (%d sent)", uniqueSent)
+			v.NoteIsErr = false
+		}
+		return
+	}
+	if err != nil {
+		v.UnivBlastErr = err.Error()
+		return
+	}
+	v.Note = fmt.Sprintf("Done: %d %s codes", uniqueSent, v.univTargetLabel(target))
+	v.NoteIsErr = false
+}
+
+func (v IRView) univTargetLabel(target string) string {
+	for _, b := range v.UnivButtons {
+		if b.Target == target {
+			return b.Label
+		}
+	}
+	return target
 }
 
 func (v *IRView) OpenRemoteList() {
@@ -550,6 +889,34 @@ func (v *IRView) HandleTextKey(msg tea.KeyMsg) (handled bool) {
 		return false
 	}
 	switch {
+	case v.Tab == IRTabBrowse && v.BrowseMode == browseModeMatchBrand && v.MatchBrandSearching:
+		switch msg.Type {
+		case tea.KeyEnter:
+			v.MatchBrandSearching = false
+			return true
+		case tea.KeyBackspace, tea.KeyDelete:
+			v.MatchBrandQuery = dropLastRune(v.MatchBrandQuery)
+			v.refreshMatchBrands()
+			v.MatchBrandCursor = 0
+			return true
+		case tea.KeyCtrlU:
+			v.MatchBrandQuery = ""
+			v.refreshMatchBrands()
+			v.MatchBrandCursor = 0
+			return true
+		case tea.KeySpace:
+			v.MatchBrandQuery += " "
+			v.refreshMatchBrands()
+			v.MatchBrandCursor = 0
+			return true
+		case tea.KeyRunes:
+			v.MatchBrandQuery += string(msg.Runes)
+			v.refreshMatchBrands()
+			v.MatchBrandCursor = 0
+			return true
+		}
+		return true
+
 	case v.Tab == IRTabBrowse && v.BrowseSearching:
 		switch msg.Type {
 		case tea.KeyEnter:
@@ -895,6 +1262,48 @@ func (v *IRView) HandleEsc() bool {
 			v.GridMode = false
 			return true
 		}
+		switch v.BrowseMode {
+		case browseModeMatchTest:
+			v.MatchLoading = false
+			v.MatchSaving = false
+			v.MatchErr = ""
+			v.Note = ""
+			v.NoteIsErr = false
+			v.BrowseMode = browseModeMatchBrand
+			return true
+		case browseModeMatchBrand:
+			if v.MatchBrandSearching {
+				v.MatchBrandSearching = false
+				v.MatchBrandQuery = ""
+				v.refreshMatchBrands()
+				v.MatchBrandCursor = 0
+				return true
+			}
+			if v.MatchBrandQuery != "" {
+				v.MatchBrandQuery = ""
+				v.refreshMatchBrands()
+				v.MatchBrandCursor = 0
+				return true
+			}
+			v.BrowseMode = browseModeMatchType
+			return true
+		case browseModeMatchType:
+			v.BrowseMode = browseModeList
+			return true
+		case browseModeUnivRemote:
+			if v.UnivBlasting {
+				v.StopUniversalBlast()
+				return true
+			}
+			v.UnivBlastErr = ""
+			v.Note = ""
+			v.NoteIsErr = false
+			v.BrowseMode = browseModeUnivType
+			return true
+		case browseModeUnivType:
+			v.BrowseMode = browseModeList
+			return true
+		}
 		if v.BrowseSearching {
 			v.BrowseSearching = false
 			v.BrowseQuery = ""
@@ -1059,9 +1468,17 @@ func (v IRView) renderRemote(w, h int, pal theme.Palette, focused bool) []string
 			{name: "+ New remote", val: "create", ok: true},
 			{name: "Learn signal", val: "capture"},
 			{name: "Browse library", val: "FX/Mi"},
+			{name: "Match by brand", val: "guided", ok: true},
+			{name: "Universal remote", val: "blast"},
 		}
 		cursor := clampIndex(v.EmptyMenuCursor, len(items))
-		for i, it := range items {
+		listH := max(1, h-3)
+		if h < 4 {
+			listH = max(1, h-2)
+		}
+		start, end := ScrollWindow(len(items), cursor, listH)
+		for i := start; i < end; i++ {
+			it := items[i]
 			selected := i == cursor
 			nameW := max(8, w-len(it.val)-5)
 			if selected && focused {
@@ -1323,6 +1740,51 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		return v.renderRemoteDetail(w, h, pal, focused)
 	}
 
+	if v.IndexLoading {
+		title := "IR Browse"
+		switch v.BrowseMode {
+		case browseModeMatchType, browseModeMatchBrand, browseModeMatchTest:
+			title = "Match Remote"
+		case browseModeUnivType, browseModeUnivRemote:
+			title = "Universal IR"
+		}
+		lines := []string{
+			" " + accent.Render(title),
+			" " + warn.Render("Indexing databases…"),
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+	if v.IndexErr != "" {
+		lines := []string{
+			" " + accent.Render("IR Browse"),
+			" " + danger.Render(Truncate(v.IndexErr, max(6, w-2))),
+			" " + muted.Render(Truncate("Set CZHAX_IR_FLIPPER / CZHAX_IR_MI", max(6, w-2))),
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+	if len(v.Index) == 0 && !v.RemoteLoading && v.RemoteErr == "" {
+		lines := []string{
+			" " + accent.Render("IR Browse"),
+			" " + muted.Render("No remotes found"),
+			" " + muted.Render("Set CZHAX_IR_FLIPPER or CZHAX_IR_MI"),
+			" " + muted.Render("or use Learn to copy a remote"),
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+
+	switch v.BrowseMode {
+	case browseModeMatchType:
+		return v.renderTypePicker(w, h, pal, focused, "Match: Select Type", "↑↓:sel  ⏎:brands  Esc:back")
+	case browseModeMatchBrand:
+		return v.renderMatchBrand(w, h, pal, focused)
+	case browseModeMatchTest:
+		return v.renderMatchTest(w, h, pal, focused)
+	case browseModeUnivType:
+		return v.renderTypePicker(w, h, pal, focused, "Universal: Type", "↑↓:sel  ⏎:open  Esc:back")
+	case browseModeUnivRemote:
+		return v.renderUnivRemote(w, h, pal, focused)
+	}
+
 	countStr := fmt.Sprintf("%d", len(v.Filtered))
 	if len(v.Filtered) != len(v.Index) {
 		countStr = fmt.Sprintf("%d/%d", len(v.Filtered), len(v.Index))
@@ -1339,21 +1801,6 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		lines = append(lines, " "+danger.Render(Truncate(v.RemoteErr, max(6, w-2))))
 		return SplitLinesPadded(lines, w, h)
 	}
-	if v.IndexLoading {
-		lines = append(lines, " "+warn.Render("Indexing databases…"))
-		return SplitLinesPadded(lines, w, h)
-	}
-	if v.IndexErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.IndexErr, max(6, w-2))))
-		lines = append(lines, " "+muted.Render(Truncate("Set CZHAX_IR_FLIPPER / CZHAX_IR_MI", max(6, w-2))))
-		return SplitLinesPadded(lines, w, h)
-	}
-	if len(v.Index) == 0 {
-		lines = append(lines, " "+muted.Render("No remotes found"))
-		lines = append(lines, " "+muted.Render("Set CZHAX_IR_FLIPPER or CZHAX_IR_MI"))
-		lines = append(lines, " "+muted.Render("or use Learn to copy a remote"))
-		return SplitLinesPadded(lines, w, h)
-	}
 
 	switch {
 	case v.BrowseSearching:
@@ -1363,6 +1810,10 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 8))+sec.Render("Find ")+warn.Render(Truncate(v.BrowseQuery, max(4, w-19))))
 	default:
 		lines = append(lines, " "+sec.Render("Src ")+txt.Render(FitLine(v.ProviderLabel(), 9))+sec.Render("Type ")+txt.Render(Truncate(v.CategoryLabel(), max(4, w-19))))
+	}
+	showModeStrip := !v.BrowseSearching && v.BrowseQuery == "" && h >= 6
+	if showModeStrip {
+		lines = append(lines, " "+sec.Render("m")+muted.Render(":Match ")+sec.Render("u")+muted.Render(":Univ ")+sec.Render("/")+muted.Render(":Find"))
 	}
 	if len(v.Filtered) == 0 {
 		lines = append(lines, " "+muted.Render("No remotes match filter"))
@@ -1376,7 +1827,11 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 		}
 		return SplitLinesPadded(lines, w, h)
 	}
-	visible := max(1, h-3)
+	reserved := 3
+	if showModeStrip {
+		reserved = 4
+	}
+	visible := max(1, h-reserved)
 	start, end := ScrollWindow(len(v.Filtered), v.BrowseCursor, visible)
 	for i := start; i < end; i++ {
 		e := v.Filtered[i]
@@ -1397,7 +1852,319 @@ func (v IRView) renderBrowse(w, h int, pal theme.Palette, focused bool) []string
 	if v.BrowseSearching {
 		lines = append(lines, " "+muted.Render(Truncate("⏎:done  Esc:clear", max(6, w-2))))
 	} else {
-		lines = append(lines, " "+muted.Render(Truncate("↑↓:sel ←→:type /:find ⏎:open", max(6, w-2))))
+		lines = append(lines, " "+muted.Render(Truncate("↑↓:sel m:match u:univ ⏎:open", max(6, w-2))))
+	}
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v IRView) renderTypePicker(w, h int, pal theme.Palette, focused bool, title, hint string) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	countStr := fmt.Sprintf("%d", len(v.CategoryStats))
+	titleW := max(6, w-len(countStr)-3)
+	lines := []string{
+		" " + accent.Render(FitLine(Truncate(title, titleW), titleW)) + " " + muted.Render(countStr),
+	}
+	if len(v.CategoryStats) == 0 {
+		lines = append(lines, " "+muted.Render("No device types available"))
+	} else {
+		listH := max(1, h-2)
+		cursor := clampIndex(v.TypeCursor, len(v.CategoryStats))
+		start, end := ScrollWindow(len(v.CategoryStats), cursor, listH)
+		for i := start; i < end; i++ {
+			cat := v.CategoryStats[i]
+			val := fmt.Sprintf("%d", cat.Count)
+			nameW := max(8, w-len(val)-5)
+			if i == cursor && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(cat.Name, nameW), val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if i == cursor {
+					pfx = accent.Render(" ▸ ")
+				}
+				lines = append(lines, pfx+txt.Render(FitLine(cat.Name, nameW))+" "+muted.Render(val))
+			}
+		}
+	}
+	if h >= 3 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+	}
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v IRView) renderMatchBrand(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	countStr := fmt.Sprintf("%d", len(v.MatchBrands))
+	titleW := max(6, w-len(countStr)-3)
+	lines := []string{
+		" " + accent.Render(FitLine(Truncate("Match: "+v.MatchCategory, titleW), titleW)) + " " + muted.Render(countStr),
+	}
+	switch {
+	case v.MatchBrandSearching:
+		fieldW := max(6, w-8)
+		lines = append(lines, " "+sec.Render("Find: ")+txt.Render(tailWindow(v.MatchBrandQuery, fieldW-1)+"_"))
+	case v.MatchBrandQuery != "":
+		lines = append(lines, " "+sec.Render("Find: ")+warn.Render(Truncate(v.MatchBrandQuery, max(6, w-8))))
+	default:
+		lines = append(lines, " "+muted.Render(Truncate("/:find  [/]:A-Z  ⏎:test", max(6, w-2))))
+	}
+
+	if len(v.MatchBrands) == 0 {
+		lines = append(lines, " "+muted.Render("No matching brands"))
+	} else {
+		listH := max(1, h-3)
+		cursor := clampIndex(v.MatchBrandCursor, len(v.MatchBrands))
+		start, end := ScrollWindow(len(v.MatchBrands), cursor, listH)
+		for i := start; i < end; i++ {
+			b := v.MatchBrands[i]
+			val := fmt.Sprintf("%d", b.Count)
+			nameW := max(8, w-len(val)-5)
+			if i == cursor && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(b.Name, nameW), val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if i == cursor {
+					pfx = accent.Render(" ▸ ")
+				}
+				lines = append(lines, pfx+txt.Render(FitLine(b.Name, nameW))+" "+muted.Render(val))
+			}
+		}
+	}
+	if h >= 4 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		hint := "↑↓:sel /:find [/]:A-Z ⏎:test"
+		if v.MatchBrandSearching {
+			hint = "⏎:done  Esc:clear"
+		}
+		if v.MatchErr != "" {
+			lines = append(lines, " "+danger.Render(Truncate(v.MatchErr, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+		}
+	}
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v IRView) renderMatchTest(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	header := v.MatchCategory + " · " + v.MatchBrand
+	if v.MatchLoading {
+		lines := []string{
+			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
+			" " + warn.Render("Loading Power codes…"),
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+	if v.MatchSaving {
+		lines := []string{
+			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
+			" " + warn.Render("Saving full remote…"),
+		}
+		return SplitLinesPadded(lines, w, h)
+	}
+	if len(v.MatchCandidates) == 0 {
+		errTxt := v.MatchErr
+		if errTxt == "" {
+			errTxt = "No Power candidates found"
+		}
+		lines := []string{
+			" " + accent.Render(Truncate("Match: "+header, max(6, w-2))),
+			" " + danger.Render(Truncate(errTxt, max(6, w-2))),
+		}
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+muted.Render(Truncate("Esc:back", max(6, w-2))))
+		return SplitLinesPadded(lines, w, h)
+	}
+
+	cand := v.MatchCandidates[v.MatchCursor]
+	counter := fmt.Sprintf("%d/%d", v.MatchCursor+1, len(v.MatchCandidates))
+	titleW := max(6, w-len(counter)-3)
+	proto := cand.Signal.Protocol
+	if proto == "" {
+		proto = "raw"
+	}
+	lines := []string{
+		" " + accent.Render(FitLine(Truncate(header, titleW), titleW)) + " " + muted.Render(counter),
+		" " + sec.Render("Model ") + txt.Render(Truncate(cand.Entry.Model+" ("+cand.Entry.Provider+")", max(6, w-8))),
+	}
+	if v.Note != "" {
+		st := ok
+		if v.NoteIsErr {
+			st = danger
+		}
+		lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+	} else if v.MatchErr != "" {
+		lines = append(lines, " "+danger.Render(Truncate(v.MatchErr, max(6, w-2))))
+	} else {
+		lines = append(lines, " "+muted.Render(Truncate(fmt.Sprintf("%s · %dt · %dHz (%dk)", proto, len(cand.Signal.Timings), cand.Signal.Frequency, cand.SignalCount), max(6, w-2))))
+	}
+
+	type actItem struct {
+		name string
+		val  string
+		ok   bool
+	}
+	nextNum := (v.MatchCursor+1)%len(v.MatchCandidates) + 1
+	items := []actItem{
+		{name: "Test Power", val: fmt.Sprintf("#%d", v.MatchCursor+1), ok: true},
+		{name: "Next code", val: fmt.Sprintf("#%d", nextNum)},
+		{name: "Works! Save remote", val: "save", ok: true},
+	}
+	listH := max(1, h-4)
+	cursor := clampIndex(v.MatchActionCursor, len(items))
+	start, end := ScrollWindow(len(items), cursor, listH)
+	for i := start; i < end; i++ {
+		it := items[i]
+		nameW := max(8, w-len([]rune(it.val))-5)
+		if i == cursor && focused {
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+		} else {
+			pfx := "   "
+			if i == cursor {
+				pfx = accent.Render(" ▸ ")
+			}
+			vSty := muted
+			if it.ok {
+				vSty = ok
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), vSty.Render(it.val)))
+		}
+	}
+	if h >= 4 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+muted.Render(Truncate("⏎:run ←→:step p:try y:save", max(6, w-2))))
+		if len(lines) > h {
+			lines = append(lines[:h-1], lines[len(lines)-1])
+		}
+	}
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	if v.UnivBlasting {
+		badge := "BLAST"
+		titleW := max(6, w-len(badge)-3)
+		p := v.UnivProgress
+		ratio := 0.0
+		if p.TotalEntries > 0 {
+			ratio = float64(p.EntryIndex) / float64(p.TotalEntries)
+		}
+		count := fmt.Sprintf("%d/%d #%d", p.EntryIndex, p.TotalEntries, p.UniqueSent)
+		barW := max(4, w-len(count)-3)
+		curName := p.Current.Display()
+		if strings.TrimSpace(curName) == "" {
+			curName = "scanning remotes…"
+		}
+		proto := p.Signal.Protocol
+		if proto == "" {
+			proto = "raw"
+		}
+		sigLine := fmt.Sprintf("%s · %dt · %dHz", proto, len(p.Signal.Timings), p.Signal.Frequency)
+		if len(p.Signal.Timings) == 0 {
+			sigLine = "Preparing IR transmitter…"
+		}
+		lines := []string{
+			" " + accent.Render(FitLine(Truncate("Univ: "+v.UnivCategory, titleW), titleW)) + " " + warn.Render(badge),
+			" " + sec.Render("Btn ") + txt.Render(Truncate(v.univTargetLabel(v.UnivBlastTarget), max(6, w-6))),
+			" " + accent.Render(MiniBar(ratio, barW, v.ASCII)) + " " + muted.Render(count),
+			" " + sec.Render("Try ") + txt.Render(Truncate(curName, max(6, w-6))),
+			" " + muted.Render(Truncate(sigLine, max(6, w-2))),
+		}
+		if h >= 7 {
+			lines = append(lines, " "+txt.Render(Truncate("Point IR at device", max(6, w-2))))
+		}
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+warn.Render(Truncate("Esc / Space: STOP", max(6, w-2))))
+		return SplitLinesPadded(lines, w, h)
+	}
+
+	badge := "TEMP"
+	titleW := max(6, w-len(badge)-3)
+	lines := []string{
+		" " + accent.Render(FitLine(Truncate("Univ: "+v.UnivCategory, titleW), titleW)) + " " + muted.Render(badge),
+	}
+	hasStatus := v.UnivBlastErr != "" || v.Note != ""
+	reserved := 2
+	if hasStatus {
+		reserved = 3
+	}
+	listH := max(1, h-reserved)
+	cursor := clampIndex(v.UnivCursor, len(v.UnivButtons))
+	start, end := ScrollWindow(len(v.UnivButtons), cursor, listH)
+	for i := start; i < end; i++ {
+		b := v.UnivButtons[i]
+		keyLbl := ir.KeyLabel(b.Key)
+		if i == cursor && focused {
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(keyLbl, 5), b.Label)
+			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+		} else {
+			pfx := "   "
+			if i == cursor {
+				pfx = accent.Render(" ▸ ")
+			}
+			lines = append(lines, pfx+sec.Render(FitLine(keyLbl, 5))+" "+txt.Render(Truncate(b.Label, max(6, w-10))))
+		}
+	}
+	if h >= 3 {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		switch {
+		case v.UnivBlastErr != "":
+			lines = append(lines, " "+danger.Render(Truncate(v.UnivBlastErr, max(6, w-2))))
+		case v.Note != "":
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		default:
+			lines = append(lines, " "+muted.Render(Truncate("key/⏎:blast ↑↓:sel Esc:back", max(6, w-2))))
+		}
+		if len(lines) > h {
+			lines = append(lines[:h-1], lines[len(lines)-1])
+		}
 	}
 	return SplitLinesPadded(lines, w, h)
 }
