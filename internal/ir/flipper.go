@@ -3,6 +3,7 @@ package ir
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,9 +29,13 @@ func ParseFlipperFile(path string) (Remote, error) {
 		return Remote{}, err
 	}
 	defer f.Close()
+	return ParseFlipperReader(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), path, f)
+}
 
+// ParseFlipperReader parses a Flipper IR signals stream.
+func ParseFlipperReader(name, path string, rd io.Reader) (Remote, error) {
 	r := Remote{
-		Name:     strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		Name:     name,
 		Provider: "flipper",
 		Path:     path,
 	}
@@ -48,7 +53,7 @@ func ParseFlipperFile(path string) (Remote, error) {
 		cur = nil
 	}
 
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(rd)
 	// IR files are small, but keep a generous token limit for long raw data.
 	sc.Buffer(make([]byte, 1024), 1024*1024)
 	for sc.Scan() {

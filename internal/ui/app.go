@@ -576,17 +576,22 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.Focus == FocusContent && m.ActiveView == ViewIR {
 		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+		if m.IR.IsTextInput() {
+			if k == "esc" {
+				m.IR.HandleEsc()
+				return m, nil
+			}
+			m.IR.HandleTextKey(msg)
+			return m, nil
+		}
 		if m.IR.IsKeyCaptureActive() {
 			if k == "esc" {
 				m.IR.HandleEsc()
 				return m, nil
 			}
 			bk := ir.NormalizeBindKey(k)
-			if ir.IsBindableKey(bk) && m.IR.BindLearned(bk) {
-				if m.IR.NoteIsErr {
-					return m, m.setStatus("IR save failed")
-				}
-				return m, m.setStatus("Bound " + ir.KeyLabel(bk))
+			if ir.IsBindableKey(bk) && m.IR.StartBindLabel(bk) {
+				return m, nil
 			}
 			m.IR.LearnErr = "Use a-z, 0-9, F1-F8, Enter, Bksp"
 			return m, nil
@@ -699,6 +704,11 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.Cfg.ConfirmQuit {
 				m.ConfirmExit = true
 			}
+		}
+		if m.ActiveView == ViewIR && IRTab(m.ActiveTabs[ViewIR]) == IRTabBrowse && !m.IR.IndexDone && !m.IR.IndexLoading {
+			m.IR.RemoteErr = ""
+			m.IR.IndexLoading = true
+			return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
 		}
 		if m.ActiveView == ViewStatus {
 			switch m.ActiveTabs[ViewStatus] {
@@ -908,6 +918,56 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 		switch m.IR.Tab {
 		case IRTabRemote:
+			if m.IR.RemoteMode == remoteModeList {
+				switch {
+				case m.isUp(k):
+					m.IR.MoveRemoteList(-1)
+				case m.isDown(k):
+					m.IR.MoveRemoteList(1)
+				case k == "enter" || k == " ":
+					if m.IR.RemoteListCursor < len(m.IR.Store.Profiles) {
+						m.IR.SelectRemoteFromList(m.IR.RemoteListCursor)
+					} else {
+						m.IR.BeginNewRemote(false)
+					}
+				case k == "l":
+					if m.IR.RemoteListCursor < len(m.IR.Store.Profiles) {
+						m.IR.SelectRemoteFromList(m.IR.RemoteListCursor)
+						m.ActiveTabs[ViewIR] = int(IRTabLearn)
+						m.IR.Tab = IRTabLearn
+					}
+				case k == "x" || k == "backspace" || k == "delete":
+					if m.IR.RemoteListCursor < len(m.IR.Store.Profiles) {
+						m.IR.DeleteRemoteFromList(m.IR.RemoteListCursor)
+					}
+				}
+				return m, nil
+			}
+			if len(m.IR.Store.Profiles) == 0 {
+				switch {
+				case m.isUp(k):
+					m.IR.MoveEmptyMenu(-1)
+				case m.isDown(k):
+					m.IR.MoveEmptyMenu(1)
+				case k == "enter" || k == " ":
+					switch m.IR.EmptyMenuCursor {
+					case 0:
+						m.IR.BeginNewRemote(false)
+					case 1:
+						m.ActiveTabs[ViewIR] = int(IRTabLearn)
+						m.IR.Tab = IRTabLearn
+					case 2:
+						m.ActiveTabs[ViewIR] = int(IRTabBrowse)
+						m.IR.Tab = IRTabBrowse
+						if !m.IR.IndexDone && !m.IR.IndexLoading {
+							m.IR.RemoteErr = ""
+							m.IR.IndexLoading = true
+							return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+						}
+					}
+				}
+				return m, nil
+			}
 			switch {
 			case m.isUp(k):
 				if m.IR.RemoteScroll > 0 {
@@ -915,11 +975,18 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				}
 			case m.isDown(k):
 				m.IR.RemoteScroll++
-			case k == "[":
+			case m.isLeft(k) || k == "[":
 				m.IR.CycleProfile(-1)
-			case k == "]":
+			case m.isRight(k) || k == "]":
 				m.IR.CycleProfile(1)
+			case k == "tab":
+				m.IR.OpenRemoteList()
 			default:
+				if p := m.IR.Store.ActiveProfile(); p != nil && len(p.Bindings) == 0 && k == "enter" {
+					m.ActiveTabs[ViewIR] = int(IRTabLearn)
+					m.IR.Tab = IRTabLearn
+					return m, nil
+				}
 				if b, ok := m.IR.BindingForKey(k); ok {
 					return m.sendIR(b.Signal, b.Name)
 				}
@@ -979,7 +1046,13 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					case learnOptListen:
 						return m.startIRCapture()
 					case learnOptProfile:
-						m.IR.CycleProfile(1)
+						if len(m.IR.Store.Profiles) > 1 {
+							m.IR.CycleProfile(1)
+						} else if len(m.IR.Store.Profiles) == 0 {
+							m.IR.BeginNewRemote(true)
+						}
+					case learnOptNewRemote:
+						m.IR.BeginNewRemote(true)
 					}
 				}
 			}
@@ -996,6 +1069,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					m.IR.CycleCategory(-1)
 				case m.isRight(k):
 					m.IR.CycleCategory(1)
+				case k == "[":
+					m.IR.JumpBrand(-1)
+				case k == "]":
+					m.IR.JumpBrand(1)
+				case k == "/":
+					m.IR.BrowseSearching = true
 				case k == "p":
 					m.IR.CycleProvider(1)
 				case k == "enter":
@@ -1397,6 +1476,9 @@ func (m AppModel) currentHints() []Hint {
 	if m.ActiveView == ViewIR {
 		switch m.IR.Tab {
 		case IRTabLearn:
+			if m.IR.NewRemoteInput || m.IR.AwaitBindLabel {
+				return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "back"}}
+			}
 			if m.IR.Capturing {
 				return []Hint{{Key: "Esc", Desc: "cancel"}, {Key: "q", Desc: "stop"}}
 			}
@@ -1414,9 +1496,21 @@ func (m AppModel) currentHints() []Hint {
 				}
 				return []Hint{{Key: "p/v/m", Desc: "try"}, {Key: "a", Desc: "accept"}, {Key: "g", Desc: "grid"}, {Key: "Esc", Desc: "back"}}
 			}
-			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "type"}, {Key: "p", Desc: "src"}, {Key: "⏎", Desc: "open"}, {Key: "r", Desc: "index"}}
+			if m.IR.BrowseSearching {
+				return []Hint{{Key: "⏎", Desc: "done"}, {Key: "Esc", Desc: "clear"}}
+			}
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "type"}, {Key: "/", Desc: "find"}, {Key: "p", Desc: "src"}, {Key: "⏎", Desc: "open"}}
 		default:
-			return []Hint{{Key: "key", Desc: "send"}, {Key: "[ ]", Desc: "profile"}, {Key: "Esc", Desc: "tabs"}}
+			if m.IR.RemoteMode == remoteModeNew {
+				return []Hint{{Key: "⏎", Desc: "create"}, {Key: "Esc", Desc: "cancel"}}
+			}
+			if m.IR.RemoteMode == remoteModeList {
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "use"}, {Key: "l", Desc: "learn"}, {Key: "x", Desc: "del"}}
+			}
+			if len(m.IR.Store.Profiles) == 0 {
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "open"}, {Key: "Esc", Desc: "tabs"}}
+			}
+			return []Hint{{Key: "key", Desc: "send"}, {Key: "←→", Desc: "rem"}, {Key: "Tab", Desc: "manage"}, {Key: "Esc", Desc: "tabs"}}
 		}
 	}
 	if m.ActiveView == ViewSystem {
