@@ -1,0 +1,120 @@
+package wifi
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const testIWScanWPS = `
+BSS 5c:7b:5c:46:e7:a8(on wlan0)
+	freq: 2412.0
+	signal: -62.00 dBm
+	SSID: LabNet
+	capability: ESS Privacy (0x0411)
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK
+	WPS:	 * Version: 1.0
+		 * AP setup locked: 0x00
+		 * Model: RT-AC66U
+		 * Model Number: 1.0
+		 * Device name: ASUS Router
+
+BSS 11:22:33:44:55:66(on wlan0)
+	freq: 2437.0
+	signal: -70.00 dBm
+	SSID: OfficeAP
+	capability: ESS Privacy (0x0411)
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK SAE
+	WPS:	 * Version: 2.0
+		 * AP setup locked: 0x01
+		 * Device name: Unknown Box
+`
+
+func TestParseWPSScan(t *testing.T) {
+	infos := ParseWPSScan(testIWScanWPS)
+	if len(infos) != 2 {
+		t.Fatalf("expected 2 WPS APs, got %d: %+v", len(infos), infos)
+	}
+	vuln := []string{"RT-AC66U 1.0", "Some Other Router"}
+	a, ok := infos["5C:7B:5C:46:E7:A8"]
+	if !ok || !a.WPS || a.Version != "1.0" || a.Locked {
+		t.Fatalf("unexpected WPS 1.0 info: %+v", a)
+	}
+	if a.Model != "RT-AC66U" || a.ModelNumber != "1.0" || a.DeviceName != "ASUS Router" {
+		t.Fatalf("model fields = %+v", a)
+	}
+	if !a.Vulnerable(vuln) {
+		t.Fatal("WPS 1.0 AP must be considered vulnerable")
+	}
+
+	b := infos["11:22:33:44:55:66"]
+	if b.Version != "2.0" || !b.Locked {
+		t.Fatalf("unexpected WPS 2.0 info: %+v", b)
+	}
+	if b.Vulnerable(nil) {
+		t.Fatal("WPS 2.0 AP without a DB match must not be considered vulnerable")
+	}
+	if !b.Vulnerable([]string{"Unknown Box"}) {
+		t.Fatal("expected OneShot DB device-name match to mark the AP vulnerable")
+	}
+}
+
+func TestWPSInfoVulnerableMatchesDB(t *testing.T) {
+	info := WPSInfo{WPS: true, Version: "2.0", Model: "Fritz!Box", ModelNumber: "7390"}
+	if !info.Vulnerable([]string{"Fritz!Box 7390"}) {
+		t.Fatal("expected model+number DB match to be vulnerable")
+	}
+	if info.Vulnerable([]string{"Fritz!Box 7490"}) {
+		t.Fatal("expected non-matching model to be safe")
+	}
+	if (WPSInfo{}).Vulnerable([]string{"anything"}) {
+		t.Fatal("AP without WPS must never be vulnerable")
+	}
+}
+
+func TestFindOneShotAndVulnList(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ose.py")
+	if err := os.WriteFile(script, []byte("#!/usr/bin/env python3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vulnPath := filepath.Join(dir, "vulnwsc.txt")
+	if err := os.WriteFile(vulnPath, []byte("# comment\nRT-AC66U 1.0\n\nFritz!Box 7390\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := FindOneShot(dir)
+	if !o.Found() || o.Script != script || o.Dir != dir {
+		t.Fatalf("FindOneShot = %+v", o)
+	}
+	if o.VulnList != vulnPath {
+		t.Fatalf("VulnList = %q, want %q", o.VulnList, vulnPath)
+	}
+	list := LoadVulnList(vulnPath)
+	if len(list) != 2 || list[0] != "RT-AC66U 1.0" || list[1] != "Fritz!Box 7390" {
+		t.Fatalf("LoadVulnList = %v", list)
+	}
+	if got := LoadVulnList(filepath.Join(dir, "missing.txt")); len(got) != 0 {
+		t.Fatalf("expected empty list for missing DB, got %v", got)
+	}
+
+	// A path pointing directly at ose.py also resolves.
+	if o2 := FindOneShot(script); !o2.Found() || o2.Script != script {
+		t.Fatalf("FindOneShot(script) = %+v", o2)
+	}
+}
+
+func TestSplitAttackArgs(t *testing.T) {
+	got := SplitAttackArgs(" -P  -k   -F ")
+	if strings.Join(got, " ") != "-P -k -F" || len(got) != 3 {
+		t.Fatalf("SplitAttackArgs = %#v", got)
+	}
+}
+
+func TestDefaultOneShotAttack(t *testing.T) {
+	if OneShotDefaultAttack != "-P -k -F" {
+		t.Fatalf("default OneShot attack = %q, want -P -k -F", OneShotDefaultAttack)
+	}
+}

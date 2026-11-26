@@ -112,6 +112,22 @@ type wifiPentestProgressMsg struct {
 
 type wifiPentestTickMsg struct{}
 
+type wpsScanDoneMsg struct {
+	iface string
+	infos map[string]wifi.WPSInfo
+	err   error
+}
+
+type wpsRunLineMsg struct {
+	seq  int
+	line string
+}
+
+type wpsRunDoneMsg struct {
+	seq int
+	err error
+}
+
 type irCaptureDoneMsg struct {
 	seq int
 	sig ir.Signal
@@ -213,6 +229,8 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		IR:         NewIRView(cfgPath),
 		Bluetooth:  NewBluetoothView(),
 	}
+	m.WifiScan.ColorMode = cfg.WiFiColor
+	m.WifiScan.SetOneShotRefresh(cfg.OneShotDir)
 	if cfg.IRFlipperDir != "" {
 		m.IR.Roots.Flipper = cfg.IRFlipperDir
 	}
@@ -317,6 +335,54 @@ func wifiPentestTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg {
 		return wifiPentestTickMsg{}
 	})
+}
+
+func wpsScanCmd(iface string) tea.Cmd {
+	return func() tea.Msg {
+		infos, err := wifi.ScanWPS(iface)
+		return wpsScanDoneMsg{iface: iface, infos: infos, err: err}
+	}
+}
+
+func wpsRunCmd(ctx context.Context, seq int, o wifi.OneShot, iface, bssid string, args []string, ch chan string) tea.Cmd {
+	return func() tea.Msg {
+		defer func() {
+			if ch != nil {
+				close(ch)
+			}
+		}()
+		err := wifi.RunOneShot(ctx, o, iface, bssid, args, func(line string) {
+			if ch == nil {
+				return
+			}
+			select {
+			case ch <- line:
+			default:
+				select {
+				case <-ch:
+				default:
+				}
+				select {
+				case ch <- line:
+				default:
+				}
+			}
+		})
+		return wpsRunDoneMsg{seq: seq, err: err}
+	}
+}
+
+func waitWPSLineCmd(seq int, ch <-chan string) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return wpsRunLineMsg{seq: seq, line: line}
+	}
 }
 
 func irCaptureCmd(ctx context.Context, path string, timeout time.Duration, seq int) tea.Cmd {
@@ -489,10 +555,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wifiNetworksScannedMsg:
 		m.WifiScan.SetScanResult(msg.iface, msg.nets, msg.err)
+		wpsCmd := m.maybeWPSScanCmd()
 		if msg.err != nil {
-			return m, tea.Batch(m.setStatus("Scan failed"), m.resetMarquee())
+			return m, tea.Batch(m.setStatus("Scan failed"), m.resetMarquee(), wpsCmd)
 		}
-		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface)), m.resetMarquee())
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d networks on %s", len(msg.nets), msg.iface)), m.resetMarquee(), wpsCmd)
 
 	case wifiConnectDoneMsg:
 		m.WifiScan.SetConnectResult(msg.req, msg.err)
@@ -533,6 +600,29 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.WifiScan.PentestElapsed = time.Since(m.WifiScan.PentestStarted)
 		}
 		return m, wifiPentestTickCmd()
+
+	case wpsScanDoneMsg:
+		m.WifiScan.SetWPSInfo(msg.iface, msg.infos, msg.err)
+		return m, nil
+
+	case wpsRunLineMsg:
+		if !m.WifiScan.WPSActive || msg.seq != m.WifiScan.WPSSeq {
+			return m, nil
+		}
+		m.WifiScan.ApplyWPSLine(msg.seq, msg.line)
+		return m, waitWPSLineCmd(msg.seq, m.WifiScan.WPSProgressCh)
+
+	case wpsRunDoneMsg:
+		m.WifiScan.DrainWPSLines(msg.seq)
+		m.WifiScan.FinishWPSRun(msg.seq, msg.err)
+		switch {
+		case msg.err == nil:
+			return m, tea.Batch(m.setStatus("OneShot finished"), m.resetMarquee())
+		case strings.Contains(msg.err.Error(), "canceled"):
+			return m, tea.Batch(m.setStatus("OneShot stopped"), m.resetMarquee())
+		default:
+			return m, tea.Batch(m.setStatus("OneShot failed"), m.resetMarquee())
+		}
 
 	case irCaptureDoneMsg:
 		m.IR.ApplyCaptureResult(msg.seq, msg.sig, msg.err)
@@ -746,6 +836,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.IR.StopUniversalBlast()
 		return m, m.setStatus("IR blast stopped")
 	}
+	if m.WifiScan.WPSActive && (k == "ctrl+c" || k == "q") {
+		m.WifiScan.StopWPSRun()
+		return m, m.setStatus("OneShot stopped")
+	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
@@ -754,6 +848,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if submit, handled := m.WifiScan.HandleTextKey(msg); handled {
 			if submit {
+				if m.WifiScan.Mode == scanModeWPSPin {
+					pin := strings.TrimSpace(m.WifiScan.WPSPinInput)
+					return m.launchWPS("Custom PIN", []string{"-p", pin, "-k"})
+				}
 				req := m.WifiScan.BuildConnectRequest()
 				return m, tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
 			}
@@ -889,9 +987,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if !m.WifiScan.HasScanned && !m.WifiScan.Scanning {
 					iface := m.WifiScan.EffectiveScanIface()
 					m.WifiScan.StartScan()
-					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
+					return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."), m.maybeWPSScanCmd())
 				}
-				return m, collectWifiCmd()
+				return m, tea.Batch(collectWifiCmd(), m.maybeWPSScanCmd())
 			} else if m.ActiveView == ViewIR {
 				m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 				m.IR.RefreshHardware()
@@ -937,6 +1035,44 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.handleContentKey(k)
+}
+
+func (m *AppModel) maybeWPSScanCmd() tea.Cmd {
+	if m.Cfg.WiFiColor != config.WiFiColorOneShot {
+		return nil
+	}
+	return m.wpsScanForcedCmd()
+}
+
+// wpsScanForcedCmd refreshes WPS data regardless of color mode (used by the
+// WPS menu and network details).
+func (m *AppModel) wpsScanForcedCmd() tea.Cmd {
+	iface := m.WifiScan.EffectiveScanIface()
+	if !m.WifiScan.WPSInfoStale(iface) || m.WifiScan.WPSLoadingFor(iface) {
+		return nil
+	}
+	if m.WifiScan.WPSLoading == nil {
+		m.WifiScan.WPSLoading = make(map[string]bool)
+	}
+	m.WifiScan.WPSLoading[iface] = true
+	return wpsScanCmd(iface)
+}
+
+func (m AppModel) launchWPS(label string, args []string) (tea.Model, tea.Cmd) {
+	ctx, seq, ch, ok := m.WifiScan.StartWPSRun(label, args)
+	if !ok {
+		note := m.WifiScan.WPSNote
+		if note == "" {
+			note = "WPS attack unavailable"
+		}
+		return m, m.setStatus(note)
+	}
+	iface := m.WifiScan.EffectiveScanIface()
+	return m, tea.Batch(
+		m.setStatus("OneShot: "+label),
+		wpsRunCmd(ctx, seq, m.WifiScan.OneShot, iface, m.WifiScan.TargetBSSID(), args, ch),
+		waitWPSLineCmd(seq, ch),
+	)
 }
 
 func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
@@ -1070,8 +1206,20 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				m.WifiScan.MoveNetwork(1)
 			case m.isLeft(k):
 				m.WifiScan.CycleScanIface(-1)
+				return m, tea.Batch(m.resetMarquee(), m.maybeWPSScanCmd())
 			case m.isRight(k) || k == "i":
 				m.WifiScan.CycleScanIface(1)
+				return m, tea.Batch(m.resetMarquee(), m.maybeWPSScanCmd())
+			case k == "o":
+				mode := m.WifiScan.ToggleColorMode()
+				m.Cfg.WiFiColor = mode
+				_ = config.Save(m.ConfigPath, m.Cfg)
+				cmd := m.maybeWPSScanCmd()
+				label := "Security colors"
+				if mode == config.WiFiColorOneShot {
+					label = "OneShot colors"
+				}
+				return m, tea.Batch(m.setStatus(label), cmd)
 			case k == "s":
 				if !m.WifiScan.Scanning {
 					iface := m.WifiScan.EffectiveScanIface()
@@ -1109,8 +1257,34 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					return m.startWifiPentest(wifi.PentestHandshake)
 				case wifiActDeauth:
 					return m.startWifiPentest(wifi.PentestDeauth)
+				case wifiActWPS:
+					m.WifiScan.BeginWPSMenu(scanModeActions)
+					return m, tea.Batch(m.resetMarquee(), m.wpsScanForcedCmd())
 				case wifiActDetail:
 					m.WifiScan.OpenDetail(scanModeActions)
+					return m, m.wpsScanForcedCmd()
+				}
+			}
+			return m, nil
+
+		case scanModeWPSMenu:
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveWPSMenu(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveWPSMenu(1)
+			case k == "enter" || k == " ":
+				method, ok := m.WifiScan.SelectedWPSMethod()
+				if !ok {
+					return m, nil
+				}
+				switch {
+				case method.Back:
+					m.WifiScan.HandleEsc()
+				case method.Custom:
+					m.WifiScan.StartWPSPin()
+				default:
+					return m.launchWPS(method.Label, method.Args)
 				}
 			}
 			return m, nil
@@ -1898,11 +2072,21 @@ func (m AppModel) currentHints() []Hint {
 				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
 			}
 			return []Hint{{Key: "Esc", Desc: "back"}, {Key: "q", Desc: "quit"}}
+		case scanModeWPSMenu:
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
+		case scanModeWPSPin:
+			return []Hint{{Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
+		case scanModeWPSRun:
+			if m.WifiScan.WPSActive {
+				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+			}
+			return []Hint{{Key: "Esc", Desc: "back"}}
 		default:
 			return []Hint{
 				{Key: "↑↓", Desc: "sel"},
 				{Key: "←→", Desc: "if"},
 				{Key: "s", Desc: "scan"},
+				{Key: "o", Desc: "color"},
 				{Key: "⏎", Desc: "act"},
 				{Key: "Esc", Desc: "tabs"},
 			}

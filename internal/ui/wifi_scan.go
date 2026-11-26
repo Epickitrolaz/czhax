@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/wifi"
 )
@@ -25,6 +26,9 @@ const (
 	scanModeSSID
 	scanModePassword
 	scanModePentest
+	scanModeWPSMenu
+	scanModeWPSPin
+	scanModeWPSRun
 )
 
 type WifiScanAction int
@@ -35,6 +39,7 @@ const (
 	wifiActHandshake
 	wifiActDeauth
 	wifiActDetail
+	wifiActWPS
 	wifiActCount
 )
 
@@ -80,6 +85,32 @@ type WifiScanView struct {
 	// Connected tracks the active link per interface so each adapter shows only
 	// its own associated network.
 	Connected map[string]wifi.Interface
+
+	// Network coloring and OneShot integration.
+	ColorMode  string
+	OneShot    wifi.OneShot
+	VulnList   []string
+	WPSByIface map[string]map[string]wifi.WPSInfo
+	WPSFetched map[string]time.Time
+	WPSLoading map[string]bool
+	WPSNote    string
+
+	WPSMenuCursor int
+	WPSMenuReturn WifiScanMode
+	WPSPinInput   string
+	WPSMethod     string
+	WPSActive     bool
+	WPSCancel     context.CancelFunc
+	WPSScript     string
+	WPSArgs       []string
+	WPSLines      []string
+	WPSSeq        int
+	WPSElapsed    time.Duration
+	WPSStarted    time.Time
+	WPSProgressCh chan string
+	WPSErr        string
+	WPSDone       string
+	WPSOutput     string
 }
 
 // ActiveLink reports the network associated on iface (if any).
@@ -116,7 +147,7 @@ func NewWifiScanView() WifiScanView {
 }
 
 func (v WifiScanView) IsTextInput() bool {
-	return v.Mode == scanModePassword || v.Mode == scanModeSSID
+	return v.Mode == scanModePassword || v.Mode == scanModeSSID || v.Mode == scanModeWPSPin
 }
 
 func (v WifiScanView) EffectiveScanIface() string {
@@ -240,7 +271,8 @@ func (v *WifiScanView) recomputeInUse() {
 	}
 }
 
-func (v *WifiScanView) MoveNetwork(delta int) {	if len(v.Networks) == 0 {
+func (v *WifiScanView) MoveNetwork(delta int) {
+	if len(v.Networks) == 0 {
 		v.Cursor = 0
 		return
 	}
@@ -483,6 +515,14 @@ func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool)
 
 	switch msg.Type {
 	case tea.KeyEnter:
+		if v.Mode == scanModeWPSPin {
+			if strings.TrimSpace(v.WPSPinInput) == "" {
+				v.WPSNote = "Enter a WPS PIN first"
+				return false, true
+			}
+			v.WPSNote = ""
+			return true, true
+		}
 		if v.Mode == scanModeSSID {
 			if strings.TrimSpace(v.SSIDInput) == "" {
 				v.ConnectErr = "Enter an SSID first"
@@ -508,7 +548,9 @@ func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool)
 		return false, true
 
 	case tea.KeyBackspace, tea.KeyDelete:
-		if v.Mode == scanModeSSID {
+		if v.Mode == scanModeWPSPin {
+			v.WPSPinInput = dropLastRune(v.WPSPinInput)
+		} else if v.Mode == scanModeSSID {
 			v.SSIDInput = dropLastRune(v.SSIDInput)
 		} else {
 			v.Password = dropLastRune(v.Password)
@@ -517,7 +559,9 @@ func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool)
 		return false, true
 
 	case tea.KeyCtrlU:
-		if v.Mode == scanModeSSID {
+		if v.Mode == scanModeWPSPin {
+			v.WPSPinInput = ""
+		} else if v.Mode == scanModeSSID {
 			v.SSIDInput = ""
 		} else {
 			v.Password = ""
@@ -526,7 +570,9 @@ func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool)
 		return false, true
 
 	case tea.KeySpace:
-		if v.Mode == scanModeSSID {
+		if v.Mode == scanModeWPSPin {
+			v.WPSPinInput += " "
+		} else if v.Mode == scanModeSSID {
 			v.SSIDInput += " "
 		} else {
 			v.Password += " "
@@ -536,7 +582,9 @@ func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool)
 
 	case tea.KeyRunes:
 		s := string(msg.Runes)
-		if v.Mode == scanModeSSID {
+		if v.Mode == scanModeWPSPin {
+			v.WPSPinInput += s
+		} else if v.Mode == scanModeSSID {
 			v.SSIDInput += s
 		} else {
 			v.Password += s
@@ -610,6 +658,23 @@ func (v *WifiScanView) SetConnectResult(req wifi.ConnectRequest, err error) {
 
 func (v *WifiScanView) HandleEsc() bool {
 	switch v.Mode {
+	case scanModeWPSRun:
+		if v.WPSActive {
+			v.StopWPSRun()
+		} else {
+			v.Mode = scanModeWPSMenu
+			v.WPSDone = ""
+		}
+		return true
+	case scanModeWPSPin:
+		v.WPSPinInput = ""
+		v.WPSNote = ""
+		v.Mode = scanModeWPSMenu
+		return true
+	case scanModeWPSMenu:
+		v.WPSNote = ""
+		v.Mode = v.WPSMenuReturn
+		return true
 	case scanModePentest:
 		if v.PentestActive {
 			v.StopPentest()
@@ -672,6 +737,12 @@ func (v WifiScanView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 		return v.renderPasswordInput(w, h, pal)
 	case scanModePentest:
 		return v.renderPentest(w, h, pal)
+	case scanModeWPSMenu:
+		return v.renderWPSMenu(w, h, pal, focused)
+	case scanModeWPSPin:
+		return v.renderWPSPin(w, h, pal)
+	case scanModeWPSRun:
+		return v.renderWPSRun(w, h, pal)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -684,7 +755,6 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
 	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
-	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	ifaces := v.AvailableIfaces()
@@ -696,10 +766,11 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			break
 		}
 	}
-	ifacePart := sec.Render("If:") + accent.Render(v.Marquee.Truncate(ifaceName, max(5, w-18)))
+	ifacePart := sec.Render("If:") + accent.Render(v.Marquee.Truncate(ifaceName, max(5, w-22)))
 	if len(ifaces) > 1 {
 		ifacePart += muted.Render("◂▸")
 	}
+	ifacePart += muted.Render("·") + ok.Render(v.ColorModeLabel())
 
 	var rightPart string
 	switch {
@@ -764,6 +835,8 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			ssidW := max(4, w-2-1-rightPlainW-1)
 			ssidTxt := v.Marquee.FitLine(n.DisplaySSID(), ssidW)
 			inUse := v.NetworkInUse(n)
+			ssidColor := v.NetworkColor(n, pal)
+			ssidStyle := lipgloss.NewStyle().Foreground(ssidColor)
 
 			if selected && focused {
 				mark := " "
@@ -781,7 +854,7 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 				if inUse {
 					mark = ok.Render("*")
 				}
-				ssidStyled := txt.Render(ssidTxt)
+				ssidStyled := ssidStyle.Render(ssidTxt)
 				if strings.TrimSpace(n.SSID) == "" {
 					ssidStyled = muted.Render(ssidTxt)
 				}
@@ -807,8 +880,17 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 				st = danger
 			}
 			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else if v.WPSNote != "" {
+			lines = append(lines, " "+warn.Render(v.Marquee.Truncate(v.WPSNote, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:actions  s:scan  Esc:tabs", max(6, w-2))))
+			hint := "⏎:act s:scan o:color Esc:tabs"
+			if v.ColorMode == config.WiFiColorOneShot {
+				vuln, wps := v.VulnerableCount()
+				if wps > 0 {
+					hint = fmt.Sprintf("⏎:act s:scan o:color %d/%d vuln", vuln, wps)
+				}
+			}
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 		}
 	}
 
@@ -865,6 +947,7 @@ func (v WifiScanView) renderActions(w, h int, pal theme.Palette, focused bool) [
 		{act: wifiActBoth, name: "Deauth + Capture", val: "loop", warn: true},
 		{act: wifiActHandshake, name: "Handshake Capture", val: "until HS"},
 		{act: wifiActDeauth, name: "Deauth AP", val: "manual", warn: true},
+		{act: wifiActWPS, name: "WPS Attack (OneShot)", val: "oneshot", warn: true},
 		{act: wifiActDetail, name: "Network Details", val: "info"},
 	}
 
@@ -979,6 +1062,15 @@ func (v WifiScanView) buildDetailRows(w int, pal theme.Palette, net wifi.Network
 		rows = append(rows, " "+sec.Render("Mode   ")+txt.Render(v.Marquee.Truncate(net.Mode, valW)))
 	}
 	rows = append(rows, " "+sec.Render("ScanIf ")+muted.Render(v.Marquee.Truncate(v.EffectiveScanIface(), valW)))
+	if info, ok := v.WPSInfoFor(net); ok {
+		wpsVal := info.Label()
+		if !info.WPS {
+			wpsVal = "not advertised"
+		} else if info.Vulnerable(v.VulnList) {
+			wpsVal += " · vuln"
+		}
+		rows = append(rows, " "+sec.Render("WPS    ")+txt.Render(v.Marquee.Truncate(wpsVal, valW)))
+	}
 
 	return rows
 }
