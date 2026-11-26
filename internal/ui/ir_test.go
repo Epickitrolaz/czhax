@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/czhax/czhax/internal/config"
@@ -523,19 +524,43 @@ func TestIRUniversalRemoteFlow(t *testing.T) {
 		if !m.IR.UnivBlasting {
 			t.Fatalf("[%s] expected UnivBlasting after pressing 1", sz.name)
 		}
+		m.IR.UnivBlastStarted = m.IR.UnivBlastStarted.Add(-4 * time.Second)
 		next, _ := m.Update(irUniversalProgressMsg{
 			seq: m.IR.UnivSeq,
 			prog: ir.UniversalProgress{
 				Target:       "power",
-				EntryIndex:   1,
-				TotalEntries: 1,
-				UniqueSent:   1,
+				EntryIndex:   2,
+				TotalEntries: 10,
+				UniqueSent:   2,
+				Current:      m.IR.Index[1],
+				Signal:       sig,
+			},
+		})
+		m = next.(AppModel)
+		flipBlastView := m.View()
+		assertFitsBounds(t, flipBlastView, sz.w, sz.h, sz.name+"/IR/Univ/BlastingFlipper")
+		if !strings.Contains(flipBlastView, "Flipper Zero") || !strings.Contains(flipBlastView, "ETA calc") {
+			t.Fatalf("[%s] expected Flipper Zero DB indicator and ETA calc in universal blast view:\n%s", sz.name, flipBlastView)
+		}
+
+		next, _ = m.Update(irUniversalProgressMsg{
+			seq: m.IR.UnivSeq,
+			prog: ir.UniversalProgress{
+				Target:       "power",
+				EntryIndex:   4,
+				TotalEntries: 10,
+				UniqueSent:   3,
 				Current:      m.IR.Index[0],
 				Signal:       sig,
 			},
 		})
 		m = next.(AppModel)
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Univ/Blasting")
+		m.IR.UnivBlastElapsed = 4 * time.Second
+		blastView := m.View()
+		assertFitsBounds(t, blastView, sz.w, sz.h, sz.name+"/IR/Univ/Blasting")
+		if !strings.Contains(blastView, "Mi Remote") || !strings.Contains(blastView, "ETA ~6s") {
+			t.Fatalf("[%s] expected Mi Remote DB indicator and ETA ~6s in universal blast view:\n%s", sz.name, blastView)
+		}
 
 		m = sendKey(m, " ")
 		if m.IR.UnivBlasting || m.IR.UnivLastBrand != "Daikin" {

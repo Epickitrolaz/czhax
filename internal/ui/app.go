@@ -158,6 +158,8 @@ type irUniversalDoneMsg struct {
 	err        error
 }
 
+type irUnivTickMsg struct{}
+
 type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
@@ -413,6 +415,12 @@ func waitIRUniversalProgressCmd(seq int, ch <-chan ir.UniversalProgress) tea.Cmd
 	}
 }
 
+func irUnivTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return irUnivTickMsg{}
+	})
+}
+
 func collectBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
 		return bluetoothRefreshedMsg{adapters: bluetooth.Collect()}
@@ -596,6 +604,15 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setStatus("Universal stopped"), m.resetMarquee())
 		}
 		return m, tea.Batch(m.setStatus(fmt.Sprintf("Sent %d codes", msg.uniqueSent)), m.resetMarquee())
+
+	case irUnivTickMsg:
+		if !m.IR.UnivBlasting {
+			return m, nil
+		}
+		if !m.IR.UnivBlastStarted.IsZero() {
+			m.IR.UnivBlastElapsed = time.Since(m.IR.UnivBlastStarted)
+		}
+		return m, irUnivTickCmd()
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
@@ -979,10 +996,14 @@ func (m AppModel) startIRUniversalBlast(btn ir.UniversalButton) (tea.Model, tea.
 	}
 	entries := ir.EntriesForCategory(m.IR.Index, m.IR.UnivCategory, m.IR.UnivLastBrand)
 	m.IR.UnivProgress.TotalEntries = len(entries)
+	if len(entries) > 0 {
+		m.IR.UnivProgress.Current.Provider = entries[0].Provider
+	}
 	return m, tea.Batch(
 		m.setStatus("Blasting "+btn.Label+"..."),
 		irUniversalBlastCmd(ctx, seq, m.IR.HW.TXPath, entries, btn.Target, ch),
 		waitIRUniversalProgressCmd(seq, ch),
+		irUnivTickCmd(),
 	)
 }
 
