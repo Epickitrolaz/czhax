@@ -93,9 +93,10 @@ type BluetoothScanView struct {
 
 	WorkDir string
 
-	Adapters   []bluetooth.Adapter
-	AdapterIdx int
-	ScanMode   bluetooth.ScanMode
+	Adapters      []bluetooth.Adapter
+	AdapterIdx    int
+	AdapterManual bool
+	ScanMode      bluetooth.ScanMode
 
 	Scanning   bool
 	HasScanned bool
@@ -184,10 +185,12 @@ func (v *BluetoothScanView) SyncAdapters(adapters []bluetooth.Adapter) {
 		return
 	}
 	found := -1
-	for i, a := range adapters {
-		if a.Name == prev {
-			found = i
-			break
+	if v.AdapterManual {
+		for i, a := range adapters {
+			if a.Name == prev {
+				found = i
+				break
+			}
 		}
 	}
 	if found < 0 {
@@ -224,6 +227,7 @@ func (v *BluetoothScanView) CycleAdapter(delta int) {
 	if len(v.Adapters) <= 1 {
 		return
 	}
+	v.AdapterManual = true
 	v.AdapterIdx = (clampIndex(v.AdapterIdx, len(v.Adapters)) + delta + len(v.Adapters)) % len(v.Adapters)
 	v.Devices = nil
 	v.Cursor = 0

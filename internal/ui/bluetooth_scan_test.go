@@ -171,3 +171,25 @@ func TestBluetoothScanAdapterCycle(t *testing.T) {
 		t.Fatalf("expected hci0 after left, got %q", got)
 	}
 }
+
+func TestBluetoothPrefersUSBAdapter(t *testing.T) {
+	v := NewBluetoothScanView()
+	v.SyncAdapters([]bluetooth.Adapter{
+		{Name: "hci0", Bus: "UART", Up: true, Address: "AA:BB:CC:DD:EE:00"},
+		{Name: "hci1", Bus: "USB", Up: true, Address: "AA:BB:CC:DD:EE:01"},
+	})
+	if got := v.EffectiveHCI(); got != "hci1" {
+		t.Fatalf("expected USB hci1 to be preferred, got %q", got)
+	}
+	v.CycleAdapter(-1)
+	if got := v.EffectiveHCI(); got != "hci0" {
+		t.Fatalf("expected hci0 after manual cycle, got %q", got)
+	}
+	v.SyncAdapters([]bluetooth.Adapter{
+		{Name: "hci0", Bus: "UART", Up: true, Address: "AA:BB:CC:DD:EE:00"},
+		{Name: "hci1", Bus: "USB", Up: true, Address: "AA:BB:CC:DD:EE:01"},
+	})
+	if got := v.EffectiveHCI(); got != "hci0" {
+		t.Fatalf("expected manual hci0 to be preserved, got %q", got)
+	}
+}
