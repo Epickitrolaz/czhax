@@ -186,11 +186,20 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 			devices = mergeDeviceLists(devices, bdevs)
 		}
 	}
+	// btmgmt's BR/EDR records often omit the friendly name. hcitool's inquiry
+	// returns it, so merge those names into the RSSI-bearing entries.
+	if req.Mode != ScanLE && classicNamesMissing(devices) {
+		nreq := req
+		nreq.Mode = ScanClassic
+		if named, _ := scanWithHCITool(ctx, nreq, timeout); len(named) > 0 {
+			devices = mergeDeviceLists(devices, named)
+		}
+	}
 	if len(devices) > 0 {
 		if needsEnrichment(devices) {
 			devices = enrichWithInfo(ctx, devices)
 		}
-		return devices, nil
+		return coalesceBleClassic(devices), nil
 	}
 
 	if ctx.Err() != nil {
@@ -199,7 +208,7 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 
 	devices, hciErr := scanWithHCITool(ctx, req, timeout)
 	if len(devices) > 0 {
-		return devices, nil
+		return coalesceBleClassic(devices), nil
 	}
 	if hciErr != nil {
 		// bluetoothctl ran fine but found nothing; a missing hcitool is not an
@@ -571,6 +580,87 @@ func hasClassicDevice(devices []Device) bool {
 		}
 	}
 	return false
+}
+
+func classicNamesMissing(devices []Device) bool {
+	for _, d := range devices {
+		if d.Kind != "Classic" {
+			continue
+		}
+		if strings.TrimSpace(d.Name) == "" && strings.TrimSpace(d.Alias) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func coalesceBleClassic(devices []Device) []Device {
+	out := append([]Device(nil), devices...)
+	remove := make([]bool, len(out))
+	classicBySuffix := make(map[string]int)
+	classicByName := make(map[string]int)
+	for i, d := range out {
+		if d.Kind != "Classic" {
+			continue
+		}
+		if suf := addressSuffix(d.Address); suf != "" {
+			classicBySuffix[suf] = i
+		}
+		if n := strings.ToLower(d.DisplayName()); n != "" && n != strings.ToLower(d.Address) {
+			classicByName[n] = i
+		}
+	}
+	for i, d := range out {
+		if d.Kind != "BLE" {
+			continue
+		}
+		target := -1
+		if j, ok := classicBySuffix[addressSuffix(d.Address)]; ok {
+			target = j
+		} else if j, ok := classicByName[strings.ToLower(d.DisplayName())]; ok {
+			target = j
+		}
+		if target < 0 {
+			continue
+		}
+		c := &out[target]
+		if c.Name == "" {
+			c.Name = d.Name
+		}
+		if c.Alias == "" {
+			c.Alias = d.Alias
+		}
+		if d.FastPair {
+			c.FastPair = true
+		}
+		if d.HasModelID {
+			c.ModelID = d.ModelID
+			c.HasModelID = true
+		}
+		if len(c.UUIDs) == 0 {
+			c.UUIDs = d.UUIDs
+		}
+		if !c.HasRSSI && d.HasRSSI {
+			c.RSSI = d.RSSI
+			c.HasRSSI = true
+		}
+		remove[i] = true
+	}
+	result := make([]Device, 0, len(out))
+	for i, d := range out {
+		if !remove[i] {
+			result = append(result, d)
+		}
+	}
+	return SortDevices(result)
+}
+
+func addressSuffix(addr string) string {
+	parts := strings.Split(NormalizeAddr(addr), ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	return strings.Join(parts[1:], ":")
 }
 
 func needsEnrichment(devices []Device) bool {
