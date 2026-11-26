@@ -180,15 +180,6 @@ func (v BluetoothScanView) EffectiveController() string {
 	return ""
 }
 
-func (v BluetoothScanView) USBAdapterName() string {
-	for _, a := range v.Adapters {
-		if strings.EqualFold(a.Bus, "USB") && a.Up {
-			return a.Name
-		}
-	}
-	return ""
-}
-
 func (v *BluetoothScanView) SyncAdapters(adapters []bluetooth.Adapter) {
 	prevHCI := v.EffectiveHCI()
 	prev := ""
@@ -719,11 +710,6 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind, opts ...BTActionOptio
 		FastPair:   dev.FastPair,
 		ModelID:    dev.ModelID,
 	}
-	if kind == btActCarwhisperer {
-		if usb := v.USBAdapterName(); usb != "" {
-			req.HCI = usb
-		}
-	}
 	return ctx, req, v.RunSeq, v.RunProgressCh, true
 }
 
@@ -1190,11 +1176,7 @@ func (v BluetoothScanView) renderCWMenu(w, h int, pal theme.Palette, focused boo
 	}
 	lines := []string{header}
 	if h >= 8 {
-		hci := v.EffectiveHCI()
-		if usb := v.USBAdapterName(); usb != "" {
-			hci = usb
-		}
-		lines = append(lines, " "+sec.Render("Radio  ")+txt.Render(v.Marquee.Truncate(hci+" · "+v.CWTarget, max(6, w-9))))
+		lines = append(lines, " "+sec.Render("Radio  ")+txt.Render(v.Marquee.Truncate(v.EffectiveHCI()+" · "+v.CWTarget, max(6, w-9))))
 	}
 	showBottom := (h >= 8 || v.Note != "") && h >= 4
 	listH := h - len(lines)

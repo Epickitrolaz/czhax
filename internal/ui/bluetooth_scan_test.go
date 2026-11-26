@@ -172,6 +172,28 @@ func TestBluetoothScanAdapterCycle(t *testing.T) {
 	}
 }
 
+func TestBluetoothCarwhispererUsesSelectedAdapter(t *testing.T) {
+	v := NewBluetoothScanView()
+	v.WorkDir = t.TempDir()
+	v.Adapters = []bluetooth.Adapter{
+		{Name: "hci0", Bus: "UART", Up: true, Address: "AA:BB:CC:DD:EE:00"},
+		{Name: "hci1", Bus: "USB", Up: true, Address: "AA:BB:CC:DD:EE:01"},
+	}
+	v.AdapterIdx = 0
+	v.AdapterManual = true
+	v.Devices = []bluetooth.Device{{Address: "84:D3:52:E8:E8:FB", Name: "SRS-XB100", Kind: "Classic"}}
+	v.CWTarget = v.Devices[0].Address
+	ctx, req, _, _, ok := v.StartAttack(btActCarwhisperer, BTActionOptions{Record: true})
+	if !ok {
+		t.Fatal("expected attack request")
+	}
+	defer v.StopAttack()
+	_ = ctx
+	if req.HCI != "hci0" {
+		t.Fatalf("expected selected hci0, got %q", req.HCI)
+	}
+}
+
 func TestBluetoothPrefersUSBAdapter(t *testing.T) {
 	v := NewBluetoothScanView()
 	v.SyncAdapters([]bluetooth.Adapter{
