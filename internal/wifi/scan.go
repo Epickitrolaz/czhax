@@ -67,6 +67,9 @@ type scanner struct {
 	runCmd cmdRunner
 	euid   func() int
 	hasBin func(name string) bool
+	// active reports the wireless link currently used by iface. Nil skips
+	// per-interface association marking (unit tests).
+	active func(iface string) (ssid, bssid string, connected bool)
 }
 
 func defaultScanner() scanner {
@@ -81,6 +84,7 @@ func defaultScanner() scanner {
 			}
 			return bin != name
 		},
+		active: activeConnection,
 	}
 }
 
@@ -108,6 +112,7 @@ func scanWith(s scanner, iface string) ([]Network, error) {
 		if err == nil {
 			nmNets = parseNmcliScan(out)
 			if len(nmNets) > 0 {
+				s.applyActive(nmNets, iface)
 				sortNetworks(nmNets)
 				return nmNets, nil
 			}
@@ -121,6 +126,7 @@ func scanWith(s scanner, iface string) ([]Network, error) {
 		out, err := runPrivileged(s, 14*time.Second, "iw", "dev", iface, "scan")
 		if err == nil {
 			nets := parseIWScan(out)
+			s.applyActive(nets, iface)
 			sortNetworks(nets)
 			return nets, nil
 		}
@@ -141,6 +147,67 @@ func scanWith(s scanner, iface string) ([]Network, error) {
 		return nil, nmErr
 	}
 	return nil, errors.New("no wifi scanner available (need nmcli or iw)")
+}
+
+// applyActive recomputes InUse from the selected interface's actual
+// association. nmcli/iw reports a single global "in use" flag, which is wrong
+// when several adapters are connected to different networks.
+func (s scanner) applyActive(nets []Network, iface string) {
+	if s.active == nil {
+		return
+	}
+	ssid, bssid, connected := s.active(iface)
+	for i := range nets {
+		nets[i].InUse = false
+	}
+	if !connected {
+		return
+	}
+	for i := range nets {
+		n := &nets[i]
+		switch {
+		case bssid != "" && strings.EqualFold(n.BSSID, bssid):
+			n.InUse = true
+		case ssid != "" && strings.EqualFold(strings.TrimSpace(n.SSID), strings.TrimSpace(ssid)):
+			n.InUse = true
+		}
+	}
+}
+
+// activeConnection resolves the SSID/BSSID currently associated on iface via
+// `iw dev <iface> link`, which is per-interface and needs no privilege.
+func activeConnection(iface string) (string, string, bool) {
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		return "", "", false
+	}
+	s := scanner{runCmd: execCmd, euid: os.Geteuid}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	out, err := s.runCmd(ctx, "iw", "dev", iface, "link")
+	cancel()
+	if err != nil {
+		return "", "", false
+	}
+	if strings.Contains(out, "Not connected") {
+		return "", "", false
+	}
+	var ssid, bssid string
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "Connected to "):
+			bssid = strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(line, "Connected to ")))
+			if idx := strings.Index(bssid, " "); idx >= 0 {
+				bssid = bssid[:idx]
+			}
+		case strings.HasPrefix(line, "SSID:"):
+			ssid = strings.TrimSpace(strings.TrimPrefix(line, "SSID:"))
+		}
+	}
+	if ssid == "" && bssid == "" {
+		return "", "", false
+	}
+	return ssid, bssid, true
 }
 
 // ConnectNetwork connects the specified interface to the target network via NetworkManager.

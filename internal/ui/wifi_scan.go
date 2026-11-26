@@ -65,16 +65,47 @@ type WifiScanView struct {
 	PentestActive     bool
 	PentestStopping   bool
 	PentestStarted    time.Time
-	PentestDuration   time.Duration
+	PentestDuration   time.Duration // listen window between deauth bursts (Both mode)
 	PentestElapsed    time.Duration
 	PentestResult     wifi.PentestResult
 	PentestErr        string
 	PentestCancel     context.CancelFunc
 	PentestProgressCh chan wifi.PentestResult
+	PentestTriggerCh  chan struct{}
 
 	Note      string
 	NoteIsErr bool
 	Marquee   Marquee
+
+	// Connected tracks the active link per interface so each adapter shows only
+	// its own associated network.
+	Connected map[string]wifi.Interface
+}
+
+// ActiveLink reports the network associated on iface (if any).
+func (v WifiScanView) ActiveLink(iface string) (wifi.Interface, bool) {
+	if v.Connected == nil {
+		return wifi.Interface{}, false
+	}
+	inf, ok := v.Connected[iface]
+	if !ok || strings.TrimSpace(inf.SSID) == "" {
+		return wifi.Interface{}, false
+	}
+	return inf, true
+}
+
+// NetworkInUse reports whether n is the network the selected interface is
+// associated with. Falls back to scan-provided data when the association for
+// this interface is unknown.
+func (v WifiScanView) NetworkInUse(n wifi.Network) bool {
+	inf, ok := v.ActiveLink(v.EffectiveScanIface())
+	if !ok {
+		return n.InUse
+	}
+	if strings.TrimSpace(inf.SSID) != "" && strings.EqualFold(strings.TrimSpace(inf.SSID), strings.TrimSpace(n.SSID)) {
+		return true
+	}
+	return false
 }
 
 func NewWifiScanView() WifiScanView {
@@ -104,6 +135,19 @@ func (v WifiScanView) AvailableIfaces() []wifi.Interface {
 
 func (v *WifiScanView) SyncInterfaces(ifaces []wifi.Interface) {
 	v.Interfaces = ifaces
+	if v.Connected == nil {
+		v.Connected = make(map[string]wifi.Interface, len(ifaces))
+	}
+	present := make(map[string]bool, len(ifaces))
+	for _, inf := range ifaces {
+		present[inf.Name] = true
+		v.Connected[inf.Name] = inf
+	}
+	for name := range v.Connected {
+		if !present[name] {
+			delete(v.Connected, name)
+		}
+	}
 	if len(ifaces) == 0 {
 		if strings.TrimSpace(v.ScanIface) == "" {
 			v.ScanIface = "wlan0"
@@ -148,6 +192,7 @@ func (v *WifiScanView) CycleScanIface(delta int) {
 	v.ScanErr = ""
 	v.Note = ""
 	v.NoteIsErr = false
+	v.recomputeInUse()
 }
 
 func (v *WifiScanView) StartScan() {
@@ -174,6 +219,7 @@ func (v *WifiScanView) SetScanResult(iface string, nets []wifi.Network, err erro
 		prevSSID = v.Networks[v.Cursor].SSID
 	}
 	v.Networks = nets
+	v.recomputeInUse()
 	v.Cursor = 0
 	if prevBSSID != "" || prevSSID != "" {
 		for i, n := range nets {
@@ -186,8 +232,15 @@ func (v *WifiScanView) SetScanResult(iface string, nets []wifi.Network, err erro
 	v.DetailScroll = 0
 }
 
-func (v *WifiScanView) MoveNetwork(delta int) {
-	if len(v.Networks) == 0 {
+// recomputeInUse re-marks the current list against the selected interface's
+// association.
+func (v *WifiScanView) recomputeInUse() {
+	for i := range v.Networks {
+		v.Networks[i].InUse = v.NetworkInUse(v.Networks[i])
+	}
+}
+
+func (v *WifiScanView) MoveNetwork(delta int) {	if len(v.Networks) == 0 {
 		v.Cursor = 0
 		return
 	}
@@ -210,9 +263,11 @@ func (v *WifiScanView) StartPentest(mode wifi.PentestMode) (context.Context, wif
 	if !ok || v.PentestActive || strings.TrimSpace(net.BSSID) == "" {
 		return nil, wifi.PentestRequest{}, false
 	}
+	// Both mode listens for 30s between deauth bursts; the other modes run
+	// until the handshake is captured or the user stops them.
 	duration := 30 * time.Second
-	if mode == wifi.PentestDeauth {
-		duration = 15 * time.Second
+	if mode != wifi.PentestBoth {
+		duration = 0
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	v.PentestCancel = cancel
@@ -227,17 +282,33 @@ func (v *WifiScanView) StartPentest(mode wifi.PentestMode) (context.Context, wif
 	v.PentestResult = wifi.PentestResult{}
 	v.PentestErr = ""
 	v.PentestProgressCh = make(chan wifi.PentestResult, 1)
+	v.PentestTriggerCh = make(chan struct{}, 8)
 	v.Note = ""
 	v.NoteIsErr = false
 	req := wifi.PentestRequest{
-		ScanIface: v.EffectiveScanIface(),
-		BSSID:     net.BSSID,
-		SSID:      net.SSID,
-		Channel:   wifi.ChannelNumber(net),
-		Mode:      mode,
-		Duration:  duration,
+		ScanIface:     v.EffectiveScanIface(),
+		BSSID:         net.BSSID,
+		SSID:          net.SSID,
+		Channel:       wifi.ChannelNumber(net),
+		Mode:          mode,
+		Duration:      duration,
+		DeauthTrigger: v.PentestTriggerCh,
 	}
 	return ctx, req, true
+}
+
+// TriggerDeauth asks a running deauth-mode pentest to inject one burst. Keys
+// held down generate repeated key events, so holding a key keeps deauthing.
+func (v *WifiScanView) TriggerDeauth() bool {
+	if !v.PentestActive || v.PentestMode != wifi.PentestDeauth || v.PentestTriggerCh == nil {
+		return false
+	}
+	select {
+	case v.PentestTriggerCh <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 func (v *WifiScanView) StopPentest() {
@@ -261,6 +332,7 @@ func (v *WifiScanView) SetPentestResult(res wifi.PentestResult, err error) {
 	v.PentestActive = false
 	v.PentestStopping = false
 	v.PentestProgressCh = nil
+	v.PentestTriggerCh = nil
 	if v.PentestCancel != nil {
 		v.PentestCancel()
 		v.PentestCancel = nil
@@ -268,9 +340,6 @@ func (v *WifiScanView) SetPentestResult(res wifi.PentestResult, err error) {
 	v.PentestResult = res
 	if !v.PentestStarted.IsZero() {
 		v.PentestElapsed = time.Since(v.PentestStarted)
-	}
-	if v.PentestElapsed > v.PentestDuration && v.PentestDuration > 0 {
-		v.PentestElapsed = v.PentestDuration
 	}
 	switch {
 	case err != nil && errors.Is(err, context.Canceled):
@@ -519,12 +588,17 @@ func (v *WifiScanView) SetConnectResult(req wifi.ConnectRequest, err error) {
 	v.Note = fmt.Sprintf("Connected %s (%s)", name, req.Iface)
 	v.NoteIsErr = false
 
+	// Remember the association for this interface only: another adapter must
+	// keep showing its own network as the connected one.
+	if v.Connected == nil {
+		v.Connected = make(map[string]wifi.Interface)
+	}
+	inf := v.Connected[req.Iface]
+	inf.Name = req.Iface
+	inf.SSID = req.SSID
+	v.Connected[req.Iface] = inf
 	for i := range v.Networks {
-		if (req.BSSID != "" && v.Networks[i].BSSID == req.BSSID) || (req.SSID != "" && v.Networks[i].SSID == req.SSID) {
-			v.Networks[i].InUse = true
-		} else if req.Iface == v.EffectiveScanIface() {
-			v.Networks[i].InUse = false
-		}
+		v.Networks[i].InUse = v.NetworkInUse(v.Networks[i])
 	}
 
 	if v.PrevMode == scanModeDetail {
@@ -689,10 +763,11 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			rightPlainW := lipgloss.Width(rightPlain)
 			ssidW := max(4, w-2-1-rightPlainW-1)
 			ssidTxt := v.Marquee.FitLine(n.DisplaySSID(), ssidW)
+			inUse := v.NetworkInUse(n)
 
 			if selected && focused {
 				mark := " "
-				if n.InUse {
+				if inUse {
 					mark = "*"
 				}
 				row := fmt.Sprintf("▸%s%s %s ", mark, ssidTxt, rightPlain)
@@ -703,7 +778,7 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 					pfx = accent.Render("▸")
 				}
 				mark := " "
-				if n.InUse {
+				if inUse {
 					mark = ok.Render("*")
 				}
 				ssidStyled := txt.Render(ssidTxt)
@@ -787,9 +862,9 @@ func (v WifiScanView) renderActions(w, h int, pal theme.Palette, focused bool) [
 	}
 	items := []actItem{
 		{act: wifiActConnect, name: "Connect", val: "join", ok: true},
-		{act: wifiActBoth, name: "Deauth + Capture", val: "30s", warn: true},
-		{act: wifiActHandshake, name: "Handshake Capture", val: "30s"},
-		{act: wifiActDeauth, name: "Deauth AP", val: "15s", warn: true},
+		{act: wifiActBoth, name: "Deauth + Capture", val: "loop", warn: true},
+		{act: wifiActHandshake, name: "Handshake Capture", val: "until HS"},
+		{act: wifiActDeauth, name: "Deauth AP", val: "manual", warn: true},
 		{act: wifiActDetail, name: "Network Details", val: "info"},
 	}
 
@@ -881,7 +956,7 @@ func (v WifiScanView) buildDetailRows(w int, pal theme.Palette, net wifi.Network
 	}
 
 	stateVal := muted.Render("Available")
-	if net.InUse {
+	if v.NetworkInUse(net) {
 		stateVal = ok.Render("Connected")
 	}
 
@@ -1174,11 +1249,32 @@ func (v WifiScanView) renderPentest(w, h int, pal theme.Palette) []string {
 
 	if h >= 5 {
 		state := muted.Render("done")
+		phase := ""
 		switch {
 		case v.PentestActive && v.PentestStopping:
 			state = warn.Render("stopping…")
 		case v.PentestActive:
-			state = warn.Render("running…")
+			elapsed := v.PentestElapsed
+			if elapsed <= 0 && !v.PentestStarted.IsZero() {
+				elapsed = time.Since(v.PentestStarted)
+			}
+			switch v.PentestMode {
+			case wifi.PentestDeauth:
+				state = warn.Render("ready")
+				phase = "any key = deauth"
+			case wifi.PentestBoth:
+				state = warn.Render("listening")
+				window := v.PentestDuration
+				if window <= 0 {
+					window = 30 * time.Second
+				}
+				next := window - (elapsed % window)
+				phase = fmt.Sprintf("deauth in %ds", int(next.Seconds()+0.5))
+			default:
+				state = warn.Render("listening")
+				phase = "until handshake"
+			}
+			phase = fmt.Sprintf("%ds · %s", int(elapsed.Seconds()), phase)
 		case v.PentestErr != "":
 			state = danger.Render("failed")
 		case res.HandshakeComplete:
@@ -1193,12 +1289,8 @@ func (v WifiScanView) renderPentest(w, h int, pal theme.Palette) []string {
 			state = warn.Render("no capture")
 		}
 		line := " " + state
-		if v.PentestActive || v.PentestElapsed > 0 {
-			elapsed := v.PentestElapsed
-			if elapsed <= 0 && !v.PentestStarted.IsZero() {
-				elapsed = time.Since(v.PentestStarted)
-			}
-			line += " " + muted.Render(fmt.Sprintf("%ds/%ds", int(elapsed.Seconds()), int(v.PentestDuration.Seconds())))
+		if phase != "" {
+			line += " " + muted.Render(v.Marquee.Truncate(phase, max(6, w-4-lipgloss.Width(state))))
 		}
 		lines = append(lines, line)
 	}
@@ -1224,6 +1316,9 @@ func (v WifiScanView) renderPentest(w, h int, pal theme.Palette) []string {
 		hint := "Esc:back"
 		if v.PentestActive {
 			hint = "Esc:stop"
+			if v.PentestMode == wifi.PentestDeauth {
+				hint = "any key:deauth  Esc:stop"
+			}
 		}
 		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 	}

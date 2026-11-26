@@ -127,7 +127,7 @@ func main() {
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
-			wifi.WatchStdinCancel(os.Stdin, cancel)
+			req.DeauthTrigger = wifi.WatchPentestStdin(os.Stdin, cancel)
 
 			res, err := wifi.RunPentestDirectWithProgress(ctx, req, func(prog wifi.PentestResult) {
 				out, _ := json.Marshal(wifi.PentestHelperOutcome{
