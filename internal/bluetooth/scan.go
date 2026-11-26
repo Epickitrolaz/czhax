@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -187,6 +188,13 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 		if bdevs, _ := scanWithBtmgmt(ctx, creq, timeout); len(bdevs) > 0 {
 			devices = mergeDeviceLists(devices, bdevs)
 		}
+	}
+	// A speaker connected to a phone is usually not discoverable via BR/EDR
+	// inquiry. BlueZ still caches its public/Classic address from an earlier
+	// pairing; surface that cached peer when a live BLE entry with the same
+	// name/suffix exists.
+	if peers := cachedClassicPeers(ctx, devices); len(peers) > 0 {
+		devices = mergeDeviceLists(devices, peers)
 	}
 	// btmgmt's BR/EDR records often omit the friendly name. hcitool's inquiry
 	// returns it, so merge those names into the RSSI-bearing entries.
@@ -594,6 +602,93 @@ func classicNamesMissing(devices []Device) bool {
 		}
 	}
 	return false
+}
+
+func cachedClassicPeers(ctx context.Context, live []Device) []Device {
+	nameMatch := make(map[string]bool)
+	suffixMatch := make(map[string]bool)
+	for _, d := range live {
+		if d.Kind != "BLE" {
+			continue
+		}
+		if n := strings.ToLower(d.DisplayName()); n != "" && n != strings.ToLower(d.Address) {
+			nameMatch[n] = true
+		}
+		if suf := addressSuffix(d.Address); suf != "" {
+			suffixMatch[suf] = true
+		}
+	}
+	if len(nameMatch) == 0 && len(suffixMatch) == 0 {
+		return nil
+	}
+	script := `for f in /var/lib/bluetooth/*/cache/*; do [ -f "$f" ] || continue; printf '=== %s\n' "$f"; cat "$f" 2>/dev/null; done`
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	out, err := capturePrivileged(cctx, "sh", "-c", script)
+	if err != nil && strings.TrimSpace(out) == "" {
+		return nil
+	}
+	var peers []Device
+	var curAddr, curName string
+	flush := func() {
+		if curAddr == "" {
+			return
+		}
+		addr := NormalizeAddr(curAddr)
+		// Only cached public OUIs are useful as Classic peers; random BLE
+		// addresses rarely have an IEEE assignment.
+		if oui.Lookup(addr) == "" {
+			curAddr, curName = "", ""
+			return
+		}
+		name := cleanDeviceName(curName)
+		matched := suffixMatch[addressSuffix(addr)]
+		if name != "" && nameMatch[strings.ToLower(name)] {
+			matched = true
+		}
+		if matched {
+			if name == "" {
+				name = oui.Lookup(addr)
+			}
+			peers = append(peers, Device{
+				Address:  addr,
+				Name:     name,
+				Kind:     "Classic",
+				AddrType: "public",
+			})
+		}
+		curAddr, curName = "", ""
+	}
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "=== ") {
+			flush()
+			curAddr = filepath.Base(strings.TrimPrefix(line, "=== "))
+			continue
+		}
+		if strings.HasPrefix(line, "Name=") {
+			curName = strings.TrimSpace(strings.TrimPrefix(line, "Name="))
+		}
+	}
+	flush()
+	return SortDevices(dedupeDevices(peers))
+}
+
+func sameSuffix(a, b string) bool {
+	pa := strings.Split(NormalizeAddr(a), ":")
+	pb := strings.Split(NormalizeAddr(b), ":")
+	if len(pa) != 6 || len(pb) != 6 {
+		return false
+	}
+	return strings.Join(pa[1:], ":") == strings.Join(pb[1:], ":")
+}
+
+func addressSuffix(addr string) string {
+	parts := strings.Split(NormalizeAddr(addr), ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	return strings.Join(parts[1:], ":")
 }
 
 func applyOUI(devices []Device) []Device {
