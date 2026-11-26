@@ -38,10 +38,38 @@ const (
 	wifiActBoth
 	wifiActHandshake
 	wifiActDeauth
-	wifiActDetail
 	wifiActWPS
+	wifiActDetail
 	wifiActCount
 )
+
+// wifiActionItem is one row in the AP actions menu. Dispatch goes through the
+// row's act value (never the row index), so display order and enum values can
+// differ safely.
+type wifiActionItem struct {
+	act  WifiScanAction
+	name string
+	val  string
+	warn bool
+	ok   bool
+}
+
+var wifiActions = []wifiActionItem{
+	{act: wifiActConnect, name: "Connect", val: "join", ok: true},
+	{act: wifiActBoth, name: "Deauth + Capture", val: "loop", warn: true},
+	{act: wifiActHandshake, name: "Handshake Capture", val: "until HS"},
+	{act: wifiActDeauth, name: "Deauth AP", val: "manual", warn: true},
+	{act: wifiActWPS, name: "WPS Attack (OneShot)", val: "oneshot", warn: true},
+	{act: wifiActDetail, name: "Network Details", val: "info"},
+}
+
+// SelectedAction returns the action for the highlighted actions-menu row.
+func (v WifiScanView) SelectedAction() (WifiScanAction, bool) {
+	if v.ActionCursor < 0 || v.ActionCursor >= len(wifiActions) {
+		return 0, false
+	}
+	return wifiActions[v.ActionCursor].act, true
+}
 
 type WifiScanView struct {
 	Mode         WifiScanMode
@@ -410,7 +438,7 @@ func (v *WifiScanView) OpenActions() bool {
 }
 
 func (v *WifiScanView) MoveAction(delta int) {
-	v.ActionCursor = (v.ActionCursor + delta + int(wifiActCount)) % int(wifiActCount)
+	v.ActionCursor = (v.ActionCursor + delta + len(wifiActions)) % len(wifiActions)
 	v.Note = ""
 	v.NoteIsErr = false
 }
@@ -935,21 +963,7 @@ func (v WifiScanView) renderActions(w, h int, pal theme.Palette, focused bool) [
 		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(sub, max(6, w-2))))
 	}
 
-	type actItem struct {
-		act  WifiScanAction
-		name string
-		val  string
-		warn bool
-		ok   bool
-	}
-	items := []actItem{
-		{act: wifiActConnect, name: "Connect", val: "join", ok: true},
-		{act: wifiActBoth, name: "Deauth + Capture", val: "loop", warn: true},
-		{act: wifiActHandshake, name: "Handshake Capture", val: "until HS"},
-		{act: wifiActDeauth, name: "Deauth AP", val: "manual", warn: true},
-		{act: wifiActWPS, name: "WPS Attack (OneShot)", val: "oneshot", warn: true},
-		{act: wifiActDetail, name: "Network Details", val: "info"},
-	}
+	items := wifiActions
 
 	showBottom := (h >= 8 || v.Note != "") && h >= 4
 	listH := h - len(lines)

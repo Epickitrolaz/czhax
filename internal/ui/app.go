@@ -1248,7 +1248,11 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			case m.isDown(k):
 				m.WifiScan.MoveAction(1)
 			case k == "enter" || k == " ":
-				switch WifiScanAction(m.WifiScan.ActionCursor) {
+				act, ok := m.WifiScan.SelectedAction()
+				if !ok {
+					return m, nil
+				}
+				switch act {
 				case wifiActConnect:
 					m.WifiScan.BeginConnect(scanModeActions)
 				case wifiActBoth:
