@@ -2,7 +2,6 @@ package hwctl
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -97,8 +96,33 @@ func ReadBacklight(sysRoot string) (BacklightState, bool) {
 	}, true
 }
 
+// ExpectedBrightnessStep returns the target raw brightness on a clean
+// 10-level grid (0, step, 2*step, ..., maxB) when stepping from cur by delta.
+func ExpectedBrightnessStep(cur, maxB, delta int) int {
+	if maxB <= 0 {
+		return 0
+	}
+	step := max(1, maxB/BrightnessMaxLevel)
+	if delta > 0 {
+		next := ((cur / step) + 1) * step
+		if next > maxB {
+			return maxB
+		}
+		return next
+	}
+	if cur <= 0 {
+		return 0
+	}
+	prev := ((cur - 1) / step) * step
+	if prev < 0 {
+		return 0
+	}
+	return prev
+}
+
 // StepBacklight adjusts sysfs brightness by delta levels (out of 10).
-// Used when no external brightness daemon is managing the backlight.
+// Used when no external brightness daemon is managing the backlight or to snap
+// legacy daemon clamps (such as MIN_BRIGHTNESS=5) onto the 0..100 grid.
 func StepBacklight(sysRoot string, delta int) (BacklightState, bool) {
 	bPath, mPath, ok := findBacklightPaths(sysRoot)
 	if !ok {
@@ -109,15 +133,11 @@ func StepBacklight(sysRoot string, delta int) (BacklightState, bool) {
 	if !ok1 || !ok2 || maxB <= 0 {
 		return BacklightState{}, false
 	}
-	step := max(1, maxB/BrightnessMaxLevel)
-	var next int
-	if delta > 0 {
-		next = min(maxB, ((cur/step)+1)*step)
-	} else if cur <= 0 {
-		next = 0
-	} else {
-		next = max(0, ((cur-1)/step)*step)
-	}
+	next := ExpectedBrightnessStep(cur, maxB, delta)
+	return writeBacklightRaw(bPath, next, maxB)
+}
+
+func writeBacklightRaw(bPath string, next, maxB int) (BacklightState, bool) {
 	if err := os.WriteFile(bPath, []byte(strconv.Itoa(next)+"\n"), 0o644); err != nil {
 		return BacklightState{}, false
 	}
@@ -159,27 +179,29 @@ func readIntFile(path string) (int, bool) {
 type Watcher struct {
 	events chan Event
 	stopCh chan struct{}
+	blKey  chan int
 	once   sync.Once
 
-	mu           sync.Mutex
-	lastRaw      int
-	hasLastRaw   bool
-	daemonActive bool
-	vol          *VolumeController
+	mu            sync.Mutex
+	lastRaw       int
+	hasLastRaw    bool
+	holdPollUntil time.Time
+	vol           *VolumeController
 }
 
 // StartWatcher launches background hardware listeners and returns a Watcher.
 func StartWatcher() *Watcher {
 	w := &Watcher{
-		events:       make(chan Event, 16),
-		stopCh:       make(chan struct{}),
-		daemonActive: isBrightnessDaemonActive(),
-		vol:          NewVolumeController(),
+		events: make(chan Event, 16),
+		stopCh: make(chan struct{}),
+		blKey:  make(chan int, 16),
+		vol:    NewVolumeController(),
 	}
 	if st, ok := ReadBacklight("/sys"); ok {
 		w.lastRaw = st.Raw
 		w.hasLastRaw = true
 	}
+	go w.brightnessKeyLoop()
 	go w.pollBacklight("/sys")
 	go w.watchEvdev("/dev/input")
 	return w
@@ -219,6 +241,12 @@ func (w *Watcher) pollBacklight(sysRoot string) {
 		case <-w.stopCh:
 			return
 		case <-ticker.C:
+			w.mu.Lock()
+			held := !w.holdPollUntil.IsZero() && time.Now().Before(w.holdPollUntil)
+			w.mu.Unlock()
+			if held {
+				continue
+			}
 			st, ok := ReadBacklight(sysRoot)
 			if !ok {
 				continue
@@ -237,30 +265,67 @@ func (w *Watcher) pollBacklight(sysRoot string) {
 	}
 }
 
+func (w *Watcher) triggerBrightnessKey(delta int) {
+	w.mu.Lock()
+	w.holdPollUntil = time.Now().Add(150 * time.Millisecond)
+	w.mu.Unlock()
+	select {
+	case w.blKey <- delta:
+	default:
+	}
+}
+
+func (w *Watcher) brightnessKeyLoop() {
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case delta := <-w.blKey:
+			w.handleBrightnessKey(delta)
+		}
+	}
+}
+
 func (w *Watcher) handleBrightnessKey(delta int) {
+	w.handleBrightnessKeyAt("/sys", delta)
+}
+
+func (w *Watcher) handleBrightnessKeyAt(sysRoot string, delta int) {
 	w.mu.Lock()
 	before := w.lastRaw
 	hasBefore := w.hasLastRaw
-	daemon := w.daemonActive
+	w.holdPollUntil = time.Now().Add(150 * time.Millisecond)
 	w.mu.Unlock()
 
 	// Give cardputer-brightness.service a brief window to apply its sysfs write
-	// so we display the updated value without racing or double-stepping.
+	// so we display the updated value without racing.
 	time.Sleep(45 * time.Millisecond)
 
-	st, ok := ReadBacklight("/sys")
+	st, ok := ReadBacklight(sysRoot)
 	if !ok {
 		return
 	}
-	if (!hasBefore || st.Raw == before) && (!daemon || (delta < 0 && st.Raw > 0)) {
-		if stepped, sOk := StepBacklight("/sys", delta); sOk {
-			st = stepped
+	base := st.Raw
+	if hasBefore {
+		base = before
+	}
+	want := ExpectedBrightnessStep(base, st.MaxRaw, delta)
+	// Snap legacy daemon steps (e.g. 10 -> 5 or 5 -> 15) onto the clean
+	// 0, 10, 20, ..., 100 grid when sysfs is writable.
+	if st.Raw != want {
+		if bPath, _, bOk := findBacklightPaths(sysRoot); bOk {
+			if snapped, sOk := writeBacklightRaw(bPath, want, st.MaxRaw); sOk {
+				st = snapped
+			}
 		}
 	}
 
 	w.mu.Lock()
 	w.lastRaw = st.Raw
 	w.hasLastRaw = true
+	if len(w.blKey) == 0 {
+		w.holdPollUntil = time.Time{}
+	}
 	w.mu.Unlock()
 	w.emit(Event{Kind: EventBrightness, Brightness: st})
 }
@@ -349,9 +414,9 @@ func (w *Watcher) readEvdevLoop(fd int) {
 			repeat := val == 2
 			switch code {
 			case keyBrightnessDown:
-				go w.handleBrightnessKey(-1)
+				w.triggerBrightnessKey(-1)
 			case keyBrightnessUp:
-				go w.handleBrightnessKey(1)
+				w.triggerBrightnessKey(1)
 			case keyMute, keyVolumeDown, keyVolumeUp:
 				w.handleVolumeKey(code, repeat)
 			}
@@ -391,11 +456,4 @@ func readEvdevName(fd int, sysName string) string {
 		}
 	}
 	return string(buf[:])
-}
-
-func isBrightnessDaemonActive() bool {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return false
-	}
-	return exec.Command("systemctl", "is-active", "--quiet", "cardputer-brightness.service").Run() == nil
 }
