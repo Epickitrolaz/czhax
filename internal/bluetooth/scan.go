@@ -78,10 +78,13 @@ type Device struct {
 }
 
 func (d Device) DisplayName() string {
-	for _, s := range []string{d.Name, d.Alias, d.Address} {
-		if strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
+	for _, s := range []string{d.Name, d.Alias} {
+		if t := cleanDeviceName(s); t != "" {
+			return t
 		}
+	}
+	if strings.TrimSpace(d.Address) != "" {
+		return strings.TrimSpace(d.Address)
 	}
 	return "unknown"
 }
@@ -157,10 +160,29 @@ func ScanDevices(ctx context.Context, req ScanRequest) ([]Device, error) {
 	defer cancel()
 
 	out, err := runBluetoothctlScan(scanCtx, req, timeout)
-	if err == nil || strings.TrimSpace(out) != "" {
-		if devices := ParseScanOutput(out, req.Mode); len(devices) > 0 {
-			return devices, nil
+	devices := ParseScanOutput(out, req.Mode)
+	if len(devices) > 0 && !needsEnrichment(devices) {
+		return devices, nil
+	}
+
+	// btmgmt reports both BR/EDR and LE RSSI (and names from the EIR), which
+	// bluetoothctl does not expose for Classic devices.
+	if bdevs, _ := scanWithBtmgmt(ctx, req, timeout); len(bdevs) > 0 {
+		if len(devices) > 0 {
+			devices = mergeDeviceLists(devices, bdevs)
+		} else {
+			devices = bdevs
 		}
+		if needsEnrichment(devices) {
+			devices = enrichWithInfo(ctx, devices)
+		}
+		return devices, nil
+	}
+	if len(devices) > 0 {
+		if needsEnrichment(devices) {
+			devices = enrichWithInfo(ctx, devices)
+		}
+		return devices, nil
 	}
 
 	if ctx.Err() != nil {
@@ -310,6 +332,21 @@ func ptyBluetoothctlScan(ctx context.Context, req ScanRequest, timeout time.Dura
 }
 
 func runBluetoothctlSession(ctx context.Context, cmd *exec.Cmd, req ScanRequest, timeout time.Duration) (string, error) {
+	return runShellSession(ctx, cmd, func(write func(string)) {
+		if req.Controller != "" {
+			write("select " + strings.ToUpper(req.Controller))
+			time.Sleep(150 * time.Millisecond)
+		}
+		write("power on")
+		time.Sleep(350 * time.Millisecond)
+		write("scan " + req.Mode.Arg())
+	}, timeout, "scan off", "devices")
+}
+
+// runShellSession keeps an interactive BlueZ shell alive for the scan window.
+// BlueZ 5.75+ stops discovery as soon as the client exits, so stdin must remain
+// open until we explicitly stop it.
+func runShellSession(ctx context.Context, cmd *exec.Cmd, setup func(write func(string)), timeout time.Duration, stop ...string) (string, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return "", err
@@ -326,13 +363,7 @@ func runBluetoothctlSession(ctx context.Context, cmd *exec.Cmd, req ScanRequest,
 	write := func(s string) {
 		_, _ = stdin.Write([]byte(s + "\n"))
 	}
-	if req.Controller != "" {
-		write("select " + strings.ToUpper(req.Controller))
-		time.Sleep(150 * time.Millisecond)
-	}
-	write("power on")
-	time.Sleep(350 * time.Millisecond)
-	write("scan " + req.Mode.Arg())
+	setup(write)
 
 	timer := time.NewTimer(timeout)
 	exited := false
@@ -345,8 +376,9 @@ func runBluetoothctlSession(ctx context.Context, cmd *exec.Cmd, req ScanRequest,
 	timer.Stop()
 
 	if !exited {
-		write("scan off")
-		write("devices")
+		for _, s := range stop {
+			write(s)
+		}
 		write("quit")
 		_ = stdin.Close()
 		select {
@@ -409,6 +441,186 @@ func scanWithHCITool(ctx context.Context, req ScanRequest, timeout time.Duration
 	}
 }
 
+// scanWithBtmgmt discovers devices through the kernel management socket. It
+// provides RSSI for both BR/EDR and LE peers, unlike bluetoothctl.
+func scanWithBtmgmt(ctx context.Context, req ScanRequest, timeout time.Duration) ([]Device, error) {
+	if _, err := exec.LookPath("btmgmt"); err != nil {
+		return nil, err
+	}
+	bin, prefix, ok := privilegedPrefix("btmgmt")
+	if !ok {
+		return nil, errors.New("root or passwordless sudo required for btmgmt")
+	}
+	if len(prefix) > 0 {
+		prefix = append(prefix, "-i", req.HCI)
+		bin = "sudo"
+	} else {
+		prefix = []string{"-i", req.HCI}
+	}
+	bctx, cancel := context.WithTimeout(ctx, timeout+4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(bctx, bin, prefix...)
+	find := "find"
+	switch req.Mode {
+	case ScanLE:
+		find += " -l"
+	case ScanClassic:
+		find += " -b"
+	}
+	out, err := runShellSession(bctx, cmd, func(write func(string)) {
+		write(find)
+	}, timeout, "stop-find")
+	if bctx.Err() != nil && strings.TrimSpace(out) != "" {
+		err = nil
+	}
+	devices := ParseBtmgmtOutput(out)
+	if len(devices) > 0 {
+		return devices, nil
+	}
+	return devices, err
+}
+
+var reBtDevFound = regexp.MustCompile(`dev_found:\s*([0-9A-Fa-f:]{17})\s+type\s+(BR/EDR|LE\s+(?:Public|Random))\s+rssi\s+(-?\d+)`)
+
+// ParseBtmgmtOutput parses `btmgmt find` output:
+//
+//	hci0 dev_found: AA:BB:CC:DD:EE:FF type BR/EDR rssi -79 flags 0x0000
+//	AD flags 0x06
+//	name Headset
+func ParseBtmgmtOutput(out string) []Device {
+	out = strings.ReplaceAll(out, "\r", "\n")
+	var devices []Device
+	lastIdx := -1
+	for _, raw := range strings.Split(out, "\n") {
+		line := stripANSI(strings.TrimSpace(raw))
+		if line == "" {
+			continue
+		}
+		if m := reBtDevFound.FindStringSubmatch(line); len(m) == 4 {
+			d := Device{
+				Address: NormalizeAddr(m[1]),
+				Kind:    "Classic",
+			}
+			if strings.HasPrefix(m[2], "LE") {
+				d.Kind = "BLE"
+			}
+			if n, err := strconv.Atoi(m[3]); err == nil {
+				d.RSSI = n
+				d.HasRSSI = true
+			}
+			devices = append(devices, d)
+			lastIdx = len(devices) - 1
+			continue
+		}
+		if lastIdx >= 0 && (strings.HasPrefix(line, "name ") || strings.HasPrefix(line, "short name ")) {
+			name := strings.TrimPrefix(line, "short name ")
+			name = strings.TrimPrefix(name, "name ")
+			if n := cleanDeviceName(name); n != "" && devices[lastIdx].Name == "" {
+				devices[lastIdx].Name = n
+			}
+		}
+	}
+	return SortDevices(dedupeDevices(devices))
+}
+
+func needsEnrichment(devices []Device) bool {
+	for _, d := range devices {
+		if !d.HasRSSI || strings.TrimSpace(d.Name) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// enrichWithInfo fills names/RSSI from bluetoothctl's cached Device1
+// properties when btmgmt is unavailable. Queries run concurrently.
+func enrichWithInfo(ctx context.Context, devices []Device) []Device {
+	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	sem := make(chan struct{}, 4)
+	results := make(chan Device, len(devices))
+	var wg sync.WaitGroup
+	for _, d := range devices {
+		if d.HasRSSI && strings.TrimSpace(d.Name) != "" {
+			continue
+		}
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-cctx.Done():
+				return
+			}
+			info, err := QueryDeviceInfo(cctx, addr)
+			if err == nil && info.Address != "" {
+				results <- info
+			}
+		}(d.Address)
+	}
+	wg.Wait()
+	close(results)
+	var extra []Device
+	for d := range results {
+		extra = append(extra, d)
+	}
+	if len(extra) == 0 {
+		return devices
+	}
+	return mergeDeviceLists(devices, extra)
+}
+
+// mergeDeviceLists adds non-empty names/RSSI from extra to matching addresses
+// in base, and appends peers only present in extra.
+func mergeDeviceLists(base, extra []Device) []Device {
+	out := append([]Device(nil), base...)
+	index := make(map[string]int, len(out))
+	for i, d := range out {
+		index[d.Address] = i
+	}
+	for _, e := range extra {
+		if i, ok := index[e.Address]; ok {
+			d := out[i]
+			if e.Name != "" {
+				d.Name = e.Name
+			}
+			if e.Alias != "" {
+				d.Alias = e.Alias
+			}
+			if e.HasRSSI {
+				d.RSSI = e.RSSI
+				d.HasRSSI = true
+			}
+			if e.Kind != "" && (d.Kind == "" || d.Kind == "BT") {
+				d.Kind = e.Kind
+			}
+			if e.Class != "" {
+				d.Class = e.Class
+			}
+			if e.Icon != "" {
+				d.Icon = e.Icon
+			}
+			if len(e.UUIDs) > 0 {
+				d.UUIDs = e.UUIDs
+			}
+			d.Paired = d.Paired || e.Paired
+			d.Trusted = d.Trusted || e.Trusted
+			d.Connected = d.Connected || e.Connected
+			d.FastPair = d.FastPair || e.FastPair
+			if e.HasModelID {
+				d.ModelID = e.ModelID
+				d.HasModelID = true
+			}
+			out[i] = d
+			continue
+		}
+		index[e.Address] = len(out)
+		out = append(out, e)
+	}
+	return SortDevices(out)
+}
+
 // ParseHCIToolOutput parses `hcitool scan` / `hcitool lescan` output.
 func ParseHCIToolOutput(out, kind string) []Device {
 	label := "Classic"
@@ -437,9 +649,24 @@ func ParseHCIToolOutput(out, kind string) []Device {
 }
 
 var reANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var reMACName = regexp.MustCompile(`(?i)^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$|^[0-9a-f]{12}$`)
 
 func stripANSI(s string) string {
 	return reANSI.ReplaceAllString(s, "")
+}
+
+func isMACLikeName(s string) bool {
+	return reMACName.MatchString(strings.TrimSpace(s))
+}
+
+// cleanDeviceName drops BlueZ's auto-generated "AA-BB-CC-DD-EE-FF" aliases so
+// the UI can show the real address with colons instead.
+func cleanDeviceName(s string) string {
+	s = cleanName(s)
+	if s == "" || isMACLikeName(s) {
+		return ""
+	}
+	return s
 }
 
 // ParseScanOutput parses `bluetoothctl scan` output, merging repeated
@@ -524,7 +751,7 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 		// "[NEW] Device AA:BB:.. Headset" carries the initial name without a
 		// "Name:" prefix.
 		if (tag == "new" || tag == "") && !strings.Contains(attr, ":") && st.dev.Name == "" {
-			st.dev.Name = cleanName(attr)
+			st.dev.Name = cleanDeviceName(attr)
 		}
 
 		// ServiceData values arrive one byte per line and belong to the last
@@ -562,11 +789,11 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 				st.dev.HasRSSI = true
 			}
 		case strings.HasPrefix(attr, "Name:"):
-			if n := cleanName(strings.TrimPrefix(attr, "Name:")); n != "" {
+			if n := cleanDeviceName(strings.TrimPrefix(attr, "Name:")); n != "" {
 				st.dev.Name = n
 			}
 		case strings.HasPrefix(attr, "Alias:"):
-			if n := cleanName(strings.TrimPrefix(attr, "Alias:")); n != "" {
+			if n := cleanDeviceName(strings.TrimPrefix(attr, "Alias:")); n != "" {
 				st.dev.Alias = n
 			}
 		case strings.HasPrefix(attr, "Class:"):
@@ -596,6 +823,8 @@ func ParseScanOutput(out string, mode ScanMode) []Device {
 			continue
 		}
 		d := *st.dev
+		d.Name = cleanDeviceName(d.Name)
+		d.Alias = cleanDeviceName(d.Alias)
 		if d.Kind == "" {
 			switch {
 			case d.FastPair:
@@ -633,9 +862,9 @@ func ParseDeviceInfo(out string) Device {
 		}
 		switch {
 		case strings.HasPrefix(line, "Name:"):
-			d.Name = cleanName(strings.TrimPrefix(line, "Name:"))
+			d.Name = cleanDeviceName(strings.TrimPrefix(line, "Name:"))
 		case strings.HasPrefix(line, "Alias:"):
-			d.Alias = cleanName(strings.TrimPrefix(line, "Alias:"))
+			d.Alias = cleanDeviceName(strings.TrimPrefix(line, "Alias:"))
 		case strings.HasPrefix(line, "Class:"):
 			d.Class = strings.TrimSpace(strings.TrimPrefix(line, "Class:"))
 		case strings.HasPrefix(line, "Icon:"):
