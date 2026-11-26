@@ -107,7 +107,7 @@ func runWhisperPair(ctx context.Context, req AttackRequest, onLine func(string))
 		}
 		return streamCommand(ctx, bin, []string{"verify", NormalizeAddr(req.Address), "--authorized"}, onLine)
 	}
-	return auditFastPair(ctx, req, onLine)
+	return errors.New("gatttool not installed (install bluez-deprecated-tools) for the built-in WhisperPair test")
 }
 
 // auditFastPair is the built-in fallback when the external WhisperPair toolkit
