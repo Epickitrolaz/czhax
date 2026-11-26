@@ -1075,6 +1075,16 @@ func (m AppModel) launchWPS(label string, args []string) (tea.Model, tea.Cmd) {
 	)
 }
 
+// launchWPSRetry reuses a recovered PIN, keeping it visible for further retries.
+func (m AppModel) launchWPSRetry(label string, args []string, pin string) (tea.Model, tea.Cmd) {
+	next, cmd := m.launchWPS(label, args)
+	if nm, ok := next.(AppModel); ok && pin != "" {
+		nm.WifiScan.WPSFoundPIN = pin
+		return nm, cmd
+	}
+	return next, cmd
+}
+
 func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
 	if m.WifiScan.PentestActive {
 		return m, nil
@@ -1288,8 +1298,29 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				case method.Custom:
 					m.WifiScan.StartWPSPin()
 				default:
+					if pin, ok := m.WifiScan.RetryWithPINArgs(); ok && strings.Join(pin, " ") == strings.Join(method.Args, " ") {
+						return m.launchWPSRetry(method.Label, method.Args, m.WifiScan.WPSFoundPIN)
+					}
 					return m.launchWPS(method.Label, method.Args)
 				}
+			}
+			return m, nil
+
+		case scanModeWPSRun:
+			if m.WifiScan.WPSActive {
+				return m, nil
+			}
+			switch k {
+			case "c":
+				if m.WifiScan.BeginWPSConnect() {
+					return m, m.setStatus("Connect with PSK")
+				}
+				return m, m.setStatus("No PSK recovered")
+			case "p":
+				if args, ok := m.WifiScan.RetryWithPINArgs(); ok {
+					return m.launchWPSRetry("PIN retry", args, m.WifiScan.WPSFoundPIN)
+				}
+				return m, m.setStatus("No PIN recovered")
 			}
 			return m, nil
 
@@ -2083,6 +2114,12 @@ func (m AppModel) currentHints() []Hint {
 		case scanModeWPSRun:
 			if m.WifiScan.WPSActive {
 				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+			}
+			if _, psk := m.WifiScan.HasWPSCredentials(); psk {
+				return []Hint{{Key: "c", Desc: "connect"}, {Key: "Esc", Desc: "back"}}
+			}
+			if pin, _ := m.WifiScan.HasWPSCredentials(); pin {
+				return []Hint{{Key: "p", Desc: "retry psk"}, {Key: "Esc", Desc: "back"}}
 			}
 			return []Hint{{Key: "Esc", Desc: "back"}}
 		default:
