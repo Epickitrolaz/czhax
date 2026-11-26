@@ -212,35 +212,54 @@ func isAllUpper(s string) bool {
 	return hasLetter
 }
 
+// EntriesForBrand returns all entries in category matching brand, ordering
+// Mi Remote DB entries first so Match mode always checks Mi Remote before Flipper.
 func EntriesForBrand(entries []Entry, category, brand string) []Entry {
-	out := make([]Entry, 0)
+	var mi, rest []Entry
 	for _, e := range entries {
 		if category != "" && !strings.EqualFold(e.Category, category) {
 			continue
 		}
-		if strings.EqualFold(e.Brand, brand) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// EntriesForCategory returns all entries in category, optionally ordering
-// preferBrand entries first so follow-up universal button blasts hit faster.
-func EntriesForCategory(entries []Entry, category, preferBrand string) []Entry {
-	out := make([]Entry, 0)
-	var rest []Entry
-	for _, e := range entries {
-		if category != "" && !strings.EqualFold(e.Category, category) {
+		if !strings.EqualFold(e.Brand, brand) {
 			continue
 		}
-		if preferBrand != "" && strings.EqualFold(e.Brand, preferBrand) {
-			out = append(out, e)
+		if strings.EqualFold(e.Provider, "mi") {
+			mi = append(mi, e)
 		} else {
 			rest = append(rest, e)
 		}
 	}
-	return append(out, rest...)
+	return append(mi, rest...)
+}
+
+// EntriesForCategory returns all entries in category, always checking the
+// Flipper Zero DB before the Mi Remote DB, while prioritizing preferBrand
+// first within each DB so follow-up universal button blasts hit faster.
+func EntriesForCategory(entries []Entry, category, preferBrand string) []Entry {
+	var flipPref, flipRest, otherPref, otherRest []Entry
+	for _, e := range entries {
+		if category != "" && !strings.EqualFold(e.Category, category) {
+			continue
+		}
+		isFlipper := strings.EqualFold(e.Provider, "flipper")
+		isPref := preferBrand != "" && strings.EqualFold(e.Brand, preferBrand)
+		switch {
+		case isFlipper && isPref:
+			flipPref = append(flipPref, e)
+		case isFlipper:
+			flipRest = append(flipRest, e)
+		case isPref:
+			otherPref = append(otherPref, e)
+		default:
+			otherRest = append(otherRest, e)
+		}
+	}
+	out := make([]Entry, 0, len(flipPref)+len(flipRest)+len(otherPref)+len(otherRest))
+	out = append(out, flipPref...)
+	out = append(out, flipRest...)
+	out = append(out, otherPref...)
+	out = append(out, otherRest...)
+	return out
 }
 
 // FindPowerSignal selects the best power-toggle/on/off signal from a remote.

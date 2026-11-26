@@ -137,17 +137,19 @@ type IRView struct {
 	MatchCursor         int
 	MatchActionCursor   int
 
-	UnivCategory    string
-	UnivButtons     []ir.UniversalButton
-	UnivCursor      int
-	UnivBlasting    bool
-	UnivSeq         int
-	UnivBlastTarget string
-	UnivBlastCancel context.CancelFunc
-	UnivProgressCh  chan ir.UniversalProgress
-	UnivProgress    ir.UniversalProgress
-	UnivLastBrand   string
-	UnivBlastErr    string
+	UnivCategory     string
+	UnivButtons      []ir.UniversalButton
+	UnivCursor       int
+	UnivBlasting     bool
+	UnivSeq          int
+	UnivBlastTarget  string
+	UnivBlastStarted time.Time
+	UnivBlastElapsed time.Duration
+	UnivBlastCancel  context.CancelFunc
+	UnivProgressCh   chan ir.UniversalProgress
+	UnivProgress     ir.UniversalProgress
+	UnivLastBrand    string
+	UnivBlastErr     string
 
 	Remote          *ir.Remote
 	RemoteLoading   bool
@@ -905,6 +907,8 @@ func (v *IRView) StartUniversalBlast(target string) (context.Context, int, chan 
 	ch := make(chan ir.UniversalProgress, 1)
 	v.UnivBlasting = true
 	v.UnivBlastTarget = target
+	v.UnivBlastStarted = time.Now()
+	v.UnivBlastElapsed = 0
 	v.UnivBlastCancel = cancel
 	v.UnivProgressCh = ch
 	v.UnivProgress = ir.UniversalProgress{Target: target}
@@ -935,6 +939,9 @@ func (v *IRView) ApplyUniversalProgress(seq int, prog ir.UniversalProgress) {
 		return
 	}
 	v.UnivProgress = prog
+	if !v.UnivBlastStarted.IsZero() {
+		v.UnivBlastElapsed = time.Since(v.UnivBlastStarted)
+	}
 	if prog.Current.Brand != "" {
 		v.UnivLastBrand = prog.Current.Brand
 	}
@@ -963,6 +970,41 @@ func (v *IRView) ApplyUniversalDone(seq int, target string, uniqueSent int, last
 	}
 	v.Note = fmt.Sprintf("Done: %d %s codes", uniqueSent, v.univTargetLabel(target))
 	v.NoteIsErr = false
+}
+
+func irProviderName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "flipper":
+		return "Flipper Zero"
+	case "mi":
+		return "Mi Remote"
+	default:
+		if strings.TrimSpace(provider) == "" {
+			return "Flipper Zero"
+		}
+		return provider
+	}
+}
+
+func formatShortETA(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	secs := int(d.Round(time.Second).Seconds())
+	if secs <= 0 {
+		secs = 1
+	}
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	mins := secs / 60
+	remS := secs % 60
+	if mins < 60 {
+		return fmt.Sprintf("%dm%02ds", mins, remS)
+	}
+	hrs := mins / 60
+	remM := mins % 60
+	return fmt.Sprintf("%dh%02dm", hrs, remM)
 }
 
 func (v IRView) univTargetLabel(target string) string {
@@ -2399,8 +2441,30 @@ func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []st
 		if p.TotalEntries > 0 {
 			ratio = float64(p.EntryIndex) / float64(p.TotalEntries)
 		}
+		elapsed := v.UnivBlastElapsed
+		if elapsed <= 0 && !v.UnivBlastStarted.IsZero() {
+			elapsed = time.Since(v.UnivBlastStarted)
+		}
+		etaStr := "ETA calc…"
+		if p.EntryIndex >= 3 && elapsed > 0 && p.TotalEntries > 0 {
+			rem := max(0, p.TotalEntries-p.EntryIndex)
+			if rem == 0 {
+				etaStr = "ETA 0s"
+			} else {
+				eta := time.Duration(float64(elapsed) * float64(rem) / float64(p.EntryIndex))
+				etaStr = "ETA ~" + formatShortETA(eta)
+			}
+		}
+		btnW := max(6, w-len([]rune(etaStr))-6)
+		btnLine := " " + sec.Render("Btn ") + txt.Render(v.Marquee.FitLine(v.univTargetLabel(v.UnivBlastTarget), btnW)) + " " + muted.Render(etaStr)
+
 		count := fmt.Sprintf("%d/%d #%d", p.EntryIndex, p.TotalEntries, p.UniqueSent)
 		barW := max(4, w-len(count)-3)
+		dbName := irProviderName(p.Current.Provider)
+		dbStyle := accent
+		if strings.EqualFold(p.Current.Provider, "mi") {
+			dbStyle = ok
+		}
 		curName := p.Current.Display()
 		if strings.TrimSpace(curName) == "" {
 			curName = "scanning remotes…"
@@ -2415,18 +2479,22 @@ func (v IRView) renderUnivRemote(w, h int, pal theme.Palette, focused bool) []st
 		}
 		lines := []string{
 			" " + accent.Render(v.Marquee.FitLine("Univ: "+v.UnivCategory, titleW)) + " " + warn.Render(badge),
-			" " + sec.Render("Btn ") + txt.Render(v.Marquee.Truncate(v.univTargetLabel(v.UnivBlastTarget), max(6, w-6))),
+			btnLine,
 			" " + accent.Render(MiniBar(ratio, barW, v.ASCII)) + " " + muted.Render(count),
+			" " + sec.Render("DB  ") + dbStyle.Render(v.Marquee.Truncate(dbName, max(6, w-6))),
 			" " + sec.Render("Try ") + txt.Render(v.Marquee.Truncate(curName, max(6, w-6))),
 			" " + muted.Render(v.Marquee.Truncate(sigLine, max(6, w-2))),
 		}
-		if h >= 7 {
+		if h >= 8 {
 			lines = append(lines, " "+txt.Render(v.Marquee.Truncate("Point IR at device", max(6, w-2))))
 		}
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
 		lines = append(lines, " "+warn.Render(v.Marquee.Truncate("Esc / Space: STOP", max(6, w-2))))
+		if len(lines) > h && h >= 2 {
+			lines = append(lines[:h-1], lines[len(lines)-1])
+		}
 		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 

@@ -156,10 +156,23 @@ command: 02 00 00 00
 		t.Fatalf("expected TEMP+ on key 2 in AC profile: %+v", prof.Bindings)
 	}
 
+	// EntriesForBrand always prioritizes Mi Remote DB over Flipper DB for Match mode.
+	brandEntries := EntriesForBrand(entries, "AC", "Epson")
+	if len(brandEntries) != 2 || brandEntries[0].Provider != "mi" || brandEntries[1].Provider != "flipper" {
+		t.Fatalf("EntriesForBrand expected mi before flipper, got %+v", brandEntries)
+	}
+
+	// EntriesForCategory always prioritizes Flipper Zero DB over Mi Remote DB for Universal mode,
+	// even when preferBrand is a Mi Remote brand ("Daikin").
+	daikinFirst := EntriesForCategory(entries, "AC", "Daikin")
+	if len(daikinFirst) != 3 || daikinFirst[0].Provider != "flipper" || daikinFirst[1].Provider != "mi" || daikinFirst[1].Brand != "Daikin" {
+		t.Fatalf("EntriesForCategory expected flipper first then mi (preferring Daikin within mi), got %+v", daikinFirst)
+	}
+
 	// BlastUniversalWithSender: blasts unique signals for target in category, validates odd LIRC timings,
-	// prioritizes preferBrand, and stops cleanly on context cancel.
+	// prioritizes Flipper Zero first (and preferBrand within each DB), and stops cleanly on context cancel.
 	acEntries := EntriesForCategory(entries, "AC", "Epson")
-	if len(acEntries) != 3 || acEntries[0].Brand != "Epson" {
+	if len(acEntries) != 3 || acEntries[0].Provider != "flipper" || acEntries[0].Brand != "Epson" {
 		t.Fatalf("EntriesForCategory preferBrand order = %+v", acEntries)
 	}
 
