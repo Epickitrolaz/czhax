@@ -37,6 +37,8 @@ internal/
   wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
   wifi/oneshot.go          # OneShot-Extended discovery + WPS scan/vulnwsc DB + streaming runner
   oneshot/                 # Embedded OneShot-Extended snapshot (GPL-2.0, extracted to cache)
+  localscan/ifaces.go      # WiFi, Ethernet, and USB tethering interface discovery
+  localscan/nmap.go        # Nmap scan options, runner, and XML stream parser
   ir/types.go              # IR signals, key bindings, persisted profiles (~/.config/czhax/ir.json)
   ir/protocol.go           # NEC/Samsung/RC5/RC6/SIRC/RCA/Kaseikyo timing encoders
   ir/lirc.go               # /dev/lirc* discovery, LIRC_MODE2 capture, LIRC_MODE_PULSE transmit
@@ -51,6 +53,7 @@ internal/
     wifi.go                # Status -> WiFi interface detail
     wifi_scan.go           # WiFi -> Scan list/detail/interface picker/connect flow
     wifi_wps.go            # WiFi -> WPS/OneShot menu, runner output, color modes
+    local.go               # Local -> Scan interface picker, nmap options, live run, host details
     bluetooth.go           # Status -> Bluetooth view
     ir.go                  # IR -> Remote/Learn/Browse, probe + grid discovery modes
     system.go              # System -> Tools view (Update, Terminal Shell, Start on Boot)

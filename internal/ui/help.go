@@ -34,6 +34,7 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("IR Learn  ") + txt.Render(v.Marquee.Truncate("⏎:listen/remote/bind key", descW)),
 		" " + sec.Render("IR Browse ") + txt.Render(v.Marquee.Truncate("m:match u:univ /:find [/]:brand", descW)),
 		" " + sec.Render("WiFi List ") + txt.Render(v.Marquee.Truncate("o:color ⏎:actions (WPS)", descW)),
+		" " + sec.Render("Local     ") + txt.Render(v.Marquee.Truncate("pick if → nmap scan → hosts", descW)),
 		" " + sec.Render("?         ") + txt.Render(v.Marquee.Truncate("Toggle help", descW)),
 		" " + sec.Render("q / ^C    ") + txt.Render(v.Marquee.Truncate("Quit CZHax", descW)),
 	}

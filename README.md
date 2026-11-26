@@ -101,7 +101,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `IR`, `System`/`Sys`) and top horizontal tab bar.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `IR`, `System`/`Sys`) and top horizontal tab bar.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
@@ -115,6 +115,10 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - **Pentest actions** on the selected AP: `w` captures a WPA handshake, `d` sends deauth frames, `b` does both at once. EAPOL captures are written as radiotap pcaps to `~/czhax-captures` (requires root or passwordless sudo, a monitor-capable adapter, and nexmon firmware for injection).
   - **WPS attack (OneShot-Extended)**: press `Enter` on an AP and pick **WPS Attack (OneShot)**. OneShot-Extended is **bundled in the CZHax binary** (pinned upstream snapshot extracted to `~/.cache/czhax/oneshot-<commit>` on first use), so no separate download is needed; set `oneshot_dir` or `CZHAX_ONESHOT_DIR` to override with a local clone. Default attack is `-P -k` (Pixie Dust + kill interfering processes); presets also cover Pixie force, Null PIN, push-button, bruteforce, and a custom PIN. After each run CZHax restores NetworkManager, the interface and `rfkill` state that `--kill` terminated. If OneShot recovers a PSK, press **`c`** to connect to the AP with it after choosing an interface; if it recovers only the WPS PIN, press **`p`** to rerun the PSK capture with the saved PIN (also available as *Retry with PIN* in the WPS menu). Requires Python 3.11+, `pixiewps`, `wpa_supplicant`, `iw` and `ip`; its `vulnwsc.txt` DB drives the vulnerability colors.
   - **Network colors**: press `o` to cycle coloring modes — **SEC** (red WPA3, orange WPA2, yellow WPA/WEP, green Open) or **OSE** (green = in OneShot's vulnerable-device DB or WPS 1.0, red = WPS locked, muted = no WPS). The mode is persisted in `~/.config/czhax/config.json` as `wifi_color_mode`.
+- **Local Scan (`Local → Scan`)**:
+  - Lists WiFi (`wlan*`), Ethernet (`eth*`, `en*`), and USB tethering (`usb0`, `rndis0`, `ipheth`, `cdc_ether`, etc.) interfaces along with the connected network/subnet; disconnected interfaces are greyed out and unselectable.
+  - Offers `nmap` scan presets on the selected interface's local subnet: **Host Discovery** (`-sn`), **Quick Ports** (`-F`), **Service Scan** (`-sV`), **OS & Scripts** (`-A`), **Top 1000 Ports**, and **Full Port Scan** (`-p-`), streaming live progress and parsing discovered hosts, MACs/vendors, OS, and open ports.
+  - Select any discovered host to view its details or press `s` to run a targeted `nmap` scan on that host alone.
 - **IR Remote (`IR → Remote`, `IR → Learn`, `IR → Browse`)**:
   - **Learn**: copy any physical remote button with the GPIO13 IR receiver and bind it to a Cardputer key. Learned profiles persist in `~/.config/czhax/ir.json`.
   - **Remote**: the active profile maps buttons to keys (`1` Power, `2` Vol+, `3` Vol−, `4` Mute, `5`/`6` channel, `7`–`0` arrows, `Enter` OK, `Backspace` Back); presses transmit over the GPIO12 IR LED.

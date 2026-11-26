@@ -12,6 +12,7 @@ type ViewID int
 const (
 	ViewStatus ViewID = iota
 	ViewWiFi
+	ViewLocal
 	ViewIR
 	ViewSystem
 	viewCount
@@ -46,6 +47,7 @@ func SidebarLabel(name string) string {
 var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
 	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan"}},
+	{ID: ViewLocal, Name: "Local", Short3: "Loc", Tabs: []string{"Scan"}},
 	{ID: ViewIR, Name: "IR", Short3: "IR", Tabs: []string{"Remote", "Learn", "Browse"}},
 	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
 }

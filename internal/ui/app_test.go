@@ -378,7 +378,22 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc from WiFi List")
 		}
 
-		// Down moves to IR view, then System view
+		// Down moves to Local view, then IR view, then System view
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewLocal {
+			t.Fatalf("expected ViewLocal on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on Local enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Content")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from Local")
+		}
+
 		m = sendKey(m, "down")
 		if m.ActiveView != ViewIR {
 			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
