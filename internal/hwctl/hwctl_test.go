@@ -83,6 +83,67 @@ func TestReadAndStepBacklight(t *testing.T) {
 	if !ok || st.Raw != 0 || st.Level != 0 {
 		t.Fatalf("expected clamp at 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
 	}
+
+	// Full round-trip must produce strictly 0, 10, 20, ..., 100 with no 5.
+	var up []int
+	for i := 0; i < 10; i++ {
+		st, ok = StepBacklight(sysRoot, 1)
+		if !ok {
+			t.Fatal("StepBacklight(+1) failed")
+		}
+		up = append(up, st.Raw)
+	}
+	wantUp := []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
+	for i, w := range wantUp {
+		if up[i] != w {
+			t.Fatalf("up step %d = %d, want %d (all=%v)", i, up[i], w, up)
+		}
+	}
+	var dn []int
+	for i := 0; i < 10; i++ {
+		st, ok = StepBacklight(sysRoot, -1)
+		if !ok {
+			t.Fatal("StepBacklight(-1) failed")
+		}
+		dn = append(dn, st.Raw)
+	}
+	wantDn := []int{90, 80, 70, 60, 50, 40, 30, 20, 10, 0}
+	for i, w := range wantDn {
+		if dn[i] != w {
+			t.Fatalf("down step %d = %d, want %d (all=%v)", i, dn[i], w, dn)
+		}
+	}
+}
+
+func TestLegacyDaemonClampSnappedToZero(t *testing.T) {
+	sysRoot := t.TempDir()
+	blDir := filepath.Join(sysRoot, "class", "backlight", "backlight")
+	if err := os.MkdirAll(blDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blDir, "max_brightness"), []byte("100\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate legacy cardputer-brightness.py clamping 10 -> 5 on Fn+U.
+	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{
+		events:     make(chan Event, 4),
+		stopCh:     make(chan struct{}),
+		blKey:      make(chan int, 4),
+		lastRaw:    10,
+		hasLastRaw: true,
+	}
+	w.handleBrightnessKeyAt(sysRoot, -1)
+	ev := <-w.events
+	if ev.Brightness.Raw != 0 || ev.Brightness.Level != 0 {
+		t.Fatalf("expected legacy 10->5 clamp snapped to 0, got %+v", ev.Brightness)
+	}
+	got, ok := ReadBacklight(sysRoot)
+	if !ok || got.Raw != 0 {
+		t.Fatalf("expected sysfs brightness written to 0, got ok=%v st=%+v", ok, got)
+	}
 }
 
 func TestVolumeControllerES8389AndMute(t *testing.T) {
