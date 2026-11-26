@@ -338,6 +338,11 @@ func (v *BluetoothScanView) OpenCWMenu() bool {
 	v.CWReturn = v.Mode
 	v.Mode = btModeCWMenu
 	v.CWCursor = 0
+	v.CWTap = false
+	v.CWPlay = false
+	v.CWRecordMsg = false
+	v.CWPlayPath = ""
+	v.CWPlayName = ""
 	v.Note = ""
 	v.NoteIsErr = false
 	return true
