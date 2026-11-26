@@ -71,6 +71,12 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	if err := prepareCarwhispererAdapter(hciName); err != nil {
 		emit("Adapter warning: %v", err)
 	}
+	channel, svc := discoverRFCOMMChannel(address)
+	if svc != "" {
+		emit("SDP: %s on RFCOMM channel %d", svc, channel)
+	} else {
+		emit("SDP: no hands-free service found; trying RFCOMM channel %d", channel)
+	}
 
 	var record io.Writer
 	if recordAudio {
@@ -103,17 +109,22 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		_ = exec.Command("hciconfig", hciName, "voice", "0x0060").Run()
 	}
 
-	rfd, err := openRFCOMM(addr)
+	rfd, err := openRFCOMM(addr, channel)
 	if err != nil && errors.Is(err, unix.EACCES) {
-		// Older/dual-mode targets sometimes reject RFCOMM until they are
-		// bonded. The BLE speaker case that previously worked should not be
-		// pre-paired, so only try pairing after a real permission failure.
-		emit("RFCOMM permission denied; trying to pair %s...", NormalizeAddr(address))
+		// Dual-mode/consumer devices sometimes reject RFCOMM while another
+		// profile is connected or until they are bonded. Only take these
+		// disruptive steps after a real permission failure.
+		emit("RFCOMM permission denied; disconnecting and trying to pair %s...", NormalizeAddr(address))
+		disconnectForCW(address, emit)
 		pairCarwhispererDevice(hciName, address, emit)
-		rfd, err = openRFCOMM(addr)
+		rfd, err = openRFCOMM(addr, channel)
 	}
 	if err != nil {
-		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered and the device is paired; CZHax needs root)", err)
+		info := bluetoothInfo(address)
+		if info != "" {
+			emit("Device info: %s", info)
+		}
+		return fmt.Errorf("connect RFCOMM channel %d: %w (check the adapter is powered and the device is paired; CZHax needs root)", channel, err)
 	}
 	defer unix.Close(rfd)
 	emit("RFCOMM connected to %s", FormatBDAddr(addr))
@@ -162,6 +173,79 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	return nil
 }
 
+func discoverRFCOMMChannel(address string) (int, string) {
+	if _, err := exec.LookPath("sdptool"); err != nil {
+		return 1, ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sdptool", "browse", NormalizeAddr(address)).CombinedOutput()
+	if err != nil && strings.TrimSpace(string(out)) == "" {
+		return 1, ""
+	}
+	service := ""
+	hfp := false
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "Service Name:") {
+			service = strings.TrimSpace(strings.TrimPrefix(line, "Service Name:"))
+			hfp = strings.Contains(strings.ToLower(service), "handsfree") ||
+				strings.Contains(strings.ToLower(service), "headset")
+		}
+		low := strings.ToLower(line)
+		if strings.Contains(low, "0x1112") || strings.Contains(low, "0x111e") ||
+			strings.Contains(low, "0x111f") || strings.Contains(low, "handsfree") ||
+			strings.Contains(low, "headset") {
+			hfp = true
+		}
+		if hfp && strings.HasPrefix(low, "channel:") {
+			v := strings.TrimSpace(strings.TrimPrefix(low, "channel:"))
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 30 {
+				return n, service
+			}
+		}
+	}
+	return 1, ""
+}
+
+func disconnectForCW(address string, emit func(string, ...any)) {
+	if _, err := exec.LookPath("bluetoothctl"); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "bluetoothctl", "disconnect", NormalizeAddr(address)).CombinedOutput()
+	if s := strings.TrimSpace(string(out)); s != "" {
+		emit("disconnect: %s", s)
+	}
+	_ = err
+}
+
+func bluetoothInfo(address string) string {
+	if _, err := exec.LookPath("bluetoothctl"); err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "bluetoothctl", "info", NormalizeAddr(address)).CombinedOutput()
+	if err != nil && strings.TrimSpace(string(out)) == "" {
+		return ""
+	}
+	var parts []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Name:"),
+			strings.HasPrefix(line, "Paired:"),
+			strings.HasPrefix(line, "Trusted:"),
+			strings.HasPrefix(line, "Connected:"),
+			strings.HasPrefix(line, "Class:"):
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
 func pairCarwhispererDevice(hciName, address string, emit func(string, ...any)) {
 	if _, err := exec.LookPath("btmgmt"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -177,7 +261,7 @@ func pairCarwhispererDevice(hciName, address string, emit func(string, ...any)) 
 	}
 	if _, err := exec.LookPath("bluetoothctl"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		out, err := exec.CommandContext(ctx, "bluetoothctl", "--timeout", "20", "pair", NormalizeAddr(address)).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "bluetoothctl", "--agent", "NoInputNoOutput", "--timeout", "20", "pair", NormalizeAddr(address)).CombinedOutput()
 		cancel()
 		if err == nil {
 			emit("Paired with bluetoothctl")
@@ -208,17 +292,20 @@ func prepareCarwhispererAdapter(hciName string) error {
 	return first
 }
 
-func openRFCOMM(addr [6]byte) (int, error) {
+func openRFCOMM(addr [6]byte, channel int) (int, error) {
+	if channel <= 0 || channel > 30 {
+		channel = 1
+	}
 	fd, err := unix.Socket(unix.AF_BLUETOOTH, unix.SOCK_STREAM, unix.BTPROTO_RFCOMM)
 	if err != nil {
 		return -1, fmt.Errorf("RFCOMM socket: %w", err)
 	}
 	setRecvTimeout(fd)
-	if err := unix.Bind(fd, &unix.SockaddrRFCOMM{Channel: 1}); err != nil {
+	if err := unix.Bind(fd, &unix.SockaddrRFCOMM{Channel: 0}); err != nil {
 		unix.Close(fd)
 		return -1, fmt.Errorf("bind RFCOMM: %w", err)
 	}
-	if err := unix.Connect(fd, &unix.SockaddrRFCOMM{Addr: addr, Channel: 1}); err != nil {
+	if err := unix.Connect(fd, &unix.SockaddrRFCOMM{Addr: addr, Channel: uint8(channel)}); err != nil {
 		unix.Close(fd)
 		return -1, err
 	}
