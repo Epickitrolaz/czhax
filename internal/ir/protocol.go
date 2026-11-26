@@ -73,10 +73,10 @@ func bitsMSB(v uint64, n int) []int {
 	return out
 }
 
-// pdwmFrame builds a pulse-distance frame. The final space is replaced by the
-// inter-frame gap so the transmitter leaves the LED off between presses.
-func pdwmFrame(preMark, preSpace, oneMark, zeroMark, oneSpace, zeroSpace, gap int, bits []int) []int {
-	out := make([]int, 0, 2+len(bits)*2)
+// pdwmFrame builds a pulse-distance frame with a trailing stop mark so every
+// bit's space is preserved and the frame ends on a pulse for LIRC_MODE_PULSE.
+func pdwmFrame(preMark, preSpace, oneMark, zeroMark, oneSpace, zeroSpace int, bits []int) []int {
+	out := make([]int, 0, 3+len(bits)*2)
 	out = append(out, preMark, preSpace)
 	for _, b := range bits {
 		mark := zeroMark
@@ -87,9 +87,7 @@ func pdwmFrame(preMark, preSpace, oneMark, zeroMark, oneSpace, zeroSpace, gap in
 		}
 		out = append(out, mark, space)
 	}
-	if len(out) >= 2 {
-		out[len(out)-1] = gap
-	}
+	out = append(out, zeroMark)
 	return out
 }
 
@@ -100,12 +98,12 @@ func encodeNEC(address, command uint32) []int {
 		uint32(^addr)<<8 |
 		uint32(cmd)<<16 |
 		uint32(^cmd)<<24
-	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, frameGap, bitsLSB(uint64(data), 32))
+	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, bitsLSB(uint64(data), 32))
 }
 
 func encodeNECext(address, command uint32) []int {
 	data := uint64(address&0xffff) | uint64(command&0xffff)<<16
-	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, frameGap, bitsLSB(data, 32))
+	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, bitsLSB(data, 32))
 }
 
 func encodeNEC42(address, command uint32) []int {
@@ -114,19 +112,19 @@ func encodeNEC42(address, command uint32) []int {
 	data1 := addr | (^addr&0x1fff)<<13 | (cmd&0x3f)<<26
 	data2 := (cmd&0xc0)>>6 | (^cmd&0xff)<<2
 	bits := append(bitsLSB(uint64(data1), 32), bitsLSB(uint64(data2), 10)...)
-	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, frameGap, bits)
+	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, bits)
 }
 
 func encodeNEC42ext(address, command uint32) []int {
 	bits := append(bitsLSB(uint64(address&0x3ffffff), 26), bitsLSB(uint64(command&0xffff), 16)...)
-	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, frameGap, bits)
+	return pdwmFrame(9000, 4500, 560, 560, 1690, 560, bits)
 }
 
 func encodeSamsung32(address, command uint32) []int {
 	addr := uint8(address)
 	cmd := uint8(command)
 	data := uint32(addr) | uint32(addr)<<8 | uint32(cmd)<<16 | uint32(^cmd)<<24
-	return pdwmFrame(4500, 4500, 550, 550, 1650, 550, frameGap, bitsLSB(uint64(data), 32))
+	return pdwmFrame(4500, 4500, 550, 550, 1650, 550, bitsLSB(uint64(data), 32))
 }
 
 // manchester builds a bi-phase mark/space sequence, merging adjacent levels
@@ -164,15 +162,16 @@ func manchester(bits []int, half int, doubleAt int) []int {
 	if len(segs) == 0 || !segs[0].mark {
 		return nil
 	}
-	out := make([]int, 0, len(segs)+1)
+	if !segs[len(segs)-1].mark {
+		// End on a pulse for LIRC_MODE_PULSE; the transmitter idles off afterwards.
+		segs = segs[:len(segs)-1]
+	}
+	if len(segs) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(segs))
 	for _, s := range segs {
 		out = append(out, s.dur)
-	}
-	// End on a gap: replace a trailing space or append one.
-	if len(out)%2 == 0 {
-		out[len(out)-1] = frameGap
-	} else {
-		out = append(out, frameGap)
 	}
 	return out
 }
@@ -212,11 +211,25 @@ func encodeSIRC(address, command uint32, variant string) []int {
 		addrBits = 13
 	}
 	bits := append(bitsLSB(uint64(command&0x7f), 7), bitsLSB(uint64(address)&(1<<addrBits-1), addrBits)...)
-	frame := pdwmFrame(2400, 600, 1200, 600, 600, 600, 25000, bits)
-	// Sony devices expect a minimum of three repeats.
-	out := make([]int, 0, len(frame)*3)
+	frame := make([]int, 0, 2+len(bits)*2)
+	frame = append(frame, 2400, 600)
+	for _, b := range bits {
+		mark := 600
+		if b == 1 {
+			mark = 1200
+		}
+		frame = append(frame, mark, 600)
+	}
+	// Sony devices expect a minimum of three repeats separated by a ~25ms gap,
+	// ending on the final bit's mark for LIRC_MODE_PULSE.
+	out := make([]int, 0, len(frame)*3-1)
 	for i := 0; i < 3; i++ {
-		out = append(out, frame...)
+		if i < 2 {
+			out = append(out, frame[:len(frame)-1]...)
+			out = append(out, 25000)
+		} else {
+			out = append(out, frame[:len(frame)-1]...)
+		}
 	}
 	return out
 }
@@ -225,7 +238,7 @@ func encodeRCA(address, command uint32) []int {
 	addr := uint8(address) & 0xf
 	cmd := uint8(command)
 	data := uint64(addr) | uint64(cmd)<<4 | uint64(^addr&0xf)<<12 | uint64(^cmd)<<16
-	return pdwmFrame(4000, 4000, 500, 500, 2000, 1000, frameGap, bitsLSB(data, 24))
+	return pdwmFrame(4000, 4000, 500, 500, 2000, 1000, bitsLSB(data, 24))
 }
 
 func encodeKaseikyo(address, command uint32) []int {
@@ -242,5 +255,5 @@ func encodeKaseikyo(address, command uint32) []int {
 	b4 := uint8(id<<6) | uint8((command>>4)&0x3f)
 	b5 := b2 ^ b3 ^ b4
 	value := uint64(b0) | uint64(b1)<<8 | uint64(b2)<<16 | uint64(b3)<<24 | uint64(b4)<<32 | uint64(b5)<<40
-	return pdwmFrame(3456, 1728, 432, 432, 1296, 432, frameGap, bitsLSB(value, 48))
+	return pdwmFrame(3456, 1728, 432, 432, 1296, 432, bitsLSB(value, 48))
 }

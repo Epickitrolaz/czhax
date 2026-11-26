@@ -20,6 +20,24 @@ const (
 	IRTabBrowse
 )
 
+type learnMenuOption int
+
+const (
+	learnOptListen learnMenuOption = iota
+	learnOptProfile
+	learnOptCount
+)
+
+type learnCapturedOption int
+
+const (
+	learnCapBind learnCapturedOption = iota
+	learnCapTest
+	learnCapAgain
+	learnCapDiscard
+	learnCapCount
+)
+
 type irGridButton struct {
 	Name    string
 	Key     string
@@ -47,6 +65,9 @@ type IRView struct {
 	CaptureElapsed time.Duration
 	Learned        *ir.Signal
 	AwaitBinding   bool
+	AwaitKeyPress  bool
+	LearnCursor    int
+	CapturedCursor int
 	LearnErr       string
 
 	Index        []ir.Entry
@@ -205,7 +226,7 @@ func buildGridButtons(sigs []ir.Signal) []irGridButton {
 	order := []string{}
 	groups := map[string]*group{}
 	for _, sig := range sigs {
-		if len(sig.Timings) < 4 {
+		if len(sig.Timings) < 3 {
 			continue
 		}
 		key := strings.ToLower(strings.TrimSpace(sig.Name))
@@ -258,7 +279,7 @@ func (v IRView) probeCandidates(target string) []ir.Signal {
 	}
 	var match []ir.Signal
 	for _, sig := range v.Remote.Signals {
-		if len(sig.Timings) < 4 {
+		if len(sig.Timings) < 3 {
 			continue
 		}
 		if matchesProbeTarget(sig.Name, target) {
@@ -300,6 +321,7 @@ func (v *IRView) NextProbe(target string) (ir.Signal, bool) {
 }
 
 func (v IRView) gridSignal(key string) (ir.Signal, string, bool) {
+	key = ir.NormalizeBindKey(key)
 	for i := range v.GridButtons {
 		b := &v.GridButtons[i]
 		if b.Key != key {
@@ -315,6 +337,7 @@ func (v IRView) gridSignal(key string) (ir.Signal, string, bool) {
 }
 
 func (v *IRView) advanceGrid(key string) {
+	key = ir.NormalizeBindKey(key)
 	for i := range v.GridButtons {
 		if v.GridButtons[i].Key == key && len(v.GridButtons[i].Signals) > 0 {
 			v.GridButtons[i].Last = v.GridButtons[i].Index
@@ -353,7 +376,7 @@ func (v *IRView) AcceptRemote() bool {
 		// Use every named button from the remote, but pin the accepted
 		// candidate for the probed button.
 		for _, s := range v.Remote.Signals {
-			if len(s.Timings) < 4 {
+			if len(s.Timings) < 3 {
 				continue
 			}
 			if matchesProbeTarget(s.Name, v.ProbeTarget) {
@@ -397,6 +420,44 @@ func (v *IRView) saveStore() error {
 	return nil
 }
 
+func (v IRView) IsKeyCaptureActive() bool {
+	return v.Tab == IRTabLearn && v.AwaitKeyPress && v.Learned != nil
+}
+
+func (v *IRView) MoveLearnMenu(delta int) {
+	v.LearnCursor = (v.LearnCursor + delta + int(learnOptCount)) % int(learnOptCount)
+	v.LearnErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *IRView) MoveCapturedMenu(delta int) {
+	v.CapturedCursor = (v.CapturedCursor + delta + int(learnCapCount)) % int(learnCapCount)
+	v.LearnErr = ""
+}
+
+func (v *IRView) BeginBindKey() bool {
+	if v.Learned == nil {
+		return false
+	}
+	v.AwaitBinding = true
+	v.AwaitKeyPress = true
+	v.LearnErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *IRView) DiscardLearned() {
+	v.Learned = nil
+	v.AwaitBinding = false
+	v.AwaitKeyPress = false
+	v.CapturedCursor = 0
+	v.LearnErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
 func (v *IRView) StartCapture(ctx context.Context) (context.Context, int, bool) {
 	if v.HW.RXPath == "" {
 		v.LearnErr = "No IR receiver: " + v.HW.Err
@@ -408,8 +469,12 @@ func (v *IRView) StartCapture(ctx context.Context) (context.Context, int, bool) 
 	v.CaptureSeq++
 	v.Capturing = true
 	v.LearnErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
 	v.Learned = nil
 	v.AwaitBinding = false
+	v.AwaitKeyPress = false
+	v.CapturedCursor = 0
 	v.CaptureStarted = time.Now()
 	v.CaptureElapsed = 0
 	v.CaptureCancel = nil
@@ -454,16 +519,20 @@ func (v *IRView) applyCaptureResult(sig ir.Signal, err error) {
 			v.Note = ""
 		}
 		v.AwaitBinding = false
+		v.AwaitKeyPress = false
 		return
 	}
 	v.Learned = &sig
 	v.AwaitBinding = true
+	v.AwaitKeyPress = false
+	v.CapturedCursor = 0
 	v.LearnErr = ""
 	v.Note = ""
 	v.NoteIsErr = false
 }
 
 func (v *IRView) BindLearned(key string) bool {
+	key = ir.NormalizeBindKey(key)
 	if v.Learned == nil || !ir.IsBindableKey(key) {
 		return false
 	}
@@ -476,7 +545,10 @@ func (v *IRView) BindLearned(key string) bool {
 	sig.Saved = time.Now()
 	v.Store.AddBinding(name, ir.Binding{Key: key, Name: "Learned", Signal: sig})
 	v.AwaitBinding = false
+	v.AwaitKeyPress = false
+	v.CapturedCursor = 0
 	v.Learned = nil
+	v.LearnErr = ""
 	if v.saveStore() == nil {
 		v.Note = "Bound to " + ir.KeyLabel(key)
 		v.NoteIsErr = false
@@ -502,6 +574,7 @@ func (v *IRView) CycleProfile(delta int) {
 }
 
 func (v IRView) BindingForKey(key string) (ir.Binding, bool) {
+	key = ir.NormalizeBindKey(key)
 	p := v.Store.ActiveProfile()
 	if p == nil {
 		return ir.Binding{}, false
@@ -521,10 +594,13 @@ func (v *IRView) HandleEsc() bool {
 			v.StopCapture()
 			return true
 		}
-		if v.AwaitBinding {
-			v.AwaitBinding = false
-			v.Learned = nil
+		if v.AwaitKeyPress {
+			v.AwaitKeyPress = false
 			v.LearnErr = ""
+			return true
+		}
+		if v.AwaitBinding {
+			v.DiscardLearned()
 			return true
 		}
 		return false
@@ -633,57 +709,152 @@ func (v IRView) renderLearn(w, h int, pal theme.Palette, focused bool) []string 
 	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
-	lines := []string{
-		" " + accent.Render("IR Learn · copy a signal"),
-		" " + muted.Render(irHardwareLine(v)),
-	}
+	var lines []string
+	var hint string
+
 	switch {
 	case v.Capturing:
-		lines = append(lines, " "+warn.Render("Listening…"))
-		lines = append(lines, " "+muted.Render(Truncate(fmt.Sprintf("%ds / %ds", int(v.CaptureElapsed.Seconds()), 5), max(6, w-2))))
-		lines = append(lines, " "+txt.Render("Point the remote at the receiver"))
-	case v.AwaitBinding:
-		sig := v.Learned
-		freq := ir.DefaultFrequency
-		count := 0
-		if sig != nil {
-			freq = sig.Frequency
-			count = len(sig.Timings)
+		lines = []string{
+			" " + accent.Render("IR Learn"),
+			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+			" " + warn.Render("Listening…"),
+			" " + muted.Render(Truncate(fmt.Sprintf("%ds / %ds", int(v.CaptureElapsed.Seconds()), 5), max(6, w-2))),
+			" " + txt.Render(Truncate("Point remote at receiver", max(6, w-2))),
 		}
-		lines = append(lines, " "+ok.Render("Captured!"))
-		lines = append(lines, " "+sec.Render("Timings ")+txt.Render(fmt.Sprintf("%d", count)))
-		lines = append(lines, " "+sec.Render("Carrier ")+txt.Render(fmt.Sprintf("%d Hz", freq)))
-		lines = append(lines, " "+warn.Render("Press a key to bind (Esc cancel)"))
+		hint = "Esc:cancel"
+
+	case v.AwaitKeyPress && v.Learned != nil:
+		sig := v.Learned
+		lines = []string{
+			" " + accent.Render("Bind Captured Signal"),
+			" " + muted.Render(Truncate(fmt.Sprintf("%d timings · %d Hz", len(sig.Timings), sig.Frequency), max(6, w-2))),
+		}
+		if h >= 7 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, " "+warn.Render(Truncate("Press any key to bind:", max(6, w-2))))
+		lines = append(lines, " "+txt.Render(Truncate("a-z, 0-9, F1-F8, Enter, Bksp", max(6, w-2))))
+		hint = "Esc:back"
+
+	case v.AwaitBinding && v.Learned != nil:
+		sig := v.Learned
+		lines = []string{
+			" " + ok.Render(Truncate(fmt.Sprintf("Captured! %dt · %dHz", len(sig.Timings), sig.Frequency), max(6, w-2))),
+		}
+		type capItem struct {
+			name string
+			val  string
+			ok   bool
+		}
+		items := []capItem{
+			{name: "Bind to key", val: "save", ok: true},
+			{name: "Test signal", val: "send"},
+			{name: "Listen again", val: "5s"},
+			{name: "Discard", val: "cancel"},
+		}
+		showBottom := (h >= 6 || v.Note != "" || v.LearnErr != "") && h >= 4
+		listH := h - 1
+		if showBottom {
+			listH = h - 2
+		}
+		cursor := clampIndex(v.CapturedCursor, len(items))
+		start, end := ScrollWindow(len(items), cursor, max(1, listH))
+		for i := start; i < end; i++ {
+			it := items[i]
+			selected := i == cursor
+			nameW := max(8, w-len(it.val)-5)
+			if selected && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if selected {
+					pfx = accent.Render(" ▸ ")
+				}
+				valStyle := muted
+				if it.ok {
+					valStyle = ok
+				}
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+			}
+		}
+		hint = "↑↓:sel  ⏎:run  Esc:discard"
+
 	default:
-		lines = append(lines, " "+txt.Render("Press l to listen"))
-		lines = append(lines, " "+muted.Render("Then press a button on the remote"))
+		lines = []string{
+			" " + accent.Render("IR Learn"),
+			" " + muted.Render(Truncate(irHardwareLine(v), max(6, w-2))),
+		}
+		profName := "My remote"
+		keyCount := 0
+		if p := v.Store.ActiveProfile(); p != nil {
+			if strings.TrimSpace(p.Name) != "" {
+				profName = p.Name
+			}
+			keyCount = len(p.Bindings)
+		}
+		profVal := fmt.Sprintf("%d keys", keyCount)
+		if len(v.Store.Profiles) > 1 {
+			profVal += "◂▸"
+		}
+		type learnItem struct {
+			name string
+			val  string
+			ok   bool
+		}
+		items := []learnItem{
+			{name: "Listen for IR", val: "5s", ok: v.HW.RXPath != ""},
+			{name: "Save to: " + profName, val: profVal},
+		}
+		cursor := clampIndex(v.LearnCursor, len(items))
+		for i, it := range items {
+			selected := i == cursor
+			nameW := max(8, w-len([]rune(it.val))-5)
+			if selected && focused {
+				row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := "   "
+				if selected {
+					pfx = accent.Render(" ▸ ")
+				}
+				valStyle := muted
+				if it.ok {
+					valStyle = ok
+				}
+				lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+			}
+		}
 		if v.HW.RXPath == "" && v.HW.Err != "" {
 			lines = append(lines, " "+danger.Render(Truncate(v.HW.Err, max(6, w-2))))
 		}
+		hint = "↑↓:sel  ⏎:run  Esc:tabs"
 	}
-	if v.LearnErr != "" {
-		lines = append(lines, " "+danger.Render(Truncate(v.LearnErr, max(6, w-2))))
-	}
-	if v.Note != "" {
-		st := ok
-		if v.NoteIsErr {
-			st = danger
-		}
-		lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
-	}
-	if h >= 4 && v.Note == "" && v.LearnErr == "" {
-		hint := "l:listen  Esc:tabs"
-		if v.Capturing {
-			hint = "Esc:cancel"
-		} else if v.AwaitBinding {
-			hint = "1-0:bind  t:test  Esc:cancel"
-		}
+
+	if h >= 4 {
 		for len(lines) < h-1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+		switch {
+		case v.LearnErr != "":
+			lines = append(lines, " "+danger.Render(Truncate(v.LearnErr, max(6, w-2))))
+		case v.Note != "":
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		default:
+			lines = append(lines, " "+muted.Render(Truncate(hint, max(6, w-2))))
+		}
+		// Keep within exact height if error/note pushed lines over h.
+		if len(lines) > h {
+			lines = append(lines[:h-1], lines[len(lines)-1])
+		}
 	}
+	_ = sec
 	return SplitLinesPadded(lines, w, h)
 }
 

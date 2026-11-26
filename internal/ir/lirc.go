@@ -228,11 +228,11 @@ func (r *Receiver) Capture(ctx context.Context, timeout time.Duration) (Signal, 
 
 	finish := func() (Signal, bool) {
 		trimmed := trimCapturedTimings(timings)
-		if len(trimmed) < 6 {
+		if len(trimmed) < 5 {
 			return Signal{}, false
 		}
 		freq := measuredFreq
-		if freq <= 0 {
+		if freq <= 0 || freq > maxDurationUS {
 			freq = DefaultFrequency
 		}
 		sig := Signal{
@@ -262,7 +262,7 @@ func (r *Receiver) Capture(ctx context.Context, timeout time.Duration) (Signal, 
 			return Signal{}, fmt.Errorf("poll %s: %w", r.path, err)
 		}
 		if n == 0 || pfds[0].Revents&unix.POLLIN == 0 {
-			if len(timings) >= 6 && !lastData.IsZero() && time.Since(lastData) > lircSilenceTimeout {
+			if len(timings) >= 5 && !lastData.IsZero() && time.Since(lastData) > lircSilenceTimeout {
 				if sig, ok := finish(); ok {
 					return sig, nil
 				}
@@ -294,17 +294,30 @@ func (r *Receiver) Capture(ctx context.Context, timeout time.Duration) (Signal, 
 				if d <= 0 {
 					continue
 				}
-				if len(timings) == 0 && v&lircMode2Mask == 0 {
+				isPulse := (v & lircMode2Mask) == lircMode2Pulse
+				if len(timings) == 0 && !isPulse {
 					// A frame starts with a mark; ignore idle spaces.
 					continue
 				}
-				timings = append(timings, d)
-				if v&lircMode2Mask == 0 && d > int(lircFrameGap/time.Microsecond) && len(timings) >= 6 {
+				if !isPulse && d > int(lircFrameGap/time.Microsecond) && len(timings) >= 5 {
 					if sig, ok := finish(); ok {
 						return sig, nil
 					}
 				}
-				if len(timings) > MaxTimings {
+				if len(timings) > 0 && isPulse == (len(timings)%2 == 1) {
+					// Merge consecutive samples of identical polarity to preserve mark/space alternation.
+					sum := timings[len(timings)-1] + d
+					if sum > maxDurationUS {
+						sum = maxDurationUS
+					}
+					timings[len(timings)-1] = sum
+				} else {
+					timings = append(timings, d)
+				}
+				if len(timings) >= MaxTimings {
+					if sig, ok := finish(); ok {
+						return sig, nil
+					}
 					return Signal{}, errors.New("IR signal is too long")
 				}
 			case lircMode2Freq:
@@ -340,11 +353,10 @@ func trimCapturedTimings(in []int) []int {
 	if len(in) == 0 {
 		return nil
 	}
-	// A frame must end on a space so the transmitter leaves the LED off.
-	if len(in)%2 == 1 {
-		in = append(in, int(frameGap))
-	} else if in[len(in)-1] < int(frameGap) {
-		in[len(in)-1] = int(frameGap)
+	// Linux LIRC_MODE_PULSE requires an odd number of durations (ending on a
+	// pulse; the transmitter turns the carrier off afterwards).
+	if len(in)%2 == 0 {
+		in = in[:len(in)-1]
 	}
 	return in
 }
@@ -395,6 +407,9 @@ func (t *Transmitter) Send(sig Signal) error {
 	if err := sig.Validate(); err != nil {
 		return err
 	}
+	if sig.Frequency <= 0 || sig.Frequency > maxDurationUS {
+		sig.Frequency = DefaultFrequency
+	}
 	fd := int(t.f.Fd())
 	if t.features&lircCanSetSendCarrier != 0 {
 		if err := ioctlSet(fd, lircSetSendCarrier, uint32(sig.Frequency)); err != nil {
@@ -406,8 +421,8 @@ func (t *Transmitter) Send(sig Signal) error {
 		if duty < 1 {
 			duty = 1
 		}
-		if duty > 100 {
-			duty = 100
+		if duty > 99 {
+			duty = 99
 		}
 		// Not all raw transmitters implement duty-cycle control.
 		_ = ioctlSet(fd, lircSetSendDutyCycle, uint32(duty))

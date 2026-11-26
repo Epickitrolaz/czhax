@@ -529,6 +529,25 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.Focus == FocusContent && m.ActiveView == ViewIR {
+		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
+		if m.IR.IsKeyCaptureActive() {
+			if k == "esc" {
+				m.IR.HandleEsc()
+				return m, nil
+			}
+			bk := ir.NormalizeBindKey(k)
+			if ir.IsBindableKey(bk) && m.IR.BindLearned(bk) {
+				if m.IR.NoteIsErr {
+					return m, m.setStatus("IR save failed")
+				}
+				return m, m.setStatus("Bound " + ir.KeyLabel(bk))
+			}
+			m.IR.LearnErr = "Use a-z, 0-9, F1-F8, Enter, Bksp"
+			return m, nil
+		}
+	}
+
 	switch k {
 	case "?":
 		m.ShowHelp = true
@@ -541,6 +560,17 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewIR && m.Focus == FocusContent {
 			if m.IR.Capturing {
 				return m, m.setStatus("IR capture running")
+			}
+			if m.IR.Tab == IRTabRemote {
+				if b, ok := m.IR.BindingForKey(k); ok {
+					return m.sendIR(b.Signal, b.Name)
+				}
+			}
+			if m.IR.Tab == IRTabBrowse && m.IR.Remote != nil && m.IR.GridMode {
+				if sig, name, ok := m.IR.gridSignal(k); ok {
+					m.IR.advanceGrid(k)
+					return m.sendIR(sig, name)
+				}
 			}
 			m.IR.RefreshHardware()
 			if IRTab(m.ActiveTabs[ViewIR]) == IRTabBrowse {
@@ -742,12 +772,6 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		switch m.WifiScan.Mode {
 		case scanModeList:
 			switch {
-			case k == "w":
-				return m.startWifiPentest(wifi.PentestHandshake)
-			case k == "d":
-				return m.startWifiPentest(wifi.PentestDeauth)
-			case k == "b":
-				return m.startWifiPentest(wifi.PentestBoth)
 			case m.isUp(k):
 				m.WifiScan.MoveNetwork(-1)
 			case m.isDown(k):
@@ -770,21 +794,37 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 						return m, tea.Batch(collectWifiCmd(), scanWifiNetworksCmd(iface), m.setStatus("Scanning "+iface+"..."))
 					}
 				} else {
-					m.WifiScan.OpenDetail()
+					m.WifiScan.OpenActions()
 				}
 			case k == "c":
 				m.WifiScan.BeginConnect(scanModeList)
 			}
 			return m, nil
 
+		case scanModeActions:
+			switch {
+			case m.isUp(k):
+				m.WifiScan.MoveAction(-1)
+			case m.isDown(k):
+				m.WifiScan.MoveAction(1)
+			case k == "enter" || k == " ":
+				switch WifiScanAction(m.WifiScan.ActionCursor) {
+				case wifiActConnect:
+					m.WifiScan.BeginConnect(scanModeActions)
+				case wifiActBoth:
+					return m.startWifiPentest(wifi.PentestBoth)
+				case wifiActHandshake:
+					return m.startWifiPentest(wifi.PentestHandshake)
+				case wifiActDeauth:
+					return m.startWifiPentest(wifi.PentestDeauth)
+				case wifiActDetail:
+					m.WifiScan.OpenDetail(scanModeActions)
+				}
+			}
+			return m, nil
+
 		case scanModeDetail:
 			switch {
-			case k == "w":
-				return m.startWifiPentest(wifi.PentestHandshake)
-			case k == "d":
-				return m.startWifiPentest(wifi.PentestDeauth)
-			case k == "b":
-				return m.startWifiPentest(wifi.PentestBoth)
 			case m.isUp(k):
 				m.WifiScan.MoveDetailScroll(-1, mainW, bodyH, pal)
 			case m.isDown(k):
@@ -848,17 +888,52 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 		case IRTabLearn:
 			switch {
-			case k == "l":
-				return m.startIRCapture()
-			case k == "t" && m.IR.Learned != nil:
-				return m.sendIR(*m.IR.Learned, "Learned")
+			case m.IR.Capturing:
+				return m, nil
+			case m.IR.AwaitBinding && m.IR.Learned != nil:
+				switch {
+				case m.isUp(k):
+					m.IR.MoveCapturedMenu(-1)
+				case m.isDown(k):
+					m.IR.MoveCapturedMenu(1)
+				case k == "t":
+					return m.sendIR(*m.IR.Learned, "Learned")
+				case k == "l":
+					return m.startIRCapture()
+				case k == "enter" || k == " ":
+					switch learnCapturedOption(m.IR.CapturedCursor) {
+					case learnCapBind:
+						m.IR.BeginBindKey()
+					case learnCapTest:
+						return m.sendIR(*m.IR.Learned, "Learned")
+					case learnCapAgain:
+						return m.startIRCapture()
+					case learnCapDiscard:
+						m.IR.DiscardLearned()
+					}
+				}
 			default:
-				if m.IR.AwaitBinding && ir.IsBindableKey(k) {
-					if m.IR.BindLearned(k) {
-						if m.IR.NoteIsErr {
-							return m, m.setStatus("IR save failed")
-						}
-						return m, m.setStatus("Bound " + ir.KeyLabel(k))
+				switch {
+				case m.isUp(k):
+					m.IR.MoveLearnMenu(-1)
+				case m.isDown(k):
+					m.IR.MoveLearnMenu(1)
+				case m.isLeft(k):
+					if learnMenuOption(m.IR.LearnCursor) == learnOptProfile {
+						m.IR.CycleProfile(-1)
+					}
+				case m.isRight(k):
+					if learnMenuOption(m.IR.LearnCursor) == learnOptProfile {
+						m.IR.CycleProfile(1)
+					}
+				case k == "l":
+					return m.startIRCapture()
+				case k == "enter" || k == " ":
+					switch learnMenuOption(m.IR.LearnCursor) {
+					case learnOptListen:
+						return m.startIRCapture()
+					case learnOptProfile:
+						m.IR.CycleProfile(1)
 					}
 				}
 			}
@@ -1228,12 +1303,16 @@ func (m AppModel) currentHints() []Hint {
 	}
 	if m.ActiveView == ViewWiFi {
 		switch m.WifiScan.Mode {
+		case scanModeActions:
+			return []Hint{
+				{Key: "↑↓", Desc: "sel"},
+				{Key: "⏎", Desc: "run"},
+				{Key: "Esc", Desc: "back"},
+			}
 		case scanModeDetail:
 			return []Hint{
+				{Key: "↑↓", Desc: "scr"},
 				{Key: "⏎", Desc: "conn"},
-				{Key: "b", Desc: "both"},
-				{Key: "w", Desc: "hs"},
-				{Key: "d", Desc: "deauth"},
 				{Key: "Esc", Desc: "back"},
 			}
 		case scanModePickIface:
@@ -1261,12 +1340,10 @@ func (m AppModel) currentHints() []Hint {
 			return []Hint{{Key: "Esc", Desc: "back"}, {Key: "q", Desc: "quit"}}
 		default:
 			return []Hint{
-				{Key: "⏎", Desc: "info"},
+				{Key: "↑↓", Desc: "sel"},
+				{Key: "←→", Desc: "if"},
 				{Key: "s", Desc: "scan"},
-				{Key: "c", Desc: "conn"},
-				{Key: "b", Desc: "both"},
-				{Key: "w", Desc: "hs"},
-				{Key: "d", Desc: "deauth"},
+				{Key: "⏎", Desc: "act"},
 				{Key: "Esc", Desc: "tabs"},
 			}
 		}
@@ -1277,10 +1354,13 @@ func (m AppModel) currentHints() []Hint {
 			if m.IR.Capturing {
 				return []Hint{{Key: "Esc", Desc: "cancel"}, {Key: "q", Desc: "stop"}}
 			}
-			if m.IR.AwaitBinding {
-				return []Hint{{Key: "1-0", Desc: "bind"}, {Key: "t", Desc: "test"}, {Key: "Esc", Desc: "cancel"}}
+			if m.IR.IsKeyCaptureActive() {
+				return []Hint{{Key: "key", Desc: "bind"}, {Key: "Esc", Desc: "back"}}
 			}
-			return []Hint{{Key: "l", Desc: "listen"}, {Key: "Esc", Desc: "tabs"}}
+			if m.IR.AwaitBinding {
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "discard"}}
+			}
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "tabs"}}
 		case IRTabBrowse:
 			if m.IR.Remote != nil {
 				if m.IR.GridMode {

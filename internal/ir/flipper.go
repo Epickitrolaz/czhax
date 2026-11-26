@@ -92,7 +92,7 @@ func parseFlipperEntry(fields map[string]string, source string) (Signal, bool) {
 		freq := parseIntDefault(fields["frequency"], DefaultFrequency)
 		duty := parseFloatDefault(fields["duty_cycle"], DefaultDutyCycle)
 		timings := parseTimingList(fields["data"])
-		if len(timings) < 4 {
+		if len(timings) < 3 {
 			return Signal{}, false
 		}
 		return Signal{
@@ -184,7 +184,7 @@ func (r Remote) WithMeta(provider, category, brand, model string) Remote {
 func (r Remote) BindableSignals() []Signal {
 	out := make([]Signal, 0, len(r.Signals))
 	for _, s := range r.Signals {
-		if len(s.Timings) >= 4 {
+		if len(s.Timings) >= 3 {
 			out = append(out, s)
 		}
 	}

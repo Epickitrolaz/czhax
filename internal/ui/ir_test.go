@@ -65,19 +65,51 @@ func TestIRLearnBind(t *testing.T) {
 	sig := irTestSignal(t)
 	m.IR.SetCaptureResult(sig, nil)
 	if !m.IR.AwaitBinding || m.IR.Learned == nil {
-		t.Fatal("expected captured signal awaiting a key")
+		t.Fatal("expected captured signal awaiting action selection")
 	}
 	assertFitsBounds(t, m.View(), 53, 14, "IR/Learn/Captured")
 
-	m = sendKey(m, "1")
+	// Enter on "Bind to key" enters key capture mode.
+	m = sendKey(m, "enter")
+	if !m.IR.IsKeyCaptureActive() {
+		t.Fatal("expected IsKeyCaptureActive after selecting Bind to key")
+	}
+	assertFitsBounds(t, m.View(), 53, 14, "IR/Learn/BindKeyPrompt")
+
+	// Pressing reserved keys ('q', '?') must not trigger Quit or Help.
+	m = sendKey(m, "q")
+	if m.ConfirmExit || !m.IR.IsKeyCaptureActive() {
+		t.Fatalf("expected q to be blocked cleanly in key capture, confirmExit=%v active=%v", m.ConfirmExit, m.IR.IsKeyCaptureActive())
+	}
+	m = sendKey(m, "?")
+	if m.ShowHelp || !m.IR.IsKeyCaptureActive() {
+		t.Fatalf("expected ? to be blocked cleanly in key capture, showHelp=%v active=%v", m.ShowHelp, m.IR.IsKeyCaptureActive())
+	}
+
+	// Pressing a letter key ('p') binds cleanly!
+	m = sendKey(m, "p")
 	p := m.IR.Store.ActiveProfile()
-	if p == nil || len(p.Bindings) != 1 || p.Bindings[0].Key != "1" {
+	if p == nil || len(p.Bindings) != 1 || p.Bindings[0].Key != "p" {
 		t.Fatalf("binding = %+v", p)
 	}
-	if m.IR.AwaitBinding || m.IR.Learned != nil {
+	if m.IR.AwaitBinding || m.IR.AwaitKeyPress || m.IR.Learned != nil {
 		t.Fatal("expected binding state to clear")
 	}
 	assertFitsBounds(t, m.View(), 53, 14, "IR/Learn/Bound")
+
+	// Also verify 'r' can be bound without triggering global refresh, and works in Remote tab.
+	m.IR.SetCaptureResult(sig, nil)
+	m = sendKey(m, "enter") // Bind to key
+	m = sendKey(m, "r")     // bind 'r'
+	if b, ok := m.IR.BindingForKey("r"); !ok || b.Key != "r" {
+		t.Fatalf("expected 'r' binding, got ok=%v b=%+v", ok, b)
+	}
+	m.ActiveTabs[ViewIR] = int(IRTabRemote)
+	m.IR.Tab = IRTabRemote
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Fatal("expected pressing bound 'r' in Remote tab to queue sendIR cmd")
+	}
 }
 
 func TestIRBrowseProbeAndGrid(t *testing.T) {
@@ -220,8 +252,11 @@ func TestIRModesFitSmallScreens(t *testing.T) {
 		m := newIRTestModel(t, sz.w, sz.h)
 		m.ActiveTabs[ViewIR] = int(IRTabLearn)
 		m.IR.Tab = IRTabLearn
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/LearnMenu")
 		m.IR.SetCaptureResult(sig, nil)
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/LearnCaptured")
+		m = sendKey(m, "enter")
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/LearnBindKey")
 
 		m.ActiveTabs[ViewIR] = int(IRTabBrowse)
 		m.IR.Tab = IRTabBrowse

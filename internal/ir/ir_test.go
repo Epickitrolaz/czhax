@@ -12,16 +12,20 @@ func TestEncodeNEC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sig.Timings) != 66 {
-		t.Fatalf("NEC timings = %d, want 66", len(sig.Timings))
+	// Leader (2) + 32 bits (64) + trailing stop mark (1) = 67 (odd for LIRC_MODE_PULSE).
+	if len(sig.Timings) != 67 {
+		t.Fatalf("NEC timings = %d, want 67", len(sig.Timings))
+	}
+	if err := sig.Validate(); err != nil {
+		t.Fatalf("NEC Validate() = %v", err)
 	}
 	if sig.Timings[0] != 9000 || sig.Timings[1] != 4500 {
 		t.Fatalf("NEC leader = %v", sig.Timings[:2])
 	}
-	if sig.Timings[len(sig.Timings)-1] != frameGap {
-		t.Fatalf("NEC trailing gap = %d, want %d", sig.Timings[len(sig.Timings)-1], frameGap)
+	if sig.Timings[len(sig.Timings)-1] != 560 {
+		t.Fatalf("NEC trailing stop mark = %d, want 560", sig.Timings[len(sig.Timings)-1])
 	}
-	for i := 2; i < len(sig.Timings)-2; i += 2 {
+	for i := 2; i < len(sig.Timings)-1; i += 2 {
 		if sig.Timings[i] != 560 {
 			t.Fatalf("NEC mark at %d = %d, want 560", i, sig.Timings[i])
 		}
@@ -36,16 +40,16 @@ func TestEncodeSamsungAndSIRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sam.Timings[0] != 4500 || sam.Timings[1] != 4500 || len(sam.Timings) != 66 {
+	if sam.Timings[0] != 4500 || sam.Timings[1] != 4500 || len(sam.Timings) != 67 {
 		t.Fatalf("Samsung leader/len = %v/%d", sam.Timings[:2], len(sam.Timings))
 	}
 	sirc, err := EncodeProtocol("SIRC", 0x01, 0x15)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 12 data bits + leader = 26 timings, sent three times.
-	if len(sirc.Timings) != 78 {
-		t.Fatalf("SIRC timings = %d, want 78", len(sirc.Timings))
+	// 12 data bits + leader = 26 timings for repeats 1 & 2, 25 for final repeat (ends on mark).
+	if len(sirc.Timings) != 77 {
+		t.Fatalf("SIRC timings = %d, want 77", len(sirc.Timings))
 	}
 	if sirc.Frequency != 40000 {
 		t.Fatalf("SIRC frequency = %d", sirc.Frequency)
@@ -58,11 +62,11 @@ func TestEncodeRC5RC6RCA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", protocol, err)
 		}
-		if len(sig.Timings) < 4 || len(sig.Timings)%2 != 0 {
-			t.Fatalf("%s produced invalid timings: %v", protocol, sig.Timings)
+		if len(sig.Timings) < 3 || len(sig.Timings)%2 != 1 {
+			t.Fatalf("%s produced invalid odd/length timings (%d): %v", protocol, len(sig.Timings), sig.Timings)
 		}
-		if sig.Timings[len(sig.Timings)-1] != frameGap {
-			t.Fatalf("%s does not end in a frame gap: %d", protocol, sig.Timings[len(sig.Timings)-1])
+		if err := sig.Validate(); err != nil {
+			t.Fatalf("%s failed Validate(): %v", protocol, err)
 		}
 	}
 }
@@ -94,10 +98,10 @@ data: 9000 4500 560 560 560 1690 560 560
 	if len(r.Signals) != 2 {
 		t.Fatalf("signals = %d, want 2", len(r.Signals))
 	}
-	if r.Signals[0].Name != "Power" || r.Signals[0].Protocol != "NEC" || len(r.Signals[0].Timings) != 66 {
+	if r.Signals[0].Name != "Power" || r.Signals[0].Protocol != "NEC" || len(r.Signals[0].Timings) != 67 {
 		t.Fatalf("parsed signal = %+v", r.Signals[0])
 	}
-	if r.Signals[1].Name != "RawBtn" || len(r.Signals[1].Timings) < 4 {
+	if r.Signals[1].Name != "RawBtn" || len(r.Signals[1].Timings) != 7 {
 		t.Fatalf("raw signal = %+v", r.Signals[1])
 	}
 }
@@ -121,7 +125,7 @@ func TestParseMiRemoteJSON(t *testing.T) {
 	if sig.Name != "Power" || sig.Frequency != 37960 {
 		t.Fatalf("signal = %+v", sig)
 	}
-	if len(sig.Timings) != 6 {
+	if len(sig.Timings) != 5 {
 		t.Fatalf("timings = %v", sig.Timings)
 	}
 	if sig.Timings[0] < 8900 || sig.Timings[0] > 9050 {
@@ -150,7 +154,7 @@ func TestStoreRoundTripAndBinding(t *testing.T) {
 	if p == nil || p.Name != "My TV" || len(p.Bindings) != 1 || p.Bindings[0].Key != "1" {
 		t.Fatalf("loaded profile = %+v", p)
 	}
-	if len(p.Bindings[0].Signal.Timings) != 66 {
+	if len(p.Bindings[0].Signal.Timings) != 67 {
 		t.Fatalf("binding timings = %d", len(p.Bindings[0].Signal.Timings))
 	}
 }
@@ -171,8 +175,11 @@ func TestKeyMapping(t *testing.T) {
 			t.Fatalf("KeyForButton(%q) = %q, want %q", name, got, want)
 		}
 	}
-	if !IsBindableKey("f8") || IsBindableKey("q") {
+	if !IsBindableKey("f8") || !IsBindableKey("p") || !IsBindableKey(" ") || IsBindableKey("q") {
 		t.Fatal("unexpected bindable key set")
+	}
+	if NormalizeBindKey("P") != "p" || NormalizeBindKey(" ") != "space" {
+		t.Fatalf("unexpected NormalizeBindKey result")
 	}
 }
 
@@ -224,9 +231,20 @@ func TestLibraryIndex(t *testing.T) {
 }
 
 func TestNormalizeTimings(t *testing.T) {
-	got := normalizeTimings([]int{9000, 4500, 560})
-	if len(got) != 4 || got[3] != frameGap {
-		t.Fatalf("normalizeTimings = %v", got)
+	got := normalizeTimings([]int{9000, 4500, 560, 40000})
+	if len(got) != 3 || got[2] != 560 {
+		t.Fatalf("normalizeTimings even = %v", got)
+	}
+	got = normalizeTimings([]int{9000, 4500, 560})
+	if len(got) != 3 || got[2] != 560 {
+		t.Fatalf("normalizeTimings odd = %v", got)
+	}
+	got = normalizeTimings([]int{9000, 900000, 560})
+	if got[1] != maxDurationUS {
+		t.Fatalf("normalizeTimings clamp = %v", got)
+	}
+	if err := (Signal{Timings: []int{9000, 4500, 560, 560}}).Validate(); err == nil {
+		t.Fatal("expected Validate() to reject even timing count")
 	}
 }
 
@@ -258,17 +276,17 @@ func TestLircUAPIConstants(t *testing.T) {
 func TestTrimCapturedTimings(t *testing.T) {
 	in := []int{1000, 2000, 3000}
 	out := trimCapturedTimings(in)
-	if len(out) != 4 || out[3] != frameGap {
+	if len(out) != 3 || out[2] != 3000 {
 		t.Fatalf("odd capture = %v", out)
 	}
 	in = []int{1000, 2000, 3000, 500}
 	out = trimCapturedTimings(in)
-	if len(out) != 4 || out[3] != frameGap {
-		t.Fatalf("short gap = %v", out)
+	if len(out) != 3 || out[2] != 3000 {
+		t.Fatalf("even short gap = %v", out)
 	}
 	in = []int{1000, 2000, 3000, 50000}
 	out = trimCapturedTimings(in)
-	if out[3] != 50000 {
-		t.Fatalf("long gap was truncated: %v", out)
+	if len(out) != 3 || out[2] != 3000 {
+		t.Fatalf("even trailing gap = %v", out)
 	}
 }

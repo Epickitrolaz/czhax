@@ -45,7 +45,7 @@ func ParseMiRemoteJSON(path string) (Remote, error) {
 			if freq <= 0 {
 				freq = 37960
 			}
-			if len(p.Pattern) < 4 {
+			if len(p.Pattern) < 3 {
 				continue
 			}
 			timings := make([]int, 0, len(p.Pattern))
@@ -55,7 +55,7 @@ func ParseMiRemoteJSON(path string) (Remote, error) {
 					timings = append(timings, us)
 				}
 			}
-			if len(timings) < 4 {
+			if len(timings) < 3 {
 				continue
 			}
 			comment := strings.TrimSpace(p.Comment)

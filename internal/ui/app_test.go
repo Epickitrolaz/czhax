@@ -295,8 +295,20 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected scan iface wlan0, got %q", m.WifiScan.EffectiveScanIface())
 		}
 
-		// Down moves to FastSAE, Enter opens Details, Esc returns to List (still FocusContent)
+		// Down moves to FastSAE, Enter opens Actions, selecting Network Details opens Detail, Esc steps back cleanly
 		m = sendKey(m, "down")
+		m = sendKey(m, "enter")
+		if m.WifiScan.Mode != scanModeActions || m.Focus != FocusContent {
+			t.Fatalf("expected scanModeActions and FocusContent, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		actionsView := m.View()
+		assertFitsBounds(t, actionsView, sz.w, sz.h, sz.name+"/WiFi/Actions")
+		if !strings.Contains(actionsView, "FastSAE") || !strings.Contains(actionsView, "Connect") {
+			t.Fatalf("[%s] expected actions menu in:\n%s", sz.name, actionsView)
+		}
+		for i := 0; i < int(wifiActDetail); i++ {
+			m = sendKey(m, "down")
+		}
 		m = sendKey(m, "enter")
 		if m.WifiScan.Mode != scanModeDetail || m.Focus != FocusContent {
 			t.Fatalf("expected scanModeDetail and FocusContent, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
@@ -344,7 +356,7 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected Tab to hide password")
 		}
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordMasked")
-		// Esc steps back: Password -> PickIface -> Detail -> List -> FocusTabs
+		// Esc steps back: Password -> PickIface -> Detail -> Actions -> List -> FocusTabs
 		m = sendKey(m, "esc")
 		if m.WifiScan.Mode != scanModePickIface || m.Focus != FocusContent {
 			t.Fatalf("expected back to PickIface, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
@@ -352,6 +364,10 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "esc")
 		if m.WifiScan.Mode != scanModeDetail || m.Focus != FocusContent {
 			t.Fatalf("expected back to Detail, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
+		}
+		m = sendKey(m, "esc")
+		if m.WifiScan.Mode != scanModeActions || m.Focus != FocusContent {
+			t.Fatalf("expected back to Actions, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
 		}
 		m = sendKey(m, "esc")
 		if m.WifiScan.Mode != scanModeList || m.Focus != FocusContent {
@@ -618,5 +634,32 @@ func TestWifiScanConnectHiddenOpenAndErrors(t *testing.T) {
 	openReq := m.WifiScan.BuildConnectRequest()
 	if openReq.SSID != "FreeSpot" || openReq.Iface != "wlan0" || openReq.Hidden {
 		t.Fatalf("unexpected open connect request: %+v", openReq)
+	}
+}
+
+func TestWifiStatusBareState(t *testing.T) {
+	cfg := config.Default()
+	m := NewAppModel(cfg, filepath.Join(t.TempDir(), "config.json"), "v0.2.0")
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 53, Height: 14})
+	m = next.(AppModel)
+	m = sendKey(m, "right") // StatusTabWiFi
+	m.Wifi.SetInterfaces([]wifi.Interface{
+		{Name: "wlan0", Up: true, OperState: "down", Mode: "managed"},
+		{Name: "wlan1", Up: false, OperState: "dormant", Mode: "managed"},
+	})
+
+	view0 := m.View()
+	if strings.Contains(view0, "(down)") || strings.Contains(view0, "(no IP)") {
+		t.Fatalf("expected bare UP state without braces, got:\n%s", view0)
+	}
+	if !strings.Contains(view0, "UP") {
+		t.Fatalf("expected UP in view:\n%s", view0)
+	}
+
+	m = sendKey(m, "enter")
+	m = sendKey(m, "right")
+	view1 := m.View()
+	if strings.Contains(view1, "(dormant)") {
+		t.Fatalf("expected bare DOWN state without braces, got:\n%s", view1)
 	}
 }

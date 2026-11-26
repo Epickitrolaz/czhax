@@ -19,6 +19,7 @@ type WifiScanMode int
 
 const (
 	scanModeList WifiScanMode = iota
+	scanModeActions
 	scanModeDetail
 	scanModePickIface
 	scanModeSSID
@@ -26,9 +27,21 @@ const (
 	scanModePentest
 )
 
+type WifiScanAction int
+
+const (
+	wifiActConnect WifiScanAction = iota
+	wifiActBoth
+	wifiActHandshake
+	wifiActDeauth
+	wifiActDetail
+	wifiActCount
+)
+
 type WifiScanView struct {
 	Mode         WifiScanMode
 	PrevMode     WifiScanMode
+	DetailReturn WifiScanMode
 	Interfaces   []wifi.Interface
 	ScanIface    string
 	Scanning     bool
@@ -36,6 +49,7 @@ type WifiScanView struct {
 	ScanErr      string
 	Networks     []wifi.Network
 	Cursor       int
+	ActionCursor int
 	DetailScroll int
 
 	IfaceCursor  int
@@ -268,10 +282,29 @@ func (v *WifiScanView) SetPentestResult(res wifi.PentestResult, err error) {
 	}
 }
 
-func (v *WifiScanView) OpenDetail() bool {
+func (v *WifiScanView) OpenActions() bool {
 	if _, ok := v.SelectedNetwork(); !ok {
 		return false
 	}
+	v.Mode = scanModeActions
+	v.ActionCursor = 0
+	v.ConnectErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *WifiScanView) MoveAction(delta int) {
+	v.ActionCursor = (v.ActionCursor + delta + int(wifiActCount)) % int(wifiActCount)
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *WifiScanView) OpenDetail(fromMode WifiScanMode) bool {
+	if _, ok := v.SelectedNetwork(); !ok {
+		return false
+	}
+	v.DetailReturn = fromMode
 	v.Mode = scanModeDetail
 	v.DetailScroll = 0
 	v.ConnectErr = ""
@@ -520,6 +553,16 @@ func (v *WifiScanView) HandleEsc() bool {
 		return true
 	case scanModeDetail:
 		v.ConnectErr = ""
+		if v.DetailReturn != scanModeList {
+			v.Mode = v.DetailReturn
+		} else {
+			v.Mode = scanModeList
+		}
+		return true
+	case scanModeActions:
+		v.ConnectErr = ""
+		v.Note = ""
+		v.NoteIsErr = false
 		v.Mode = scanModeList
 		return true
 	default:
@@ -529,6 +572,8 @@ func (v *WifiScanView) HandleEsc() bool {
 
 func (v WifiScanView) RenderLines(w, h int, pal theme.Palette, focused bool) []string {
 	switch v.Mode {
+	case scanModeActions:
+		return v.renderActions(w, h, pal, focused)
 	case scanModeDetail:
 		return v.renderDetail(w, h, pal, focused)
 	case scanModePickIface:
@@ -674,7 +719,111 @@ func (v WifiScanView) renderList(w, h int, pal theme.Palette, focused bool) []st
 			}
 			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:info c:conn b:both w:hs d:de", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(Truncate("⏎:actions  s:scan  Esc:tabs", max(6, w-2))))
+		}
+	}
+
+	return SplitLinesPadded(lines, w, h)
+}
+
+func (v WifiScanView) renderActions(w, h int, pal theme.Palette, focused bool) []string {
+	net, ok := v.SelectedNetwork()
+	if !ok {
+		return v.renderList(w, h, pal, focused)
+	}
+
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	okStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	rightPlain := fmt.Sprintf("%d%% %s", net.Signal, compactSec(net.ShortSecurity(), w))
+	titleW := max(6, w-len([]rune(rightPlain))-3)
+	sigStyle := danger
+	if net.Signal >= 60 {
+		sigStyle = okStyle
+	} else if net.Signal >= 30 {
+		sigStyle = warn
+	}
+	header := " " + FitLine(muted.Render("◂ ")+accent.Render(Truncate(net.DisplaySSID(), max(4, titleW-2))), titleW) +
+		" " + sigStyle.Render(fmt.Sprintf("%d%%", net.Signal)) + " " + muted.Render(compactSec(net.ShortSecurity(), w)) + " "
+	if h <= 1 {
+		return SplitLinesPadded([]string{header}, w, h)
+	}
+
+	lines := []string{header}
+	showSummary := h >= 8
+	if showSummary {
+		sub := joinNonEmpty(" · ", net.BSSID, prefixIfNonEmpty("ch ", net.Channel))
+		if sub == "" {
+			sub = net.ShortSecurity()
+		}
+		lines = append(lines, " "+muted.Render(Truncate(sub, max(6, w-2))))
+	}
+
+	type actItem struct {
+		act  WifiScanAction
+		name string
+		val  string
+		warn bool
+		ok   bool
+	}
+	items := []actItem{
+		{act: wifiActConnect, name: "Connect", val: "join", ok: true},
+		{act: wifiActBoth, name: "Deauth + Capture", val: "30s", warn: true},
+		{act: wifiActHandshake, name: "Handshake Capture", val: "30s"},
+		{act: wifiActDeauth, name: "Deauth AP", val: "15s", warn: true},
+		{act: wifiActDetail, name: "Network Details", val: "info"},
+	}
+
+	showBottom := (h >= 8 || v.Note != "") && h >= 4
+	listH := h - len(lines)
+	if showBottom {
+		listH--
+	}
+	if listH < 1 {
+		listH = 1
+	}
+
+	cursor := clampIndex(v.ActionCursor, len(items))
+	start, end := ScrollWindow(len(items), cursor, listH)
+	for i := start; i < end; i++ {
+		it := items[i]
+		selected := i == cursor
+		nameW := max(8, w-len(it.val)-5)
+		if selected && focused {
+			row := fmt.Sprintf(" ▸ %s %s", FitLine(it.name, nameW), it.val)
+			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+		} else {
+			pfx := "   "
+			if selected {
+				pfx = accent.Render(" ▸ ")
+			}
+			valStyle := muted
+			if it.ok {
+				valStyle = okStyle
+			} else if it.warn {
+				valStyle = warn
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(FitLine(it.name, nameW)), valStyle.Render(it.val)))
+		}
+	}
+
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := okStyle
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(Truncate("↑↓:sel  ⏎:run  Esc:back", max(6, w-2))))
 		}
 	}
 
@@ -790,7 +939,7 @@ func (v WifiScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []
 			}
 			lines = append(lines, " "+st.Render(Truncate(v.Note, max(6, w-2))))
 		} else {
-			lines = append(lines, " "+muted.Render(Truncate("⏎:conn b:both w:hs d:de", max(6, w-2))))
+			lines = append(lines, " "+muted.Render(Truncate("↑↓:scroll  ⏎:conn  Esc:back", max(6, w-2))))
 		}
 	}
 

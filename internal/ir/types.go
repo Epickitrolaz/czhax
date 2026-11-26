@@ -14,7 +14,8 @@ import (
 const (
 	DefaultFrequency = 38000
 	DefaultDutyCycle = 0.33
-	MaxTimings       = 2048
+	MaxTimings       = 511
+	maxDurationUS    = 500000
 	frameGap         = 40000
 )
 
@@ -46,38 +47,40 @@ func (s Signal) Normalized() Signal {
 	return s
 }
 
-// normalizeTimings ensures a frame starts with a mark, alternates levels and
-// ends with a gap the transmitter can write.
+// normalizeTimings ensures a frame starts and ends with a mark (odd count),
+// stays within Linux LIRC_MODE_PULSE duration limits, and fits in LIRCBUF_SIZE.
 func normalizeTimings(in []int) []int {
-	out := make([]int, 0, len(in)+1)
+	out := make([]int, 0, len(in))
 	for _, v := range in {
 		if v <= 0 {
 			continue
 		}
-		if v > 1000000 {
-			v = 1000000
+		if v > maxDurationUS {
+			v = maxDurationUS
 		}
 		out = append(out, v)
 	}
-	for len(out) > 0 && len(out)%2 == 1 {
-		// An odd count means a trailing mark: give it a frame gap.
-		out = append(out, frameGap)
-	}
-	for len(out) > 0 && out[0] <= 0 {
-		out = out[1:]
-	}
 	if len(out) > MaxTimings {
 		out = out[:MaxTimings]
+	}
+	if len(out) > 0 && len(out)%2 == 0 {
+		// Linux LIRC_MODE_PULSE requires an odd count (must start and end with a pulse).
+		out = out[:len(out)-1]
 	}
 	return out
 }
 
 func (s Signal) Validate() error {
-	if len(s.Timings) < 4 {
+	if len(s.Timings) < 3 {
 		return fmt.Errorf("signal has too few timings (%d)", len(s.Timings))
 	}
-	if len(s.Timings)%2 != 0 {
-		return errors.New("signal timings must alternate mark/space")
+	if len(s.Timings)%2 == 0 {
+		return errors.New("signal timings must have an odd count (pulse/space/.../pulse)")
+	}
+	for i, d := range s.Timings {
+		if d <= 0 || d > maxDurationUS {
+			return fmt.Errorf("timing[%d]=%d out of range (1..%d)", i, d, maxDurationUS)
+		}
 	}
 	return nil
 }
@@ -244,8 +247,21 @@ func KeyOrder(key string) int {
 
 var KeyPool = []string{
 	"1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
-	"enter", "backspace",
+	"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+	"n", "o", "p", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+	"enter", "backspace", "space",
 	"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8",
+}
+
+func NormalizeBindKey(key string) string {
+	switch key {
+	case " ":
+		return "space"
+	}
+	if len(key) == 1 && key[0] >= 'A' && key[0] <= 'Z' {
+		return strings.ToLower(key)
+	}
+	return key
 }
 
 func KeyLabel(key string) string {
@@ -254,14 +270,20 @@ func KeyLabel(key string) string {
 		return "Enter"
 	case "backspace":
 		return "Bksp"
+	case "space":
+		return "Space"
 	case "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8":
 		return strings.ToUpper(key)
 	default:
+		if len(key) == 1 && key[0] >= 'a' && key[0] <= 'z' {
+			return strings.ToUpper(key)
+		}
 		return key
 	}
 }
 
 func IsBindableKey(key string) bool {
+	key = NormalizeBindKey(key)
 	for _, k := range KeyPool {
 		if k == key {
 			return true
