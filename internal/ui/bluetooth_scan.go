@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/files"
+	"github.com/czhax/czhax/internal/oui"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/workdir"
 )
@@ -175,6 +176,15 @@ func (v BluetoothScanView) EffectiveAdapter() (bluetooth.Adapter, bool) {
 func (v BluetoothScanView) EffectiveController() string {
 	if a, ok := v.EffectiveAdapter(); ok {
 		return strings.TrimSpace(a.Address)
+	}
+	return ""
+}
+
+func (v BluetoothScanView) USBAdapterName() string {
+	for _, a := range v.Adapters {
+		if strings.EqualFold(a.Bus, "USB") && a.Up {
+			return a.Name
+		}
 	}
 	return ""
 }
@@ -417,15 +427,29 @@ func (v *BluetoothScanView) HandleCWTargetKey(msg tea.KeyMsg) {
 
 func (v *BluetoothScanView) ConfirmCWTarget() bool {
 	addr := strings.ToUpper(strings.TrimSpace(v.CWTargetInput))
+	addr = strings.ReplaceAll(addr, "-", ":")
 	if !bluetooth.IsBDAddr(addr) {
 		v.Note = "Enter a valid AA:BB:CC:DD:EE:FF address"
 		v.NoteIsErr = true
 		return false
 	}
+	// If the user pasted the BLE random address (no IEEE OUI), prefer a
+	// visible Classic peer with the same last-5 octets.
+	if oui.Lookup(addr) == "" {
+		for _, other := range v.Devices {
+			if other.Kind == "Classic" && sameSuffix(addr, other.Address) {
+				addr = other.Address
+				break
+			}
+		}
+	}
 	v.CWTarget = addr
 	v.Mode = btModeCWMenu
 	v.Note = "Target: " + addr
-	v.NoteIsErr = false
+	if oui.Lookup(addr) == "" {
+		v.Note += " (not a public OUI)"
+		v.NoteIsErr = true
+	}
 	return true
 }
 
@@ -694,6 +718,11 @@ func (v *BluetoothScanView) StartAttack(kind BTActionKind, opts ...BTActionOptio
 		PlayPath:   v.RunPlayPath,
 		FastPair:   dev.FastPair,
 		ModelID:    dev.ModelID,
+	}
+	if kind == btActCarwhisperer {
+		if usb := v.USBAdapterName(); usb != "" {
+			req.HCI = usb
+		}
 	}
 	return ctx, req, v.RunSeq, v.RunProgressCh, true
 }
@@ -1161,7 +1190,11 @@ func (v BluetoothScanView) renderCWMenu(w, h int, pal theme.Palette, focused boo
 	}
 	lines := []string{header}
 	if h >= 8 {
-		lines = append(lines, " "+sec.Render("Target ")+txt.Render(v.Marquee.Truncate(dev.Address, max(6, w-9))))
+		hci := v.EffectiveHCI()
+		if usb := v.USBAdapterName(); usb != "" {
+			hci = usb
+		}
+		lines = append(lines, " "+sec.Render("Radio  ")+txt.Render(v.Marquee.Truncate(hci+" · "+v.CWTarget, max(6, w-9))))
 	}
 	showBottom := (h >= 8 || v.Note != "") && h >= 4
 	listH := h - len(lines)
