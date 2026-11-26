@@ -129,7 +129,13 @@ func main() {
 			defer cancel()
 			wifi.WatchStdinCancel(os.Stdin, cancel)
 
-			res, err := wifi.RunPentestDirect(ctx, req)
+			res, err := wifi.RunPentestDirectWithProgress(ctx, req, func(prog wifi.PentestResult) {
+				out, _ := json.Marshal(wifi.PentestHelperOutcome{
+					Result:   prog,
+					Progress: true,
+				})
+				fmt.Println(string(out))
+			})
 			wifi.ChownCapture(req.SaveDir, res.CapturePath, *uid, *gid)
 			outcome := wifi.PentestHelperOutcome{
 				Result:   res,

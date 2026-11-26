@@ -60,16 +60,17 @@ type WifiScanView struct {
 	Connecting   bool
 	ConnectErr   string
 
-	PentestMode     wifi.PentestMode
-	PentestReturn   WifiScanMode
-	PentestActive   bool
-	PentestStopping bool
-	PentestStarted  time.Time
-	PentestDuration time.Duration
-	PentestElapsed  time.Duration
-	PentestResult   wifi.PentestResult
-	PentestErr      string
-	PentestCancel   context.CancelFunc
+	PentestMode       wifi.PentestMode
+	PentestReturn     WifiScanMode
+	PentestActive     bool
+	PentestStopping   bool
+	PentestStarted    time.Time
+	PentestDuration   time.Duration
+	PentestElapsed    time.Duration
+	PentestResult     wifi.PentestResult
+	PentestErr        string
+	PentestCancel     context.CancelFunc
+	PentestProgressCh chan wifi.PentestResult
 
 	Note      string
 	NoteIsErr bool
@@ -224,6 +225,7 @@ func (v *WifiScanView) StartPentest(mode wifi.PentestMode) (context.Context, wif
 	v.PentestElapsed = 0
 	v.PentestResult = wifi.PentestResult{}
 	v.PentestErr = ""
+	v.PentestProgressCh = make(chan wifi.PentestResult, 1)
 	v.Note = ""
 	v.NoteIsErr = false
 	req := wifi.PentestRequest{
@@ -244,9 +246,20 @@ func (v *WifiScanView) StopPentest() {
 	v.PentestStopping = true
 }
 
+func (v *WifiScanView) SetPentestProgress(res wifi.PentestResult) {
+	if !v.PentestActive {
+		return
+	}
+	v.PentestResult = res
+	if !v.PentestStarted.IsZero() {
+		v.PentestElapsed = time.Since(v.PentestStarted)
+	}
+}
+
 func (v *WifiScanView) SetPentestResult(res wifi.PentestResult, err error) {
 	v.PentestActive = false
 	v.PentestStopping = false
+	v.PentestProgressCh = nil
 	if v.PentestCancel != nil {
 		v.PentestCancel()
 		v.PentestCancel = nil
@@ -1171,6 +1184,8 @@ func (v WifiScanView) renderPentest(w, h int, pal theme.Palette) []string {
 			state = ok.Render("handshake")
 		case res.EAPOLFrames > 0:
 			state = ok.Render("eapol")
+		case res.DeauthFrames > 0:
+			state = ok.Render("sent")
 		case v.Note == "Stopped":
 			state = muted.Render("stopped")
 		case v.Note == "No handshake captured":
