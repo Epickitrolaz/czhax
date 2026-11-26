@@ -80,16 +80,9 @@ func (v WifiView) BuildRows(w int, pal theme.Palette, inf wifi.Interface) []stri
 		if len(inf.Addrs) > 0 {
 			ip := strings.Split(inf.Addrs[0], "/")[0]
 			stateView += " " + txt.Render(Truncate(ip, max(4, valW-3)))
-		} else if inf.OperState != "" && inf.OperState != "up" {
-			stateView += " " + muted.Render("("+Truncate(inf.OperState, max(4, valW-5))+")")
-		} else {
-			stateView += " " + muted.Render("(no IP)")
 		}
 	} else {
 		stateView = danger.Render("DOWN")
-		if inf.OperState != "" && inf.OperState != "down" {
-			stateView += " " + muted.Render("("+Truncate(inf.OperState, max(4, valW-7))+")")
-		}
 	}
 
 	// Mode line
