@@ -42,6 +42,7 @@ type AttackRequest struct {
 	Address    string
 	AddrType   string
 	Name       string
+	Record     bool
 	RecordPath string
 	PlayPath   string
 	FastPair   bool
@@ -76,7 +77,7 @@ func runL2Flood(ctx context.Context, req AttackRequest, onLine func(string)) err
 
 func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(string)) error {
 	if os.Geteuid() == 0 {
-		return Carwhisperer(ctx, req.HCI, req.Address, req.RecordPath, req.PlayPath, onLine)
+		return Carwhisperer(ctx, req.HCI, req.Address, req.RecordPath, req.PlayPath, req.Record, onLine)
 	}
 	exe, err := executablePath()
 	if err != nil {
@@ -87,6 +88,9 @@ func runCarwhispererAttack(ctx context.Context, req AttackRequest, onLine func(s
 		"--hci", NormalizeHCI(req.HCI),
 		"--addr", NormalizeAddr(req.Address),
 		"--record", req.RecordPath,
+	}
+	if !req.Record {
+		args = append(args, "--no-record")
 	}
 	if strings.TrimSpace(req.PlayPath) != "" {
 		args = append(args, "--play", req.PlayPath)

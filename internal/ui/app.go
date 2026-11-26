@@ -1100,7 +1100,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setStatus("Audio convert failed"), m.resetMarquee())
 		}
 		m.BluetoothScan.Mode = btModeCWMenu
-		return m.startBluetoothActionWithPlay(btActCarwhisperer, msg.path)
+		return m.startBluetoothActionWithOptions(btActCarwhisperer, BTActionOptions{
+			Record:   m.BluetoothScan.CWStartTap,
+			PlayPath: msg.path,
+		})
 
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
@@ -1663,11 +1666,15 @@ func (m AppModel) launchLocalScan(opt localscan.ScanOption) (tea.Model, tea.Cmd)
 }
 
 func (m AppModel) startBluetoothAction(kind BTActionKind) (tea.Model, tea.Cmd) {
-	return m.startBluetoothActionWithPlay(kind, "")
+	return m.startBluetoothActionWithOptions(kind, BTActionOptions{})
 }
 
 func (m AppModel) startBluetoothActionWithPlay(kind BTActionKind, playPath string) (tea.Model, tea.Cmd) {
-	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind, playPath)
+	return m.startBluetoothActionWithOptions(kind, BTActionOptions{PlayPath: playPath})
+}
+
+func (m AppModel) startBluetoothActionWithOptions(kind BTActionKind, opts BTActionOptions) (tea.Model, tea.Cmd) {
+	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind, opts)
 	if !ok {
 		return m, m.setStatus("Select a device first")
 	}
@@ -1677,6 +1684,31 @@ func (m AppModel) startBluetoothActionWithPlay(kind BTActionKind, playPath strin
 		waitBluetoothLineCmd(seq, ch),
 		btAttackTickCmd(),
 	)
+}
+
+func (m AppModel) startCW() (tea.Model, tea.Cmd) {
+	v := &m.BluetoothScan
+	if v.CWRecordMsg {
+		ctx, seq, path, ok := v.StartCWRecord()
+		if ok {
+			return m, tea.Batch(m.setStatus("Recording message..."), btMicRecordCmd(ctx, seq, path), btMicTickCmd())
+		}
+		return m, nil
+	}
+	if v.CWPlay {
+		if strings.TrimSpace(v.CWPlayPath) == "" {
+			return m, m.setStatus("Choose an audio file")
+		}
+		v.CWStartTap = v.CWTap
+		return m, tea.Batch(
+			m.setStatus("Converting audio..."),
+			btConvertCmd(context.Background(), v.CWPlayPath, v.ConvertPath()),
+		)
+	}
+	if v.CWTap {
+		return m.startBluetoothActionWithOptions(btActCarwhisperer, BTActionOptions{Record: true})
+	}
+	return m, m.setStatus("Select Tap or Play audio")
 }
 
 func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
@@ -2113,15 +2145,16 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				switch act {
 				case cwBack:
 					m.BluetoothScan.HandleEsc()
-				case cwTap:
-					return m.startBluetoothAction(btActCarwhisperer)
-				case cwRecordMessage:
-					ctx, seq, path, ok := m.BluetoothScan.StartCWRecord()
-					if ok {
-						return m, tea.Batch(m.setStatus("Recording message..."), btMicRecordCmd(ctx, seq, path), btMicTickCmd())
-					}
+				case cwTap, cwRecordMessage:
+					m.BluetoothScan.ToggleCW(act)
 				case cwPlayAudio:
-					m.BluetoothScan.OpenCWAudio()
+					wasOn := m.BluetoothScan.CWPlay
+					m.BluetoothScan.ToggleCW(cwPlayAudio)
+					if !wasOn {
+						m.BluetoothScan.OpenCWAudio()
+					}
+				case cwStart:
+					return m.startCW()
 				}
 			}
 			return m, nil
@@ -2133,12 +2166,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			case m.isDown(k):
 				m.BluetoothScan.MoveCWAudio(1)
 			case k == "enter" || k == " ":
-				e, ok := m.BluetoothScan.SelectedCWAudio()
-				if ok {
-					return m, tea.Batch(
-						m.setStatus("Converting audio..."),
-						btConvertCmd(context.Background(), e.Path, m.BluetoothScan.ConvertPath()),
-					)
+				if e, ok := m.BluetoothScan.SelectedCWAudio(); ok {
+					m.BluetoothScan.SetCWAudio(e)
 				}
 			}
 			return m, nil
