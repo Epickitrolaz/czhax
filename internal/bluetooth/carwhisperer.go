@@ -72,7 +72,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	}
 	local, lerr := localAdapterAddr(hciName)
 	if lerr != nil {
-		emit("Adapter address warning: %v (using BDADDR_ANY)", lerr)
+		return fmt.Errorf("local adapter address: %w", lerr)
 	}
 
 	var record io.Writer
@@ -182,15 +182,60 @@ func prepareCarwhispererAdapter(hciName string) error {
 
 func localAdapterAddr(hciName string) ([6]byte, error) {
 	var zero [6]byte
-	data, err := os.ReadFile(filepath.Join("/sys/class/bluetooth", hciName, "address"))
-	if err != nil {
-		return zero, err
+	paths := []string{
+		filepath.Join("/sys/class/bluetooth", hciName, "address"),
+		filepath.Join("/sys/class/bluetooth", hciName, "device", "address"),
 	}
-	addr, err := ParseBDAddr(strings.TrimSpace(string(data)))
-	if err != nil {
-		return zero, err
+	for _, p := range paths {
+		if data, err := os.ReadFile(p); err == nil {
+			if addr, err := ParseBDAddr(strings.TrimSpace(string(data))); err == nil && addr != zero {
+				return addr, nil
+			}
+		}
 	}
-	return addr, nil
+
+	// sysfs may not expose the address on all kernels/adapters; hciconfig and
+	// bluetoothctl report the same BD_ADDR.
+	if _, err := exec.LookPath("hciconfig"); err == nil {
+		if out, err := exec.Command("hciconfig", hciName).CombinedOutput(); err == nil {
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				if idx := strings.Index(line, "BD Address:"); idx >= 0 {
+					fields := strings.Fields(line[idx+len("BD Address:"):])
+					if len(fields) > 0 {
+						if addr, err := ParseBDAddr(fields[0]); err == nil && addr != zero {
+							return addr, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	if _, err := exec.LookPath("bluetoothctl"); err == nil {
+		out, err := exec.Command("bluetoothctl", "list").CombinedOutput()
+		if err == nil {
+			idx := 0
+			if n, err := strconv.Atoi(strings.TrimPrefix(hciName, "hci")); err == nil {
+				idx = n
+			}
+			var addrs []string
+			for _, line := range strings.Split(string(out), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && fields[0] == "Controller" && IsBDAddr(fields[1]) {
+					addrs = append(addrs, fields[1])
+				}
+			}
+			if len(addrs) > 0 {
+				if idx >= len(addrs) {
+					idx = 0
+				}
+				if addr, err := ParseBDAddr(addrs[idx]); err == nil && addr != zero {
+					return addr, nil
+				}
+			}
+		}
+	}
+	return zero, fmt.Errorf("cannot determine local adapter address for %s", hciName)
 }
 
 func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
