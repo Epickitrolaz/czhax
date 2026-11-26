@@ -110,13 +110,13 @@ func StepBacklight(sysRoot string, delta int) (BacklightState, bool) {
 		return BacklightState{}, false
 	}
 	step := max(1, maxB/BrightnessMaxLevel)
-	minB := min(maxB, max(1, maxB/20)) // Keep screen faintly readable (e.g. 5/100)
-	next := cur + delta*step
-	if next < minB {
-		next = minB
-	}
-	if next > maxB {
-		next = maxB
+	var next int
+	if delta > 0 {
+		next = min(maxB, ((cur/step)+1)*step)
+	} else if cur <= 0 {
+		next = 0
+	} else {
+		next = max(0, ((cur-1)/step)*step)
 	}
 	if err := os.WriteFile(bPath, []byte(strconv.Itoa(next)+"\n"), 0o644); err != nil {
 		return BacklightState{}, false
@@ -252,7 +252,7 @@ func (w *Watcher) handleBrightnessKey(delta int) {
 	if !ok {
 		return
 	}
-	if (!hasBefore || st.Raw == before) && !daemon {
+	if (!hasBefore || st.Raw == before) && (!daemon || (delta < 0 && st.Raw > 0)) {
 		if stepped, sOk := StepBacklight("/sys", delta); sOk {
 			st = stepped
 		}

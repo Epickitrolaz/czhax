@@ -66,6 +66,23 @@ func TestReadAndStepBacklight(t *testing.T) {
 	if !ok || st.Raw != 50 || st.Level != 5 {
 		t.Fatalf("unexpected StepBacklight(-1): ok=%v st=%+v", ok, st)
 	}
+
+	// Stepping down must reach 0, and stepping up from 5 or 0 snaps onto clean 10-level grid.
+	if err := os.WriteFile(filepath.Join(blDir, "brightness"), []byte("5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, ok = StepBacklight(sysRoot, 1)
+	if !ok || st.Raw != 10 || st.Level != 1 {
+		t.Fatalf("expected 5 -> 10 on StepBacklight(+1), got ok=%v st=%+v", ok, st)
+	}
+	st, ok = StepBacklight(sysRoot, -1)
+	if !ok || st.Raw != 0 || st.Level != 0 {
+		t.Fatalf("expected 10 -> 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
+	}
+	st, ok = StepBacklight(sysRoot, -1)
+	if !ok || st.Raw != 0 || st.Level != 0 {
+		t.Fatalf("expected clamp at 0 on StepBacklight(-1), got ok=%v st=%+v", ok, st)
+	}
 }
 
 func TestVolumeControllerES8389AndMute(t *testing.T) {
