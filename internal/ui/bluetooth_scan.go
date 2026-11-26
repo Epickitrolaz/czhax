@@ -330,11 +330,6 @@ func (v *BluetoothScanView) OpenCWMenu() bool {
 	if !ok {
 		return false
 	}
-	if dev.Kind == "BLE" {
-		v.Note = "Carwhisperer needs a Classic (BR/EDR) device"
-		v.NoteIsErr = true
-		return false
-	}
 	v.CWReturn = v.Mode
 	v.Mode = btModeCWMenu
 	v.CWCursor = 0
@@ -345,6 +340,9 @@ func (v *BluetoothScanView) OpenCWMenu() bool {
 	v.CWPlayName = ""
 	v.Note = ""
 	v.NoteIsErr = false
+	if dev.Kind == "BLE" {
+		v.Note = "BLE device: attempting RFCOMM anyway"
+	}
 	return true
 }
 
