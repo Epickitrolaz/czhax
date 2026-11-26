@@ -395,6 +395,21 @@ func TestAllViewsAndSizes(t *testing.T) {
 		}
 
 		m = sendKey(m, "down")
+		if m.ActiveView != ViewBluetooth {
+			t.Fatalf("expected ViewBluetooth on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Bluetooth/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on Bluetooth enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Bluetooth/Content")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from Bluetooth")
+		}
+
+		m = sendKey(m, "down")
 		if m.ActiveView != ViewIR {
 			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
 		}

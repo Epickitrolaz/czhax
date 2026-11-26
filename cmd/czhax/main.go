@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/czhax/czhax/internal/bluetooth"
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/console"
@@ -230,6 +231,33 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "bt" {
+		if len(os.Args) > 2 && os.Args[2] == "carwhisperer" {
+			fs := flag.NewFlagSet("bt carwhisperer", flag.ExitOnError)
+			hci := fs.String("hci", "hci0", "HCI device (hci0)")
+			addr := fs.String("addr", "", "Target Bluetooth address")
+			record := fs.String("record", "", "Raw audio output path")
+			play := fs.String("play", "", "Optional raw audio to inject")
+			_ = fs.Parse(os.Args[3:])
+			if strings.TrimSpace(*addr) == "" {
+				fmt.Fprintln(os.Stderr, "bt carwhisperer: --addr is required")
+				os.Exit(1)
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			err := bluetooth.Carwhisperer(ctx, *hci, *addr, *record, *play, func(line string) {
+				fmt.Println(line)
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "bt carwhisperer error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		fmt.Fprintln(os.Stderr, "usage: czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.raw")
+		os.Exit(1)
 	}
 
 	czMode := flag.Bool("cz", false, "Render inside a 53x14 Cardputer Zero viewport frame")

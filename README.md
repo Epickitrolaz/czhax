@@ -45,7 +45,7 @@ What each component does:
 | **Cardputer setup** | [`scripts/setup-cardputer.sh`](scripts/setup-cardputer.sh): `m5stack-linux-dtoverlays` for the LCD/keyboard/audio/battery/RTC, `fb_load` disabled, `en_US.UTF-8` + Terminus 6×12 console, `cardputer-keymap` and `cardputer-brightness` services, tty1 autologin |
 | **Wi-Fi monitor mode** | [`firmware/nexmon`](firmware/nexmon): patched CYW43439 firmware + nexmon `brcmfmac` — monitor mode with radiotap and frame injection (`airmon-ng`, `aireplay-ng`, `mdk4` all work). Builds the firmware from source on x86_64, and on the board applies the prebuilt patch bundle to the stock image (no toolchain needed) |
 | **CZHax TUI** | downloads the latest release binary, verifies its SHA256 and installs it to `/usr/local/bin/czhax` |
-| **Pentest packages** | `aircrack-ng`, `hcxtools`, `hcxdumptool`, `mdk4`, `pixiewps`, `reaver`, `tshark`, `nmap`, `macchanger`, `hostapd`, `dnsmasq`, `bettercap`, … (only those available in your repos) |
+| **Pentest packages** | `aircrack-ng`, `hcxtools`, `hcxdumptool`, `mdk4`, `pixiewps`, `reaver`, `tshark`, `nmap`, `macchanger`, `hostapd`, `dnsmasq`, `bettercap`, `bluez`, `bluez-deprecated-tools`, … (only those available in your repos) |
 
 ### Fresh Raspberry Pi OS Lite Setup (Drivers, Keymap & Console)
 
@@ -101,7 +101,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 
 ## Current Features
 
-- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `IR`, `System`/`Sys`) and top horizontal tab bar, plus auto-dismissing **Brightness** (10 levels, `Fn+U`/`Fn+I`) and **Volume** (20 levels + Mute, `Fn+S`/`Fn+D`/`Fn+A`) OSD popups.
+- **High-Contrast Small-Screen Layout**: Built for `40×10`, `45×10`, and `53×14` terminal viewports with a left vertical view bar (`Status`/`Sts`, `WiFi`/`WiF`, `Local`/`Loc`, `BT`, `IR`, `System`/`Sys`) and top horizontal tab bar, plus auto-dismissing **Brightness** (10 levels, `Fn+U`/`Fn+I`) and **Volume** (20 levels + Mute, `Fn+S`/`Fn+D`/`Fn+A`) OSD popups.
 - **Device Status (`Status → Device`)**:
   - Hostname & hardware/arch (`CardZero CM0` detection)
   - Primary IP / link state
@@ -119,6 +119,12 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Lists WiFi (`wlan*`), Ethernet (`eth*`, `en*`), and USB tethering (`usb0`, `rndis0`, `ipheth`, `cdc_ether`, etc.) interfaces along with the connected network/subnet; disconnected interfaces are greyed out and unselectable.
   - Offers `nmap` scan presets on the selected interface's local subnet: **Host Discovery** (`-sn`), **Quick Ports** (`-F`), **Service Scan** (`-sV`), **OS & Scripts** (`-A`), **Top 1000 Ports**, and **Full Port Scan** (`-p-`), streaming live progress and parsing discovered hosts, MACs/vendors, OS, and open ports.
   - Select any discovered host to view its details or press `s` to run a targeted `nmap` scan on that host alone.
+- **Bluetooth Scan (`BT → Scan`)**:
+  - Scans nearby Bluetooth peers on any `hci*` adapter, with `m` cycling **BLE+Classic**, **BLE**, and **Classic** discovery (`bluetoothctl`, falling back to `hcitool`).
+  - Shows device name, address, RSSI, Classic/BLE kind, Fast Pair (`FP`) advertisements with Model ID, and paired/connected state. Press `←→` to switch adapters and `⏎` for per-device actions.
+  - **Carwhisperer**: opens the hands-free RFCOMM channel and SCO audio link, sends a fake `RING`, injects silence and records raw 8 kHz audio to `~/.local/share/czhax/bt/carwhisperer-*.raw` (native implementation, requires root or passwordless sudo).
+  - **WhisperPair**: runs the reference `whisperpair` CLI when installed (`verify <addr> --authorized`); otherwise performs a built-in Fast Pair audit that detects the `0xFE2C` service and Model ID and explains that the active predicate test needs the model's Google anti-spoofing key.
+  - **l2ping Flood**: floods the selected Classic device with `l2ping -f` (`bluez`); `Esc` stops any running action and keeps the captured output on screen.
 - **IR Remote (`IR → Remote`, `IR → Learn`, `IR → Browse`)**:
   - **Learn**: copy any physical remote button with the GPIO13 IR receiver and bind it to a Cardputer key. Learned profiles persist in `~/.config/czhax/ir.json`.
   - **Remote**: the active profile maps buttons to keys (`1` Power, `2` Vol+, `3` Vol−, `4` Mute, `5`/`6` channel, `7`–`0` arrows, `Enter` OK, `Backspace` Back); presses transmit over the GPIO12 IR LED.
@@ -136,7 +142,7 @@ czhax --cz45   # Ultra-compact 45x10 preview
 - **Keymap**:
   - `↑↓` (`Fn+F/X`) moves vertical views; `←→` (`Fn+Z/C`) moves horizontal tabs
   - `Enter` enters tab content (`↑↓` scrolls inside content); `Esc` returns to tab selection
-  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `o` cycles network color modes, `?` toggles help, `q` / `Ctrl+C` quits
+  - `r` refreshes status / rescans, `s` / `c` scan or connect in the WiFi view, `w` / `d` / `b` handshake / deauth / both, `o` cycles network color modes, `m` cycles Bluetooth scan modes, `?` toggles help, `q` / `Ctrl+C` quits
   - IR: `l` learns, `p`/`v`/`m` try power/volume/mute candidates, `a` accepts, `g` toggles grid mode, and `[`/`]` cycle profiles
 
 ## Build from Source
@@ -149,6 +155,7 @@ make build-all   # Cross-compile arm64, armv7, amd64 + SHA256 checksums
 ## Third-party code
 
 - [OneShot-Extended](https://github.com/chkndrp/OneShot-Extended) is bundled as a pinned upstream snapshot under `internal/oneshot/upstream` (GPL-2.0; see its `LICENSE`). It is extracted to the user cache directory on first use and executed with `python3`; CZHax itself does not modify it.
+- The Bluetooth tab integrates Carwhisperer natively (RFCOMM + SCO sockets) and uses BlueZ's `l2ping` from the OS `bluez` package. If a `whisperpair` reference CLI is already on `PATH`, CZHax runs `whisperpair verify <addr> --authorized`; otherwise it performs a local Fast Pair service/Model ID audit. The WhisperPair toolkit itself is not downloaded or bundled by CZHax.
 
 See [AGENTS.md](AGENTS.md) for guidelines on adding new UI tabs and features.
 
