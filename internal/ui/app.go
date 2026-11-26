@@ -182,6 +182,32 @@ type bluetoothRefreshedMsg struct {
 	adapters []bluetooth.Adapter
 }
 
+type btDevicesScannedMsg struct {
+	hci     string
+	mode    bluetooth.ScanMode
+	devices []bluetooth.Device
+	err     error
+}
+
+type btDeviceInfoMsg struct {
+	addr string
+	info bluetooth.Device
+	err  error
+}
+
+type btAttackLineMsg struct {
+	seq  int
+	line string
+}
+
+type btAttackDoneMsg struct {
+	seq  int
+	kind bluetooth.AttackKind
+	err  error
+}
+
+type btAttackTickMsg struct{}
+
 type localIfacesMsg struct {
 	ifaces []localscan.Interface
 }
@@ -219,14 +245,15 @@ type AppModel struct {
 	ActiveTabs [viewCount]int
 	Focus      FocusZone
 
-	Status    StatusView
-	System    SystemView
-	Wifi      WifiView
-	WifiScan  WifiScanView
-	Local     LocalView
-	IR        IRView
-	Bluetooth BluetoothView
-	Help      HelpView
+	Status        StatusView
+	System        SystemView
+	Wifi          WifiView
+	WifiScan      WifiScanView
+	Local         LocalView
+	IR            IRView
+	Bluetooth     BluetoothView
+	BluetoothScan BluetoothScanView
+	Help          HelpView
 
 	ShowHelp      bool
 	ConfirmExit   bool
@@ -244,20 +271,21 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		version = "dev"
 	}
 	m := AppModel{
-		Cfg:        cfg,
-		ConfigPath: cfgPath,
-		Version:    version,
-		Snap:       sysinfo.Collect(),
-		TermW:      53,
-		TermH:      14,
-		ActiveView: ViewStatus,
-		Focus:      FocusTabs,
-		System:     NewSystemView(),
-		Wifi:       NewWifiView(),
-		WifiScan:   NewWifiScanView(),
-		Local:      NewLocalView(),
-		IR:         NewIRView(cfgPath),
-		Bluetooth:  NewBluetoothView(),
+		Cfg:           cfg,
+		ConfigPath:    cfgPath,
+		Version:       version,
+		Snap:          sysinfo.Collect(),
+		TermW:         53,
+		TermH:         14,
+		ActiveView:    ViewStatus,
+		Focus:         FocusTabs,
+		System:        NewSystemView(),
+		Wifi:          NewWifiView(),
+		WifiScan:      NewWifiScanView(),
+		Local:         NewLocalView(),
+		IR:            NewIRView(cfgPath),
+		Bluetooth:     NewBluetoothView(),
+		BluetoothScan: NewBluetoothScanView(),
 	}
 	m.WifiScan.ColorMode = cfg.WiFiColor
 	m.WifiScan.SetOneShotRefresh(cfg.OneShotDir)
@@ -523,6 +551,76 @@ func collectBluetoothCmd() tea.Cmd {
 	}
 }
 
+func scanBluetoothDevicesCmd(hci, controller string, mode bluetooth.ScanMode) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		devices, err := bluetooth.ScanDevices(ctx, bluetooth.ScanRequest{
+			HCI:        hci,
+			Controller: controller,
+			Mode:       mode,
+			Timeout:    10 * time.Second,
+		})
+		return btDevicesScannedMsg{hci: hci, mode: mode, devices: devices, err: err}
+	}
+}
+
+func bluetoothDeviceInfoCmd(addr string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		info, err := bluetooth.QueryDeviceInfo(ctx, addr)
+		return btDeviceInfoMsg{addr: addr, info: info, err: err}
+	}
+}
+
+func runBluetoothAttackCmd(ctx context.Context, seq int, req bluetooth.AttackRequest, ch chan string) tea.Cmd {
+	return func() tea.Msg {
+		defer func() {
+			if ch != nil {
+				close(ch)
+			}
+		}()
+		err := bluetooth.RunAttack(ctx, req, func(line string) {
+			if ch == nil {
+				return
+			}
+			select {
+			case ch <- line:
+			default:
+				select {
+				case <-ch:
+				default:
+				}
+				select {
+				case ch <- line:
+				default:
+				}
+			}
+		})
+		return btAttackDoneMsg{seq: seq, kind: req.Kind, err: err}
+	}
+}
+
+func waitBluetoothLineCmd(seq int, ch <-chan string) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return btAttackLineMsg{seq: seq, line: line}
+	}
+}
+
+func btAttackTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return btAttackTickMsg{}
+	})
+}
+
 func collectLocalIfacesCmd() tea.Cmd {
 	return func() tea.Msg {
 		return localIfacesMsg{ifaces: localscan.CollectInterfaces()}
@@ -658,6 +756,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case StatusTabBT:
 				cmds = append(cmds, collectBluetoothCmd())
 			}
+		}
+		if m.ActiveView == ViewBluetooth {
+			cmds = append(cmds, collectBluetoothCmd())
 		}
 		return m, tea.Batch(cmds...)
 
@@ -819,7 +920,53 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
+		m.BluetoothScan.SyncAdapters(msg.adapters)
 		return m, nil
+
+	case btDevicesScannedMsg:
+		if msg.hci != m.BluetoothScan.EffectiveHCI() {
+			m.BluetoothScan.Scanning = false
+			return m, nil
+		}
+		m.BluetoothScan.SetScanResult(msg.devices, msg.err)
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("BT scan failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus(fmt.Sprintf("%d BT devices on %s", len(msg.devices), msg.hci)), m.resetMarquee())
+
+	case btDeviceInfoMsg:
+		if msg.err == nil {
+			m.BluetoothScan.MergeDeviceInfo(msg.info)
+		}
+		return m, nil
+
+	case btAttackLineMsg:
+		if !m.BluetoothScan.RunActive || msg.seq != m.BluetoothScan.RunSeq {
+			return m, nil
+		}
+		m.BluetoothScan.ApplyAttackLine(msg.seq, msg.line)
+		return m, waitBluetoothLineCmd(msg.seq, m.BluetoothScan.RunProgressCh)
+
+	case btAttackDoneMsg:
+		m.BluetoothScan.DrainRunLines(msg.seq)
+		m.BluetoothScan.FinishAttack(msg.seq, msg.err)
+		switch {
+		case msg.err == nil:
+			return m, tea.Batch(m.setStatus(msg.kind.String()+" done"), m.resetMarquee())
+		case strings.Contains(msg.err.Error(), "canceled"):
+			return m, tea.Batch(m.setStatus(msg.kind.String()+" stopped"), m.resetMarquee())
+		default:
+			return m, tea.Batch(m.setStatus(msg.kind.String()+" failed"), m.resetMarquee())
+		}
+
+	case btAttackTickMsg:
+		if !m.BluetoothScan.RunActive {
+			return m, nil
+		}
+		if !m.BluetoothScan.RunStarted.IsZero() {
+			m.BluetoothScan.RunElapsed = time.Since(m.BluetoothScan.RunStarted)
+		}
+		return m, btAttackTickCmd()
 
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
@@ -1009,6 +1156,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.Local.StopScan()
 		return m, m.setStatus("Stopping nmap...")
 	}
+	if m.BluetoothScan.RunActive && (k == "ctrl+c" || k == "q") {
+		m.BluetoothScan.StopAttack()
+		return m, m.setStatus("Stopping Bluetooth action...")
+	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
@@ -1079,6 +1230,24 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.Local.Scanning {
 			return m, m.setStatus("Nmap scan running")
+		}
+		if m.BluetoothScan.RunActive {
+			return m, m.setStatus("Bluetooth action running")
+		}
+		if m.ActiveView == ViewBluetooth && m.Focus == FocusContent {
+			switch m.BluetoothScan.Mode {
+			case btModeList:
+				if !m.BluetoothScan.Scanning {
+					hci := m.BluetoothScan.EffectiveHCI()
+					m.BluetoothScan.StartScan()
+					return m, tea.Batch(m.setStatus("Scanning "+hci+"..."), collectBluetoothCmd(), scanBluetoothDevicesCmd(hci, m.BluetoothScan.EffectiveController(), m.BluetoothScan.ScanMode))
+				}
+			case btModeDetail:
+				if dev, ok := m.BluetoothScan.SelectedDevice(); ok {
+					return m, bluetoothDeviceInfoCmd(dev.Address)
+				}
+			}
+			return m, collectBluetoothCmd()
 		}
 		if m.ActiveView == ViewLocal && m.Focus == FocusContent {
 			switch m.Local.Mode {
@@ -1180,6 +1349,14 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.Local.LoadingIfaces = true
 				}
 				return m, collectLocalIfacesCmd()
+			} else if m.ActiveView == ViewBluetooth {
+				m.BluetoothScan.SyncAdapters(m.Bluetooth.Adapters)
+				if !m.BluetoothScan.HasScanned && !m.BluetoothScan.Scanning {
+					hci := m.BluetoothScan.EffectiveHCI()
+					m.BluetoothScan.StartScan()
+					return m, tea.Batch(collectBluetoothCmd(), scanBluetoothDevicesCmd(hci, m.BluetoothScan.EffectiveController(), m.BluetoothScan.ScanMode), m.setStatus("Scanning "+hci+"..."))
+				}
+				return m, collectBluetoothCmd()
 			} else if m.ActiveView == ViewIR {
 				m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 				m.IR.RefreshHardware()
@@ -1215,6 +1392,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.ActiveView == ViewLocal {
 			return m, collectLocalIfacesCmd()
+		}
+		if m.ActiveView == ViewBluetooth {
+			return m, collectBluetoothCmd()
 		}
 		if m.ActiveView == ViewStatus {
 			switch m.ActiveTabs[ViewStatus] {
@@ -1299,6 +1479,19 @@ func (m AppModel) launchLocalScan(opt localscan.ScanOption) (tea.Model, tea.Cmd)
 		runLocalScanCmd(ctx, seq, req, ch),
 		waitLocalScanProgressCmd(seq, ch),
 		localScanTickCmd(),
+	)
+}
+
+func (m AppModel) startBluetoothAction(kind BTActionKind) (tea.Model, tea.Cmd) {
+	ctx, req, seq, ch, ok := m.BluetoothScan.StartAttack(kind)
+	if !ok {
+		return m, m.setStatus("Select a device first")
+	}
+	return m, tea.Batch(
+		m.setStatus("BT: "+req.Name),
+		runBluetoothAttackCmd(ctx, seq, req, ch),
+		waitBluetoothLineCmd(seq, ch),
+		btAttackTickCmd(),
 	)
 }
 
@@ -1414,6 +1607,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.ActiveView == ViewLocal && m.Local.HandleEsc() {
+			return m, nil
+		}
+		if m.ActiveView == ViewBluetooth && m.BluetoothScan.HandleEsc() {
 			return m, nil
 		}
 		if m.ActiveView == ViewIR && m.IR.HandleEsc() {
@@ -1647,6 +1843,81 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			case k == "s" || k == "enter":
 				m.Local.ScanSelectedHost()
 			}
+			return m, nil
+		}
+		return m, nil
+
+	case ViewBluetooth:
+		_, mainW, bodyH := m.dimensions()
+		pal := theme.Resolve(m.Cfg.Theme, false)
+		switch m.BluetoothScan.Mode {
+		case btModeList:
+			switch {
+			case m.isUp(k):
+				m.BluetoothScan.MoveDevice(-1)
+			case m.isDown(k):
+				m.BluetoothScan.MoveDevice(1)
+			case m.isLeft(k):
+				m.BluetoothScan.CycleAdapter(-1)
+				return m, collectBluetoothCmd()
+			case m.isRight(k) || k == "i":
+				m.BluetoothScan.CycleAdapter(1)
+				return m, collectBluetoothCmd()
+			case k == "m":
+				m.BluetoothScan.CycleScanMode(1)
+				return m, m.resetMarquee()
+			case k == "s":
+				if !m.BluetoothScan.Scanning {
+					hci := m.BluetoothScan.EffectiveHCI()
+					m.BluetoothScan.StartScan()
+					return m, tea.Batch(m.setStatus("Scanning "+hci+"..."), collectBluetoothCmd(), scanBluetoothDevicesCmd(hci, m.BluetoothScan.EffectiveController(), m.BluetoothScan.ScanMode))
+				}
+			case k == "enter":
+				if len(m.BluetoothScan.Devices) == 0 {
+					if !m.BluetoothScan.Scanning {
+						hci := m.BluetoothScan.EffectiveHCI()
+						m.BluetoothScan.StartScan()
+						return m, tea.Batch(m.setStatus("Scanning "+hci+"..."), collectBluetoothCmd(), scanBluetoothDevicesCmd(hci, m.BluetoothScan.EffectiveController(), m.BluetoothScan.ScanMode))
+					}
+				} else {
+					m.BluetoothScan.OpenActions()
+				}
+			}
+			return m, nil
+
+		case btModeActions:
+			switch {
+			case m.isUp(k):
+				m.BluetoothScan.MoveAction(-1)
+			case m.isDown(k):
+				m.BluetoothScan.MoveAction(1)
+			case k == "enter" || k == " ":
+				act, ok := m.BluetoothScan.SelectedAction()
+				if !ok {
+					return m, nil
+				}
+				if act == btActDetail {
+					if m.BluetoothScan.OpenDetail(btModeActions) {
+						if dev, ok := m.BluetoothScan.SelectedDevice(); ok {
+							return m, bluetoothDeviceInfoCmd(dev.Address)
+						}
+					}
+					return m, nil
+				}
+				return m.startBluetoothAction(act)
+			}
+			return m, nil
+
+		case btModeDetail:
+			switch {
+			case m.isUp(k):
+				m.BluetoothScan.MoveDetailScroll(-1, mainW, bodyH, pal)
+			case m.isDown(k):
+				m.BluetoothScan.MoveDetailScroll(1, mainW, bodyH, pal)
+			}
+			return m, nil
+
+		case btModeRunning:
 			return m, nil
 		}
 		return m, nil
@@ -2276,6 +2547,10 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		localView := m.Local
 		localView.Marquee = mq
 		mainLines = localView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+	case m.ActiveView == ViewBluetooth:
+		btScanView := m.BluetoothScan
+		btScanView.Marquee = mq
+		mainLines = btScanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewIR:
 		irView := m.IR
 		irView.Tab = IRTab(m.ActiveTabs[ViewIR])
@@ -2444,6 +2719,28 @@ func (m AppModel) currentHints() []Hint {
 			return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "s", Desc: "scan"}, {Key: "Esc", Desc: "back"}}
 		default:
 			return []Hint{{Key: "↑↓", Desc: "if"}, {Key: "⏎", Desc: "next"}, {Key: "r", Desc: "ref"}, {Key: "Esc", Desc: "tabs"}}
+		}
+	}
+	if m.ActiveView == ViewBluetooth {
+		switch m.BluetoothScan.Mode {
+		case btModeActions:
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
+		case btModeDetail:
+			return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "Esc", Desc: "back"}}
+		case btModeRunning:
+			if m.BluetoothScan.RunActive {
+				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+			}
+			return []Hint{{Key: "Esc", Desc: "back"}}
+		default:
+			return []Hint{
+				{Key: "↑↓", Desc: "sel"},
+				{Key: "←→", Desc: "if"},
+				{Key: "s", Desc: "scan"},
+				{Key: "m", Desc: "mode"},
+				{Key: "⏎", Desc: "act"},
+				{Key: "Esc", Desc: "tabs"},
+			}
 		}
 	}
 	if m.ActiveView == ViewIR {

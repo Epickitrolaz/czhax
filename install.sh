@@ -247,7 +247,7 @@ setup_packages() {
   local want=(
     aircrack-ng hcxtools hcxdumptool mdk4 pixiewps reaver tshark nmap
     macchanger iw wireless-tools rfkill hostapd dnsmasq bluez bluez-tools
-    bettercap usbutils pciutils
+    bluez-deprecated-tools bettercap usbutils pciutils
   )
   local avail=() p
   apt-get update -qq

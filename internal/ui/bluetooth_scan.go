@@ -1,0 +1,932 @@
+package ui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/bluetooth"
+	"github.com/czhax/czhax/internal/theme"
+)
+
+type BTViewMode int
+
+const (
+	btModeList BTViewMode = iota
+	btModeActions
+	btModeDetail
+	btModeRunning
+)
+
+type BTActionKind int
+
+const (
+	btActCarwhisperer BTActionKind = iota
+	btActWhisperPair
+	btActL2Flood
+	btActDetail
+)
+
+type btActionItem struct {
+	kind BTActionKind
+	name string
+	val  string
+	warn bool
+	ok   bool
+}
+
+var btActions = []btActionItem{
+	{kind: btActCarwhisperer, name: "Carwhisperer", val: "audio", warn: true},
+	{kind: btActWhisperPair, name: "WhisperPair", val: "fast pair"},
+	{kind: btActL2Flood, name: "l2ping Flood", val: "flood", warn: true},
+	{kind: btActDetail, name: "Device Details", val: "info", ok: true},
+}
+
+// BluetoothScanView is the Bluetooth equivalent of WifiScanView: it lists
+// nearby peers, exposes a per-device action menu, and streams running tool
+// output.
+type BluetoothScanView struct {
+	Mode         BTViewMode
+	PrevMode     BTViewMode
+	DetailReturn BTViewMode
+
+	Adapters   []bluetooth.Adapter
+	AdapterIdx int
+	ScanMode   bluetooth.ScanMode
+
+	Scanning   bool
+	HasScanned bool
+	ScanErr    string
+	Devices    []bluetooth.Device
+	Cursor     int
+
+	ActionCursor   int
+	DetailScroll   int
+	PendingInfoFor string
+
+	RunKind       BTActionKind
+	RunDevice     bluetooth.Device
+	RunActive     bool
+	RunStopping   bool
+	RunSeq        int
+	RunStarted    time.Time
+	RunElapsed    time.Duration
+	RunLines      []string
+	RunErr        string
+	RunRecordPath string
+	RunProgressCh chan string
+	RunCancel     context.CancelFunc
+
+	Note      string
+	NoteIsErr bool
+	Marquee   Marquee
+}
+
+func NewBluetoothScanView() BluetoothScanView {
+	return BluetoothScanView{ScanMode: bluetooth.ScanBoth}
+}
+
+func (v BluetoothScanView) IsTextInput() bool { return false }
+
+func (v BluetoothScanView) EffectiveHCI() string {
+	if len(v.Adapters) == 0 {
+		return "hci0"
+	}
+	idx := clampIndex(v.AdapterIdx, len(v.Adapters))
+	return v.Adapters[idx].Name
+}
+
+func (v BluetoothScanView) EffectiveAdapter() (bluetooth.Adapter, bool) {
+	if len(v.Adapters) == 0 {
+		return bluetooth.Adapter{}, false
+	}
+	return v.Adapters[clampIndex(v.AdapterIdx, len(v.Adapters))], true
+}
+
+func (v BluetoothScanView) EffectiveController() string {
+	if a, ok := v.EffectiveAdapter(); ok {
+		return strings.TrimSpace(a.Address)
+	}
+	return ""
+}
+
+func (v *BluetoothScanView) SyncAdapters(adapters []bluetooth.Adapter) {
+	prevHCI := v.EffectiveHCI()
+	prev := ""
+	if a, ok := v.EffectiveAdapter(); ok {
+		prev = a.Name
+	}
+	v.Adapters = adapters
+	if len(adapters) == 0 {
+		v.AdapterIdx = 0
+		return
+	}
+	found := -1
+	for i, a := range adapters {
+		if a.Name == prev {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		for i, a := range adapters {
+			if a.Name == "hci0" {
+				found = i
+				break
+			}
+		}
+	}
+	if found < 0 {
+		found = 0
+	}
+	v.AdapterIdx = found
+	if v.Scanning && v.EffectiveHCI() != prevHCI {
+		// The first scan may have started before adapters were enumerated.
+		v.Scanning = false
+		v.Devices = nil
+		v.HasScanned = false
+	}
+}
+
+func (v *BluetoothScanView) CycleAdapter(delta int) {
+	if len(v.Adapters) <= 1 {
+		return
+	}
+	v.AdapterIdx = (clampIndex(v.AdapterIdx, len(v.Adapters)) + delta + len(v.Adapters)) % len(v.Adapters)
+	v.Devices = nil
+	v.Cursor = 0
+	v.HasScanned = false
+	v.ScanErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+	if a, ok := v.EffectiveAdapter(); ok && strings.TrimSpace(a.Name) != "" {
+		v.Note = "Adapter " + a.Name
+	}
+}
+
+func (v *BluetoothScanView) CycleScanMode(delta int) {
+	modes := []bluetooth.ScanMode{bluetooth.ScanBoth, bluetooth.ScanLE, bluetooth.ScanClassic}
+	cur := 0
+	for i, m := range modes {
+		if m == v.ScanMode {
+			cur = i
+			break
+		}
+	}
+	v.ScanMode = modes[(cur+delta+len(modes))%len(modes)]
+	v.ScanErr = ""
+	v.Note = "Scan mode: " + v.ScanMode.String()
+	v.NoteIsErr = false
+}
+
+func (v *BluetoothScanView) StartScan() {
+	v.Scanning = true
+	v.ScanErr = ""
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v *BluetoothScanView) SetScanResult(devices []bluetooth.Device, err error) {
+	v.Scanning = false
+	v.HasScanned = true
+	if err != nil {
+		v.ScanErr = err.Error()
+		v.Note = err.Error()
+		v.NoteIsErr = true
+		return
+	}
+	v.ScanErr = ""
+	devices = bluetooth.SortDevices(append([]bluetooth.Device(nil), devices...))
+	prevAddr := ""
+	if v.Cursor >= 0 && v.Cursor < len(v.Devices) {
+		prevAddr = v.Devices[v.Cursor].Address
+	}
+	v.Devices = devices
+	if len(devices) == 0 {
+		v.Cursor = 0
+		v.Note = "No devices on " + v.EffectiveHCI()
+		v.NoteIsErr = false
+		return
+	}
+	found := 0
+	if prevAddr != "" {
+		for i, d := range devices {
+			if d.Address == prevAddr {
+				found = i
+				break
+			}
+		}
+	}
+	v.Cursor = found
+	v.Note = fmt.Sprintf("%d devices on %s", len(devices), v.EffectiveHCI())
+	v.NoteIsErr = false
+}
+
+func (v *BluetoothScanView) MoveDevice(delta int) {
+	if len(v.Devices) == 0 {
+		v.Cursor = 0
+		return
+	}
+	v.Cursor = (v.Cursor + delta + len(v.Devices)) % len(v.Devices)
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v BluetoothScanView) SelectedDevice() (bluetooth.Device, bool) {
+	if v.Cursor < 0 || v.Cursor >= len(v.Devices) {
+		return bluetooth.Device{}, false
+	}
+	return v.Devices[v.Cursor], true
+}
+
+func (v *BluetoothScanView) OpenActions() bool {
+	if _, ok := v.SelectedDevice(); !ok {
+		return false
+	}
+	v.Mode = btModeActions
+	v.ActionCursor = 0
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *BluetoothScanView) MoveAction(delta int) {
+	v.ActionCursor = (v.ActionCursor + delta + len(btActions)) % len(btActions)
+	v.Note = ""
+	v.NoteIsErr = false
+}
+
+func (v BluetoothScanView) SelectedAction() (BTActionKind, bool) {
+	if v.ActionCursor < 0 || v.ActionCursor >= len(btActions) {
+		return 0, false
+	}
+	return btActions[v.ActionCursor].kind, true
+}
+
+func (v *BluetoothScanView) OpenDetail(fromMode BTViewMode) bool {
+	dev, ok := v.SelectedDevice()
+	if !ok {
+		return false
+	}
+	v.DetailReturn = fromMode
+	v.Mode = btModeDetail
+	v.DetailScroll = 0
+	v.PendingInfoFor = dev.Address
+	v.Note = ""
+	v.NoteIsErr = false
+	return true
+}
+
+func (v *BluetoothScanView) MoveDetailScroll(delta, w, h int, pal theme.Palette) {
+	dev, ok := v.SelectedDevice()
+	if !ok {
+		v.DetailScroll = 0
+		return
+	}
+	detailH := max(1, h-1)
+	if h >= 10 {
+		detailH = max(1, h-2)
+	}
+	total := len(v.buildDetailRows(w, pal, dev))
+	maxScroll := max(0, total-detailH)
+	v.DetailScroll += delta
+	if v.DetailScroll < 0 {
+		v.DetailScroll = 0
+	}
+	if v.DetailScroll > maxScroll {
+		v.DetailScroll = maxScroll
+	}
+}
+
+func (v *BluetoothScanView) MergeDeviceInfo(info bluetooth.Device) {
+	if strings.TrimSpace(info.Address) == "" {
+		return
+	}
+	for i := range v.Devices {
+		if !strings.EqualFold(v.Devices[i].Address, info.Address) {
+			continue
+		}
+		d := v.Devices[i]
+		if info.Name != "" {
+			d.Name = info.Name
+		}
+		if info.Alias != "" {
+			d.Alias = info.Alias
+		}
+		if info.HasRSSI {
+			d.RSSI = info.RSSI
+			d.HasRSSI = true
+		}
+		if info.Kind != "" && d.Kind == "" {
+			d.Kind = info.Kind
+		}
+		if info.Class != "" {
+			d.Class = info.Class
+		}
+		if info.Icon != "" {
+			d.Icon = info.Icon
+		}
+		if len(info.UUIDs) > 0 {
+			d.UUIDs = info.UUIDs
+		}
+		d.Paired = d.Paired || info.Paired
+		d.Trusted = d.Trusted || info.Trusted
+		d.Connected = d.Connected || info.Connected
+		d.FastPair = d.FastPair || info.FastPair
+		v.Devices[i] = d
+		return
+	}
+}
+
+func (v *BluetoothScanView) StartAttack(kind BTActionKind) (context.Context, bluetooth.AttackRequest, int, chan string, bool) {
+	dev, ok := v.SelectedDevice()
+	if !ok || v.RunActive {
+		return nil, bluetooth.AttackRequest{}, 0, nil, false
+	}
+	var backendKind bluetooth.AttackKind
+	switch kind {
+	case btActCarwhisperer:
+		backendKind = bluetooth.AttackCarwhisperer
+	case btActWhisperPair:
+		backendKind = bluetooth.AttackWhisperPair
+	case btActL2Flood:
+		backendKind = bluetooth.AttackL2Flood
+	default:
+		return nil, bluetooth.AttackRequest{}, 0, nil, false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	v.PrevMode = v.Mode
+	v.Mode = btModeRunning
+	v.RunKind = kind
+	v.RunDevice = dev
+	v.RunActive = true
+	v.RunStopping = false
+	v.RunSeq++
+	v.RunStarted = time.Now()
+	v.RunElapsed = 0
+	v.RunLines = nil
+	v.RunErr = ""
+	v.RunRecordPath = ""
+	if kind == btActCarwhisperer {
+		v.RunRecordPath = bluetooth.CarwhispererRecordPath(dev.Address)
+	}
+	v.RunProgressCh = make(chan string, 64)
+	v.RunCancel = cancel
+	v.Note = ""
+	v.NoteIsErr = false
+
+	req := bluetooth.AttackRequest{
+		Kind:       backendKind,
+		HCI:        v.EffectiveHCI(),
+		Address:    dev.Address,
+		Name:       dev.DisplayName(),
+		RecordPath: v.RunRecordPath,
+		FastPair:   dev.FastPair,
+		ModelID:    dev.ModelID,
+	}
+	return ctx, req, v.RunSeq, v.RunProgressCh, true
+}
+
+func (v *BluetoothScanView) ApplyAttackLine(seq int, line string) {
+	if !v.RunActive || seq != v.RunSeq {
+		return
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	v.RunLines = append(v.RunLines, line)
+	if len(v.RunLines) > 500 {
+		v.RunLines = append([]string(nil), v.RunLines[len(v.RunLines)-500:]...)
+	}
+	if !v.RunStarted.IsZero() {
+		v.RunElapsed = time.Since(v.RunStarted)
+	}
+}
+
+func (v *BluetoothScanView) DrainRunLines(seq int) {
+	ch := v.RunProgressCh
+	if ch == nil {
+		return
+	}
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			v.ApplyAttackLine(seq, line)
+		default:
+			return
+		}
+	}
+}
+
+func (v *BluetoothScanView) FinishAttack(seq int, err error) {
+	if seq != v.RunSeq {
+		return
+	}
+	v.RunActive = false
+	v.RunStopping = false
+	v.RunProgressCh = nil
+	if v.RunCancel != nil {
+		v.RunCancel()
+		v.RunCancel = nil
+	}
+	if !v.RunStarted.IsZero() {
+		v.RunElapsed = time.Since(v.RunStarted)
+	}
+	switch {
+	case err != nil && errors.Is(err, context.Canceled):
+		v.RunErr = ""
+		v.Note = "Stopped"
+		v.NoteIsErr = false
+	case err != nil:
+		v.RunErr = err.Error()
+		v.Note = "Attack failed"
+		v.NoteIsErr = true
+	default:
+		v.RunErr = ""
+		v.Note = v.attackLabel() + " done"
+		v.NoteIsErr = false
+	}
+}
+
+func (v *BluetoothScanView) StopAttack() {
+	if v.RunCancel != nil {
+		v.RunCancel()
+	}
+	v.RunStopping = true
+}
+
+func (v BluetoothScanView) attackLabel() string {
+	if v.RunKind < 0 || int(v.RunKind) >= len(btActions) {
+		return "Attack"
+	}
+	return btActions[v.RunKind].name
+}
+
+func (v *BluetoothScanView) HandleEsc() bool {
+	switch v.Mode {
+	case btModeRunning:
+		if v.RunActive {
+			v.StopAttack()
+			return true
+		}
+		v.RunErr = ""
+		v.Mode = v.PrevMode
+		return true
+	case btModeDetail:
+		if v.DetailReturn != btModeList {
+			v.Mode = v.DetailReturn
+		} else {
+			v.Mode = btModeList
+		}
+		return true
+	case btModeActions:
+		v.Note = ""
+		v.NoteIsErr = false
+		v.Mode = btModeList
+		return true
+	default:
+		return false
+	}
+}
+
+func (v BluetoothScanView) RenderLines(w, h int, pal theme.Palette, focused bool) []string {
+	switch v.Mode {
+	case btModeActions:
+		return v.renderActions(w, h, pal, focused)
+	case btModeDetail:
+		return v.renderDetail(w, h, pal, focused)
+	case btModeRunning:
+		return v.renderRunning(w, h, pal)
+	default:
+		return v.renderList(w, h, pal, focused)
+	}
+}
+
+func (v BluetoothScanView) renderList(w, h int, pal theme.Palette, focused bool) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	hci := v.EffectiveHCI()
+	ifacePart := sec.Render("If:") + accent.Render(v.Marquee.Truncate(hci, max(5, w-22)))
+	if len(v.Adapters) > 1 {
+		ifacePart += muted.Render("◂▸")
+	}
+	ifacePart += muted.Render("·") + ok.Render(v.ScanMode.Short())
+
+	var rightPart string
+	switch {
+	case v.Scanning:
+		rightPart = warn.Render("scanning…")
+	case v.ScanErr != "":
+		rightPart = danger.Render("err ") + sec.Render("[s]") + muted.Render("Scan")
+	case v.HasScanned:
+		rightPart = muted.Render(fmt.Sprintf("%d devs ", len(v.Devices))) + sec.Render("[s]") + muted.Render("Scan")
+	default:
+		rightPart = sec.Render("[s]") + muted.Render("Scan")
+	}
+
+	rightW := lipgloss.Width(rightPart)
+	leftMax := max(6, w-rightW-3)
+	header := " " + v.Marquee.FitLine(ifacePart, leftMax) + " " + rightPart + " "
+	if h <= 1 {
+		return v.Marquee.SplitLinesPadded([]string{header}, w, h)
+	}
+
+	showBottom := (h >= 11 || v.Note != "") && h >= 4
+	listH := h - 1
+	if showBottom {
+		listH = h - 2
+	}
+
+	lines := []string{header}
+
+	switch {
+	case v.Scanning && len(v.Devices) == 0:
+		lines = append(lines, " "+warn.Render(v.Marquee.Truncate("Scanning "+hci+" ("+v.ScanMode.String()+")...", max(6, w-2))))
+
+	case v.ScanErr != "" && len(v.Devices) == 0:
+		lines = append(lines, " "+danger.Render("Scan failed:"))
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.ScanErr, max(6, w-2))))
+		lines = append(lines, " "+muted.Render("Press s to retry"))
+
+	case len(v.Devices) == 0:
+		if !v.HasScanned {
+			lines = append(lines, " "+muted.Render("No scan yet"))
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Press s or ⏎ to scan "+hci, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("No devices on "+hci, max(6, w-2))))
+			lines = append(lines, " "+muted.Render("Press s to rescan"))
+		}
+
+	default:
+		start, end := ScrollWindow(len(v.Devices), v.Cursor, listH)
+		for i := start; i < end; i++ {
+			d := v.Devices[i]
+			selected := i == v.Cursor
+
+			kind := d.ShortKind()
+			signal := d.SignalLabel()
+			mark := " "
+			if d.Connected {
+				mark = "*"
+			}
+			rightPlain := fmt.Sprintf("%4s %s%s", signal, kind, mark)
+			rightW := lipgloss.Width(rightPlain)
+			nameW := max(4, w-2-1-rightW-1)
+			nameTxt := v.Marquee.FitLine(d.DisplayName(), nameW)
+			if d.FastPair {
+				kind = "FP"
+				rightPlain = fmt.Sprintf("%4s FP%s", signal, mark)
+				rightW = lipgloss.Width(rightPlain)
+				nameW = max(4, w-2-1-rightW-1)
+				nameTxt = v.Marquee.FitLine(d.DisplayName(), nameW)
+			}
+
+			if selected && focused {
+				row := fmt.Sprintf("▸%s%s %s", mark, nameTxt, rightPlain)
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				pfx := " "
+				if selected {
+					pfx = accent.Render("▸")
+				}
+				sigStyle := danger
+				if d.HasRSSI {
+					if d.RSSI >= -60 {
+						sigStyle = ok
+					} else if d.RSSI >= -80 {
+						sigStyle = warn
+					}
+				} else {
+					sigStyle = muted
+				}
+				kindStyle := muted
+				switch {
+				case d.FastPair:
+					kindStyle = warn
+				case d.Kind == "BLE":
+					kindStyle = ok
+				}
+				markStyle := muted
+				if d.Connected {
+					markStyle = ok
+				}
+				row := pfx + markStyle.Render(mark) + nameTxt + " " + sigStyle.Render(fmt.Sprintf("%4s", signal)) + " " + kindStyle.Render(kind) + " "
+				lines = append(lines, row)
+			}
+		}
+	}
+
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else if v.ScanErr != "" {
+			lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.ScanErr, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("⏎:act s:scan m:mode Esc:tabs", max(6, w-2))))
+		}
+	}
+
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) renderActions(w, h int, pal theme.Palette, focused bool) []string {
+	dev, okDev := v.SelectedDevice()
+	if !okDev {
+		return v.renderList(w, h, pal, focused)
+	}
+
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+
+	rightPlain := sec.Render("Esc")
+	titleW := max(6, w-lipgloss.Width(rightPlain)-4)
+	header := " " + FitLine(muted.Render("◂ ")+accent.Render(v.Marquee.Truncate(dev.DisplayName(), max(4, titleW-2))), titleW) + " " + rightPlain + " "
+	if h <= 1 {
+		return v.Marquee.SplitLinesPadded([]string{header}, w, h)
+	}
+
+	lines := []string{header}
+	showSummary := h >= 8
+	if showSummary {
+		sig := "n/a"
+		if dev.HasRSSI {
+			sig = fmt.Sprintf("%d dBm", dev.RSSI)
+		}
+		sub := joinNonEmpty(" · ", dev.Address, sig, dev.Kind)
+		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(sub, max(6, w-2))))
+	}
+
+	items := btActions
+	showBottom := (h >= 8 || v.Note != "") && h >= 4
+	listH := h - len(lines)
+	if showBottom {
+		listH--
+	}
+	if listH < 1 {
+		listH = 1
+	}
+
+	cursor := clampIndex(v.ActionCursor, len(items))
+	start, end := ScrollWindow(len(items), cursor, listH)
+	for i := start; i < end; i++ {
+		it := items[i]
+		selected := i == cursor
+		nameW := max(8, w-len(it.val)-5)
+		if selected && focused {
+			row := fmt.Sprintf(" ▸ %s %s", v.Marquee.FitLine(it.name, nameW), it.val)
+			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+		} else {
+			pfx := "   "
+			if selected {
+				pfx = accent.Render(" ▸ ")
+			}
+			valStyle := muted
+			if it.ok {
+				valStyle = ok
+			} else if it.warn {
+				valStyle = warn
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s", pfx, txt.Render(v.Marquee.FitLine(it.name, nameW)), valStyle.Render(it.val)))
+		}
+	}
+
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := ok
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:sel  ⏎:run  Esc:back", max(6, w-2))))
+		}
+	}
+
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) buildDetailRows(w int, pal theme.Palette, d bluetooth.Device) []string {
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+
+	valW := max(6, w-9)
+	val := func(s string) string {
+		if strings.TrimSpace(s) == "" {
+			return muted.Render("n/a")
+		}
+		return txt.Render(v.Marquee.Truncate(s, valW))
+	}
+	kind := d.Kind
+	if kind == "" {
+		kind = "BT"
+	}
+
+	rows := []string{
+		" " + sec.Render("Name   ") + val(d.DisplayName()),
+		" " + sec.Render("Address") + val(d.Address),
+	}
+	sig := "n/a"
+	if d.HasRSSI {
+		sig = fmt.Sprintf("%d dBm", d.RSSI)
+	}
+	rows = append(rows,
+		" "+sec.Render("Signal ")+val(sig),
+		" "+sec.Render("Kind   ")+val(kind),
+	)
+	if d.Class != "" {
+		rows = append(rows, " "+sec.Render("Class  ")+val(d.Class))
+	}
+	if d.Icon != "" {
+		rows = append(rows, " "+sec.Render("Icon   ")+val(d.Icon))
+	}
+	fp := "no"
+	if d.FastPair {
+		fp = "yes"
+		if d.HasModelID {
+			fp = "yes · " + d.ModelIDString()
+		}
+	}
+	fpStyle := muted
+	if d.FastPair {
+		fpStyle = warn
+	}
+	rows = append(rows, " "+sec.Render("FastPr ")+fpStyle.Render(v.Marquee.Truncate(fp, valW)))
+	if len(d.ServiceData) > 0 {
+		rows = append(rows, " "+sec.Render("SvcData")+muted.Render(fmt.Sprintf("%d bytes", len(d.ServiceData))))
+	}
+	var flags []string
+	if d.Paired {
+		flags = append(flags, "paired")
+	}
+	if d.Trusted {
+		flags = append(flags, "trusted")
+	}
+	if d.Connected {
+		flags = append(flags, "connected")
+	}
+	flagStyle := muted
+	if len(flags) > 0 {
+		flagStyle = ok
+	}
+	rows = append(rows, " "+sec.Render("Flags  ")+flagStyle.Render(v.Marquee.Truncate(joinNonEmpty(" · ", flags...), valW)))
+	rows = append(rows, " "+sec.Render("HCI    ")+val(v.EffectiveHCI()))
+	rows = append(rows, " "+sec.Render("Mode   ")+val(v.ScanMode.String()))
+	for _, u := range d.UUIDs {
+		rows = append(rows, " "+sec.Render("UUID   ")+muted.Render(v.Marquee.Truncate(u, valW)))
+	}
+	return rows
+}
+
+func (v BluetoothScanView) renderDetail(w, h int, pal theme.Palette, focused bool) []string {
+	dev, ok := v.SelectedDevice()
+	if !ok {
+		return v.renderList(w, h, pal, focused)
+	}
+
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	okStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+
+	action := muted.Render("[Esc]") + okStyle.Render("Back")
+	actionW := lipgloss.Width(action)
+	titleW := max(6, w-actionW-3)
+	header := " " + FitLine(muted.Render("◂ ")+accent.Render(v.Marquee.Truncate(dev.DisplayName(), max(4, titleW-2))), titleW) + " " + action + " "
+	if h <= 1 {
+		return v.Marquee.SplitLinesPadded([]string{header}, w, h)
+	}
+
+	showBottom := (h >= 10 || v.Note != "") && h >= 4
+	detailH := h - 1
+	if showBottom {
+		detailH = h - 2
+	}
+
+	rows := v.buildDetailRows(w, pal, dev)
+	maxS := max(0, len(rows)-detailH)
+	sc := min(v.DetailScroll, maxS)
+	end := min(len(rows), sc+detailH)
+
+	lines := []string{header}
+	lines = append(lines, rows[sc:end]...)
+
+	if showBottom {
+		for len(lines) < h-1 {
+			lines = append(lines, "")
+		}
+		if v.Note != "" {
+			st := okStyle
+			if v.NoteIsErr {
+				st = danger
+			}
+			lines = append(lines, " "+st.Render(v.Marquee.Truncate(v.Note, max(6, w-2))))
+		} else {
+			lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:scroll  Esc:back", max(6, w-2))))
+		}
+	}
+
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v BluetoothScanView) renderRunning(w, h int, pal theme.Palette) []string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+
+	label := v.attackLabel()
+	lines := []string{
+		" " + accent.Render(v.Marquee.Truncate("Attack · "+label, max(6, w-2))),
+	}
+	target := v.RunDevice.DisplayName() + " · " + v.RunDevice.Address
+	lines = append(lines, " "+sec.Render("Target ")+txt.Render(v.Marquee.Truncate(target, max(6, w-9))))
+
+	if h >= 4 {
+		state := muted.Render("done")
+		phase := ""
+		switch {
+		case v.RunActive && v.RunStopping:
+			state = warn.Render("stopping…")
+		case v.RunActive:
+			state = warn.Render("running")
+			phase = fmt.Sprintf("%ds", int(v.RunElapsed.Seconds()))
+		case v.RunErr != "":
+			state = danger.Render("failed")
+		case v.Note == "Stopped":
+			state = muted.Render("stopped")
+		default:
+			state = ok.Render("done")
+		}
+		line := " " + state
+		if phase != "" {
+			line += " " + muted.Render(v.Marquee.Truncate(phase, max(4, w-4-lipgloss.Width(state))))
+		}
+		lines = append(lines, line)
+	}
+
+	if v.RunRecordPath != "" && h >= 5 {
+		lines = append(lines, " "+sec.Render("Record ")+muted.Render(v.Marquee.Truncate(v.RunRecordPath, max(6, w-9))))
+	}
+	if v.RunErr != "" {
+		lines = append(lines, " "+danger.Render(v.Marquee.Truncate(v.RunErr, max(6, w-2))))
+	}
+
+	outH := h - len(lines) - 1
+	if outH > 0 {
+		if len(v.RunLines) == 0 {
+			lines = append(lines, " "+muted.Render("Starting…"))
+		} else {
+			start := max(0, len(v.RunLines)-outH)
+			for _, raw := range v.RunLines[start:] {
+				lines = append(lines, " "+muted.Render(v.Marquee.Truncate(raw, max(6, w-2))))
+			}
+		}
+	}
+
+	for len(lines) < h-1 {
+		lines = append(lines, "")
+	}
+	hint := "Esc:back"
+	if v.RunActive {
+		hint = "Esc:stop"
+	}
+	lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
+
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
