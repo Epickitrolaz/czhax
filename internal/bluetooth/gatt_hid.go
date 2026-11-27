@@ -702,70 +702,99 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 		return resolved[p]
 	}
 
+	pairedState := make(map[dbus.ObjectPath]bool)
+
 	report := func(path dbus.ObjectPath, connected bool) {
 		prev, seen := state[path]
-		if seen && prev == connected {
-			return
-		}
-		if len(state) > 96 {
-			// Drop stale entries from long discovery runs.
-			state = make(map[dbus.ObjectPath]bool)
-		}
-		state[path] = connected
 
 		if connected {
+			// Resolve identity first: the Paired flag can flip a moment after the
+			// link comes up, and the UI should show it without waiting for a
+			// disconnect.
+			addr, name, paired := addrFromPath(path), "", false
+			if a, n, p := readDeviceInfo(conn, path); a != "" {
+				addr, name, paired = a, n, p
+			}
+			if name == "" {
+				name = addr
+			}
+			linkChanged := !seen || !prev
+			pairedChanged := pairedState[path] != paired
+			if len(state) > 96 {
+				// Drop stale entries from long discovery runs.
+				state = make(map[dbus.ObjectPath]bool)
+			}
+			state[path] = true
+			pairedState[path] = paired
+			if !linkChanged && !pairedChanged {
+				return
+			}
 			active = path
-			// A BR/EDR connection never triggers GATT discovery, and that is the
-			// most common reason a PC appears to connect and then drops us.
-			go func(p dbus.ObjectPath) {
-				select {
-				case <-ctx.Done():
-				case <-done:
-				case <-time.After(6 * time.Second):
-					if !isResolved(p) && logf != nil {
-						logf("No GATT discovery yet: the host may have connected over Classic BR/EDR")
+			if linkChanged {
+				// A BR/EDR connection never triggers GATT discovery, and that is
+				// the most common reason a PC appears to connect and then drops us.
+				go func(p dbus.ObjectPath) {
+					select {
+					case <-ctx.Done():
+					case <-done:
+					case <-time.After(6 * time.Second):
+						if !isResolved(p) && logf != nil {
+							logf("No GATT discovery yet: the host may have connected over Classic BR/EDR")
+						}
 					}
+				}(path)
+			}
+			if emit != nil {
+				emit(EmuEvent{
+					Kind:       "peer",
+					Connected:  true,
+					PeerAddr:   addr,
+					PeerName:   name,
+					PeerPaired: paired,
+				})
+			}
+			if logf != nil && linkChanged {
+				if paired {
+					logf("Connected: %s (%s), paired", name, addr)
+				} else {
+					logf("Connected: %s (%s)", name, addr)
 				}
-			}(path)
-		} else if active != path {
+			}
+			return
+		}
+
+		// Disconnected (or "not connected" report for a discovered device).
+		if seen && !prev {
+			return
+		}
+		state[path] = false
+		pairedState[path] = false
+		if active != path {
 			// Discovery churn for unrelated devices is not interesting.
 			return
-		} else {
-			active = ""
 		}
-
+		active = ""
 		addr, name := addrFromPath(path), ""
-		if connected {
-			if a, n := readDeviceInfo(conn, path); a != "" {
-				addr, name = a, n
-			}
-		}
-		if name == "" {
-			name = addr
-		}
 		if emit != nil {
-			emit(EmuEvent{
-				Kind:      "peer",
-				Connected: connected,
-				PeerAddr:  addr,
-				PeerName:  name,
-			})
+			emit(EmuEvent{Kind: "peer", Connected: false, PeerAddr: addr, PeerName: name})
 		}
 		if logf != nil {
-			if connected {
-				logf("Connected: %s (%s)", name, addr)
-			} else {
-				logf("Disconnected: %s (%s)", name, addr)
-			}
+			logf("Disconnected: %s (%s)", name, addr)
 		}
-		if !connected && onDisconnect != nil {
+		if onDisconnect != nil {
 			onDisconnect()
 		}
 	}
 
-	// Catch a peer that connected before we finished initialising.
-	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	if err := conn.Object(bluezService, "/").Call(dbusObjMgrIface+".GetManagedObjects", 0).Store(&objs); err == nil {
+	// sweep re-reads the object tree. Signals can be missed (a peer that connects
+	// before the match rules are active, a bus that drops a PropertyChanged), so
+	// a slow poll keeps the on-screen link state honest.
+	sweep := func() {
+		var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+		if err := conn.Object(bluezService, "/").Call(dbusObjMgrIface+".GetManagedObjects", 0).Store(&objs); err != nil {
+			return
+		}
+		live := make(map[dbus.ObjectPath]bool, len(objs))
 		for p, ifaces := range objs {
 			if !strings.HasPrefix(string(p), prefix) {
 				continue
@@ -774,27 +803,41 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 			if !ok {
 				continue
 			}
+			live[p] = true
+			connected := false
 			if v, ok2 := devProps["Connected"]; ok2 {
-				if c, _ := v.Value().(bool); c {
-					report(p, true)
-				}
+				connected, _ = v.Value().(bool)
 			}
+			report(p, connected)
 			if v, ok2 := devProps["ServicesResolved"]; ok2 {
 				if r, _ := v.Value().(bool); r {
 					markResolved(p)
 				}
 			}
 		}
+		for p, connected := range state {
+			if connected && !live[p] {
+				report(p, false)
+			}
+		}
 	}
+
+	// Catch a peer that connected before we finished initialising.
+	sweep()
+
+	ticker := time.NewTicker(time.Second)
 
 	go func() {
 		defer conn.RemoveSignal(ch)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-done:
 				return
+			case <-ticker.C:
+				sweep()
 			case sig, ok := <-ch:
 				if !ok || sig == nil {
 					return
@@ -883,7 +926,7 @@ func addrFromPath(p dbus.ObjectPath) string {
 	return strings.ReplaceAll(base[idx+5:], "_", ":")
 }
 
-func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string) {
+func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string, paired bool) {
 	obj := conn.Object(bluezService, devPath)
 	var props map[string]dbus.Variant
 	if err := obj.Call(dbusPropsIface+".GetAll", 0, bluezDeviceIface).Store(&props); err == nil {
@@ -898,6 +941,9 @@ func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string
 				name, _ = v.Value().(string)
 			}
 		}
+		if v, ok := props["Paired"]; ok {
+			paired, _ = v.Value().(bool)
+		}
 	}
 	if addr == "" {
 		addr = addrFromPath(devPath)
@@ -905,7 +951,7 @@ func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string
 	if name == "" {
 		name = addr
 	}
-	return addr, name
+	return addr, name, paired
 }
 
 // --- GATT HID Application ---
@@ -997,7 +1043,7 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs fun
 		app.kbChar = &gattChar{
 			conn: conn, path: p, service: svc0,
 			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
-			value: make([]byte, 9), label: "Keyboard",
+			value: make([]byte, 8), label: "Keyboard",
 		}
 		app.addChar(app.kbChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDKeyboard, 0x01})
@@ -1009,15 +1055,16 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs fun
 			uuid: uuidHIDReport, flags: app.reportFlags("write", "write-without-response"),
 			value: []byte{0x00}, label: "Keyboard LEDs",
 			onWrite: func(v []byte) {
-				if onLEDs == nil {
+				if onLEDs == nil || len(v) == 0 {
 					return
 				}
-				// Output report layout: [report ID, LED bits].
+				// HOGP strips the report ID, so the LED bits are the first byte;
+				// accept the raw HID form too in case a host leaves it in.
 				if len(v) >= 2 && v[0] == HIDReportIDKeyboard {
 					onLEDs(v[1])
-				} else if len(v) == 1 {
-					onLEDs(v[0])
+					return
 				}
+				onLEDs(v[0])
 			},
 		})
 		app.addDesc(outPath, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDKeyboard, 0x02})
@@ -1027,7 +1074,7 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs fun
 		app.mouseChar = &gattChar{
 			conn: conn, path: p, service: svc0,
 			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
-			value: make([]byte, 5), label: "Mouse",
+			value: make([]byte, 4), label: "Mouse",
 		}
 		app.addChar(app.mouseChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDMouse, 0x01})
@@ -1037,7 +1084,7 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs fun
 		app.consChar = &gattChar{
 			conn: conn, path: p, service: svc0,
 			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
-			value: make([]byte, 3), label: "Media",
+			value: make([]byte, 2), label: "Media",
 		}
 		app.addChar(app.consChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDConsumer, 0x01})
@@ -1047,7 +1094,7 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs fun
 		app.padChar = &gattChar{
 			conn: conn, path: p, service: svc0,
 			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
-			value: make([]byte, 5), label: "Gamepad",
+			value: make([]byte, 4), label: "Gamepad",
 		}
 		app.addChar(app.padChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDGamepad, 0x01})
@@ -1166,28 +1213,31 @@ func (a *hidGattApp) unregister(adapter dbus.BusObject) {
 	_ = adapter.Call(bluezGattMgrIface+".UnregisterApplication", 0, dbusAppPath).Err
 }
 
-// Every report in the composite map carries a Report ID, so each notification
-// payload is "<report ID><report bytes>". Hosts silently drop reports whose
-// leading byte is not one of the advertised IDs, so build them in one place.
+// HOGP 1.0 §4.8.1: the Report ID is NOT part of the Report characteristic
+// value. The host prepends the ID taken from the Report Reference descriptor
+// before handing the data to the HID stack, so including it here shifts every
+// field by one byte (keys gain a phantom Ctrl, the mouse X lands in Y, ...).
+// Payloads below are the bare report, exactly as a HID stack expects after the
+// frame is rebuilt.
 
-// keyboardReport builds Report ID 1: modifiers, reserved, 6 key slots.
+// keyboardReport is the keyboard report: modifiers, reserved, 6 key slots.
 func keyboardReport(mods, code uint8) []byte {
-	return []byte{HIDReportIDKeyboard, mods, 0x00, code, 0, 0, 0, 0, 0}
+	return []byte{mods, 0x00, code, 0, 0, 0, 0, 0}
 }
 
-// mouseReport builds Report ID 2: buttons, X, Y, wheel.
+// mouseReport is the mouse report: buttons, X, Y, wheel.
 func mouseReport(buttons uint8, dx, dy, wheel int8) []byte {
-	return []byte{HIDReportIDMouse, buttons, byte(dx), byte(dy), byte(wheel)}
+	return []byte{buttons, byte(dx), byte(dy), byte(wheel)}
 }
 
-// consumerReport builds Report ID 3: one 16-bit consumer usage.
+// consumerReport is the consumer report: one 16-bit consumer usage.
 func consumerReport(usage uint16) []byte {
-	return []byte{HIDReportIDConsumer, byte(usage), byte(usage >> 8)}
+	return []byte{byte(usage), byte(usage >> 8)}
 }
 
-// gamepadReport builds Report ID 4: 16 buttons, X, Y.
+// gamepadReport is the gamepad report: 16 buttons, X, Y.
 func gamepadReport(buttons uint16, dx, dy int8) []byte {
-	return []byte{HIDReportIDGamepad, byte(buttons), byte(buttons >> 8), byte(dx), byte(dy)}
+	return []byte{byte(buttons), byte(buttons >> 8), byte(dx), byte(dy)}
 }
 
 func (a *hidGattApp) sendKeyTap(code, mods uint8) error {
@@ -1198,7 +1248,9 @@ func (a *hidGattApp) sendKeyTap(code, mods uint8) error {
 	if err := a.kbChar.notify(down); err != nil {
 		return err
 	}
-	time.Sleep(12 * time.Millisecond)
+	// Long enough that a host with a 30-50 ms connection interval cannot
+	// coalesce the press away, short enough to stay responsive.
+	time.Sleep(30 * time.Millisecond)
 	up := keyboardReport(0, 0)
 	return a.kbChar.notify(up)
 }
@@ -1235,7 +1287,7 @@ func (a *hidGattApp) sendConsumer(usage uint16) error {
 	if err := a.consChar.notify(down); err != nil {
 		return err
 	}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	return a.consChar.notify(consumerReport(0))
 }
 

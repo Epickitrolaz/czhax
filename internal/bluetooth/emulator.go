@@ -223,6 +223,7 @@ type EmuEvent struct {
 	Connected   bool   `json:"connected,omitempty"`
 	PeerAddr    string `json:"peer_addr,omitempty"`
 	PeerName    string `json:"peer_name,omitempty"`
+	PeerPaired  bool   `json:"peer_paired,omitempty"`
 	Transport   string `json:"transport,omitempty"`
 	SampleRate  int    `json:"sample_rate,omitempty"`
 	Channels    int    `json:"channels,omitempty"`

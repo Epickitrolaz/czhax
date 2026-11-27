@@ -130,6 +130,7 @@ type BluetoothEmuView struct {
 	Spec        bluetooth.EmuProfileSpec
 	Ready       bool
 	Connected   bool
+	PeerPaired  bool
 	PeerAddr    string
 	PeerName    string
 	Transport   string
@@ -368,6 +369,7 @@ func (v *BluetoothEmuView) StartEmulation() (context.Context, int, bluetooth.Emu
 	v.Stopping = false
 	v.Ready = false
 	v.Connected = false
+	v.PeerPaired = false
 	v.PeerAddr = ""
 	v.PeerName = ""
 	v.Transport = ""
@@ -452,6 +454,7 @@ func (v *BluetoothEmuView) ApplyEvent(seq int, ev bluetooth.EmuEvent) {
 		v.LEDs = ev.LEDs
 	case "peer":
 		v.Connected = ev.Connected
+		v.PeerPaired = ev.Connected && ev.PeerPaired
 		v.PeerAddr = ev.PeerAddr
 		v.PeerName = ev.PeerName
 	case "audio":
@@ -875,7 +878,11 @@ func (v BluetoothEmuView) renderActive(w, h int, pal theme.Palette, focused bool
 		if peer == "" {
 			peer = v.PeerAddr
 		}
-		sub = ok.Render(v.Marquee.FitLine(fmt.Sprintf("Peer: %s  TX:%d", peer, v.TXCount), w))
+		state := "connected"
+		if v.PeerPaired {
+			state = "paired"
+		}
+		sub = ok.Render(v.Marquee.FitLine(fmt.Sprintf("%s: %s · TX %d", state, peer, v.TXCount), w))
 	} else if v.Ready {
 		sub = warn.Render(v.Marquee.FitLine(fmt.Sprintf("Advertising (%s) · pair from host", v.EffectiveHCI()), w))
 	} else {
