@@ -21,6 +21,7 @@ import (
 	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/localscan"
 	"github.com/czhax/czhax/internal/power"
+	"github.com/czhax/czhax/internal/sdr"
 	"github.com/czhax/czhax/internal/sysinfo"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/updater"
@@ -321,6 +322,7 @@ type AppModel struct {
 	WifiEvil      WifiEvilView
 	Local         LocalView
 	IR            IRView
+	SDR           SDRView
 	Bluetooth     BluetoothView
 	BluetoothScan BluetoothScanView
 	BluetoothEmu  BluetoothEmuView
@@ -361,6 +363,7 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		WifiEvil:      NewWifiEvilView(),
 		Local:         NewLocalView(),
 		IR:            NewIRView(cfgPath),
+		SDR:           NewSDRView(root, workdir.Captures(root), sdr.DefaultBookmarksPath()),
 		Bluetooth:     NewBluetoothView(),
 		BluetoothScan: NewBluetoothScanView(),
 		BluetoothEmu:  NewBluetoothEmuView(),
@@ -399,7 +402,7 @@ func (m *AppModel) resetMarquee() tea.Cmd {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), startHWWatcherCmd(), marqueeStartCmd(m.MarqueeGen)}
+	cmds := []tea.Cmd{m.scheduleTick(), collectWifiCmd(), collectBluetoothCmd(), collectLocalIfacesCmd(), probeSDRCmd(false), startHWWatcherCmd(), marqueeStartCmd(m.MarqueeGen)}
 	if isLinuxConsole() {
 		cmds = append(cmds, scheduleStartupRedraw(0))
 	}
@@ -912,6 +915,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewWiFi {
 			cmds = append(cmds, collectWifiCmd(), collectLocalIfacesCmd())
 		}
+		if m.ActiveView == ViewSDR && !m.SDR.AnyActive() && !m.SDR.Probing {
+			cmds = append(cmds, probeSDRCmd(true))
+		}
 		return m, tea.Batch(cmds...)
 
 	case wifiRefreshedMsg:
@@ -1360,6 +1366,70 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, localScanTickCmd()
 
+	case sdrProbeDoneMsg:
+		m.SDR.SetProbeResult(msg.st)
+		return m, nil
+
+	case sdrRadioUpdateMsg:
+		if !m.SDR.RadioActive || msg.seq != m.SDR.RadioSeq {
+			return m, nil
+		}
+		m.SDR.ApplyRadioUpdate(msg.seq, msg.u)
+		return m, waitSDRRadioUpdateCmd(msg.seq, m.SDR.RadioUpdate)
+
+	case sdrRadioDoneMsg:
+		m.SDR.FinishRadio(msg.seq, msg.err)
+		if msg.err != nil && !isSdrCanceled(msg.err) {
+			return m, tea.Batch(m.setStatus("SDR radio failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("SDR radio stopped"), m.resetMarquee())
+
+	case sdrSpecFrameMsg:
+		if !m.SDR.SpecActive || msg.seq != m.SDR.SpecSeq {
+			return m, nil
+		}
+		m.SDR.ApplySpecFrame(msg.seq, msg.frame)
+		return m, waitSDRSpecFrameCmd(msg.seq, m.SDR.SpecFrameCh)
+
+	case sdrSpecDoneMsg:
+		m.SDR.FinishSpec(msg.seq, msg.frame, msg.hasFrame, msg.err)
+		if msg.err != nil && !isSdrCanceled(msg.err) {
+			return m, tea.Batch(m.setStatus("Spectrum failed"), m.resetMarquee())
+		}
+		if msg.hasFrame {
+			return m, tea.Batch(m.setStatus("Peak "+sdr.FormatFreqShort(msg.frame.PeakHz)), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("Spectrum stopped"), m.resetMarquee())
+
+	case sdrISMPacketMsg:
+		if !m.SDR.ISMActive || msg.seq != m.SDR.ISMSeq {
+			return m, nil
+		}
+		m.SDR.AppendISMPacket(msg.seq, msg.pkt)
+		return m, waitSDRISMPacketCmd(msg.seq, m.SDR.ISMPktCh)
+
+	case sdrISMDoneMsg:
+		m.SDR.FinishISM(msg.seq, msg.err)
+		if msg.err != nil && !isSdrCanceled(msg.err) {
+			return m, tea.Batch(m.setStatus("ISM decoder failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("ISM decoder stopped"), m.resetMarquee())
+
+	case sdrTickMsg:
+		if m.SDR.RadioActive && !m.SDR.RadioStarted.IsZero() {
+			m.SDR.RadioElapsed = time.Since(m.SDR.RadioStarted)
+		}
+		if m.SDR.SpecActive && !m.SDR.SpecStarted.IsZero() {
+			m.SDR.SpecElapsed = time.Since(m.SDR.SpecStarted)
+		}
+		if m.SDR.ISMActive && !m.SDR.ISMStarted.IsZero() {
+			m.SDR.ISMElapsed = time.Since(m.SDR.ISMStarted)
+		}
+		if m.SDR.AnyActive() {
+			return m, sdrTickCmd()
+		}
+		return m, nil
+
 	case hwEventMsg:
 		nextCmd := waitHWEventCmd(msg.ch)
 		if !m.OSDMuteUntil.IsZero() && time.Now().Before(m.OSDMuteUntil) {
@@ -1576,6 +1646,16 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.BluetoothEmu.StopEmulation()
 		return m, m.setStatus("Stopping Bluetooth emulator...")
 	}
+	if m.SDR.AnyActive() && (k == "ctrl+c" || k == "q") {
+		m.SDR.StopAll()
+		return m, m.setStatus("Stopping SDR...")
+	}
+	if m.Focus == FocusContent && m.ActiveView == ViewSDR {
+		m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+		if m.SDR.IsTextInput() {
+			return m.handleSDRTextKey(k, msg)
+		}
+	}
 	if m.Focus == FocusContent && m.ActiveView == ViewBluetooth && m.ActiveTabs[ViewBluetooth] == BTTabEmu && m.BluetoothEmu.CapturesDirectKeys() {
 		return m.handleBluetoothEmuDirectKey(msg)
 	}
@@ -1738,6 +1818,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.setStatus("IR refreshed")
 		}
+		if m.ActiveView == ViewSDR && m.Focus == FocusContent {
+			if m.SDR.AnyActive() {
+				return m, m.setStatus("SDR capture active")
+			}
+			m.SDR.Probing = true
+			return m, tea.Batch(m.setStatus("Probing RTL-SDR..."), probeSDRCmd(false))
+		}
 		m.Snap = sysinfo.Collect()
 		m.System.RefreshBootState()
 		if len(m.Wifi.Interfaces) == 0 {
@@ -1812,6 +1899,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
 				}
 				return m, nil
+			} else if m.ActiveView == ViewSDR {
+				m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+				if !m.SDR.AnyActive() && !m.SDR.Probing {
+					m.SDR.Probing = true
+					return m, probeSDRCmd(false)
+				}
+				return m, nil
 			} else if m.ActiveView == ViewStatus {
 				switch m.ActiveTabs[ViewStatus] {
 				case StatusTabWiFi:
@@ -1835,6 +1929,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.IR.RemoteErr = ""
 			m.IR.IndexLoading = true
 			return m, tea.Batch(m.setStatus("Indexing IR databases..."), irIndexCmd(m.IR.Roots))
+		}
+		if m.ActiveView == ViewSDR {
+			m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+			if !m.SDR.AnyActive() && !m.SDR.Probing {
+				return m, probeSDRCmd(true)
+			}
+			return m, nil
 		}
 		if m.ActiveView == ViewLocal {
 			return m, collectLocalIfacesCmd()
@@ -2100,6 +2201,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	if m.ActiveView == ViewIR {
 		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 	}
+	if m.ActiveView == ViewSDR {
+		m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+	}
 	if m.ActiveView == ViewSystem && m.System.Confirm != "" {
 		action := m.System.Confirm
 		switch k {
@@ -2160,6 +2264,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.ActiveView == ViewIR && m.IR.HandleEsc() {
+			return m, nil
+		}
+		if m.ActiveView == ViewSDR && m.SDR.HandleEsc() {
 			return m, nil
 		}
 		m.Focus = FocusTabs
@@ -3004,6 +3111,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ViewSDR:
+		return m.handleSDRKey(k)
+
 	case ViewStatus:
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
@@ -3163,6 +3273,9 @@ func (m *AppModel) cycleTab(delta int) {
 	if m.ActiveView == ViewIR {
 		m.IR.Tab = IRTab(m.ActiveTabs[ViewIR])
 	}
+	if m.ActiveView == ViewSDR {
+		m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+	}
 }
 
 func (m AppModel) isUp(k string) bool {
@@ -3285,6 +3398,12 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		irView.ASCII = m.Cfg.Border == config.BorderAscii
 		irView.Marquee = mq
 		mainLines = irView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+	case m.ActiveView == ViewSDR:
+		sdrView := m.SDR
+		sdrView.Tab = SDRTab(m.ActiveTabs[ViewSDR])
+		sdrView.ASCII = m.Cfg.Border == config.BorderAscii
+		sdrView.Marquee = mq
+		mainLines = sdrView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewSystem:
 		sysView := m.System
 		sysView.Marquee = mq
@@ -3574,6 +3693,9 @@ func (m AppModel) currentHints() []Hint {
 				{Key: "Esc", Desc: "up"},
 			}
 		}
+	}
+	if m.ActiveView == ViewSDR {
+		return m.sdrHints()
 	}
 	if m.ActiveView == ViewIR {
 		switch m.IR.Tab {

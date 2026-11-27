@@ -20,6 +20,7 @@ import (
 	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/oneshot"
 	"github.com/czhax/czhax/internal/power"
+	"github.com/czhax/czhax/internal/sdr"
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
 	"github.com/czhax/czhax/internal/wifi"
@@ -275,6 +276,25 @@ func main() {
 		}
 		if hw.Err != "" {
 			fmt.Fprintln(os.Stderr, "IR: "+hw.Err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "sdr" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		st := sdr.Probe(ctx, false)
+		fmt.Printf("RTL-SDR devices: %d\n", len(st.Devices))
+		for _, d := range st.Devices {
+			fmt.Printf("  #%d %s:%s %s (tuner=%s dvb=%v)\n",
+				d.Index, d.VendorID, d.ProductID, d.Label(), valueOrNone(d.Tuner), d.DVBDriver)
+		}
+		fmt.Printf("Tools: rtl_fm=%s rtl_sdr=%s rtl_power=%s rtl_433=%s player=%s\n",
+			valueOrNone(st.Tools.RTLFM), valueOrNone(st.Tools.RTLSDR),
+			valueOrNone(st.Tools.RTLPower), valueOrNone(st.Tools.RTL433), valueOrNone(st.Tools.Player))
+		if st.Err != "" {
+			fmt.Fprintln(os.Stderr, "SDR: "+st.Err)
 			os.Exit(1)
 		}
 		return

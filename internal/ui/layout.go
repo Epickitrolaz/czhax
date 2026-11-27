@@ -14,6 +14,7 @@ const (
 	ViewWiFi
 	ViewBluetooth
 	ViewIR
+	ViewSDR
 	ViewLocal
 	ViewFiles
 	ViewSystem
@@ -58,6 +59,7 @@ var TopViews = []ViewDef{
 	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan", "Spam", "Evil"}},
 	{ID: ViewBluetooth, Name: "BT", Short3: "BT", Tabs: []string{"Scan", "Emu"}},
 	{ID: ViewIR, Name: "IR", Short3: "IR", Tabs: []string{"Remote", "Learn", "Browse"}},
+	{ID: ViewSDR, Name: "SDR", Short3: "SDR", Tabs: []string{"Radio", "Spec", "433"}},
 	{ID: ViewLocal, Name: "Local", Short3: "Loc", Tabs: []string{"Scan"}},
 	{ID: ViewFiles, Name: "Files", Short3: "Fil", Tabs: []string{"Files"}},
 	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},

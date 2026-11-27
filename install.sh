@@ -248,6 +248,7 @@ setup_packages() {
     aircrack-ng hcxtools hcxdumptool mdk4 pixiewps reaver tshark nmap
     macchanger iw wireless-tools rfkill hostapd dnsmasq iptables bluez bluez-tools
     bluez-deprecated-tools bettercap usbutils pciutils alsa-utils ffmpeg mpv
+    rtl-sdr rtl-433
   )
   local avail=() p
   apt-get update -qq
