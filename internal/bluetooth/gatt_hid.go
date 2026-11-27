@@ -81,10 +81,6 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	unregAgent := registerEmuAgent(conn, agent, logf)
 	defer unregAgent()
 
-	// Watch peer connections/disconnections on this adapter.
-	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, logf)
-	defer stopPeerWatch()
-
 	var (
 		hidApp   *hidGattApp
 		a2dpSink *a2dpSinkService
@@ -95,16 +91,28 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 
 	// Register HID GATT application if enabled.
 	if spec.IsHID {
-		hidApp = newHIDGattApp(conn, spec, func(leds uint8) {
-			if emit != nil {
-				emit(EmuEvent{Kind: "state", LEDs: leds})
-			}
-		}, logf)
+		build := func(secure bool) *hidGattApp {
+			return newHIDGattApp(conn, spec, secure, func(leds uint8) {
+				if emit != nil {
+					emit(EmuEvent{Kind: "led", LEDs: leds})
+				}
+			}, logf)
+		}
+		hidApp = build(true)
 		if err := hidApp.register(adapterObj); err != nil {
-			return fmt.Errorf("register GATT HID: %w", err)
+			hidApp.unregister(adapterObj)
+			logf("Secure HID rejected (%v), falling back to an open link", err)
+			hidApp = build(false)
+			if err2 := hidApp.register(adapterObj); err2 != nil {
+				return fmt.Errorf("register GATT HID: %w", err2)
+			}
 		}
 		defer hidApp.unregister(adapterObj)
-		logf("GATT HID service active (%s)", spec.Label)
+		if hidApp.secure {
+			logf("GATT HID service active (%s), reports need a paired link", spec.Label)
+		} else {
+			logf("GATT HID service active (%s), reports on an open link", spec.Label)
+		}
 	}
 
 	// Register A2DP Sink (and optional HFP) if enabled.
@@ -128,7 +136,8 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 		}
 	}
 
-	// Register BLE Advertisement (for HID / Custom / discoverability).
+	// Register the BLE Advertisement before watching peers: the watcher needs to
+	// be able to re-arm advertising the moment a peer drops off.
 	var uuids []string
 	if spec.IsHID {
 		uuids = []string{"1812"}
@@ -138,8 +147,22 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	if u := strings.TrimSpace(cfg.CustomUUID); u != "" {
 		uuids = []string{u}
 	}
-	unregAdv := registerLEAdvertisement(conn, adapterObj, spec.DefaultName, spec.Appearance, uuids, logf)
-	defer unregAdv()
+	adv := newLEAdvertiser(conn, adapterObj, spec.DefaultName, spec.Appearance, uuids, logf)
+	advErr := adv.register()
+	if advErr != nil {
+		logf("LE adv warning: %v", advErr)
+	}
+	stopAdvKick := adv.start(ctx)
+	if advErr != nil {
+		adv.kickRearm() // retry once the controller has settled
+	}
+	defer stopAdvKick()
+	defer adv.close()
+
+	// Watch peer connections/disconnections. A disconnect re-arms advertising so
+	// the host can reconnect (BlueZ does not always resume it on its own).
+	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, adv.kickRearm, logf)
+	defer stopPeerWatch()
 
 	// Set Class of Device after BlueZ profile/endpoint/advertisement registration
 	// so BlueZ doesn't overwrite Major/Minor device class during service init.
@@ -345,8 +368,11 @@ func setHCIClass(hciName, classHex string, logf func(string, ...any)) {
 	if _, err := exec.LookPath("hciconfig"); err != nil {
 		return
 	}
-	if out, err := exec.Command("hciconfig", hciName, "class", classHex).CombinedOutput(); err != nil && logf != nil {
-		logf("Class %s warning: %s", classHex, strings.TrimSpace(string(out)))
+	if _, err := exec.Command("hciconfig", hciName, "class", classHex).CombinedOutput(); err != nil && logf != nil {
+		// bluetoothd owns the HCI socket, so hciconfig cannot write the class at
+		// runtime. BLE hosts use the advertised Appearance instead, so this is
+		// cosmetic (it only affects BR/EDR inquiry responses).
+		logf("Note: BR/EDR device class left at the adapter default")
 	}
 }
 
@@ -428,90 +454,339 @@ func registerEmuAgent(conn *dbus.Conn, agent *emuAgent, logf func(string, ...any
 
 // --- LE Advertisement (org.bluez.LEAdvertisement1) ---
 
-type emuAdvertisement struct{}
+// leAdvertiser owns the BLE advertisement and keeps it alive. BlueZ stops
+// advertising as soon as a central connects and only re-arms it if the
+// application asks again, so without this the device disappears for good after
+// the first connection.
+type leAdvertiser struct {
+	conn       *dbus.Conn
+	adapter    dbus.BusObject
+	path       dbus.ObjectPath
+	name       string
+	shortName  string
+	appearance uint16
+	uuids      []string
+	logf       func(string, ...any)
 
-func (a *emuAdvertisement) Release() *dbus.Error { return nil }
+	mu         sync.Mutex
+	registered bool
+	closed     bool
+	kick       chan struct{}
+}
 
-func registerLEAdvertisement(conn *dbus.Conn, adapter dbus.BusObject, name string, appearance uint16, uuids []string, logf func(string, ...any)) func() {
-	adv := &emuAdvertisement{}
-	if err := conn.Export(adv, dbusAdvPath, "org.bluez.LEAdvertisement1"); err != nil {
-		if logf != nil {
-			logf("Adv export warning: %v", err)
-		}
-		return func() {}
-	}
-
-	tryRegister := func(localName string, app uint16, disc bool, svcUUIDs []string) error {
-		pmap := map[string]*prop.Prop{
-			"Type": {Value: "peripheral", Emit: prop.EmitConst},
-		}
-		if len(svcUUIDs) > 0 {
-			pmap["ServiceUUIDs"] = &prop.Prop{Value: svcUUIDs, Emit: prop.EmitConst}
-		}
-		if strings.TrimSpace(localName) != "" {
-			pmap["LocalName"] = &prop.Prop{Value: localName, Emit: prop.EmitConst}
-		}
-		if app != 0 {
-			pmap["Appearance"] = &prop.Prop{Value: app, Emit: prop.EmitConst}
-		}
-		if disc {
-			pmap["Discoverable"] = &prop.Prop{Value: true, Emit: prop.EmitConst}
-		}
-		if _, err := prop.Export(conn, dbusAdvPath, prop.Map{"org.bluez.LEAdvertisement1": pmap}); err != nil {
-			return err
-		}
-		return adapter.Call(bluezLEAdvMgrIface+".RegisterAdvertisement", 0, dbusAdvPath, map[string]dbus.Variant{}).Err
-	}
-
+func newLEAdvertiser(conn *dbus.Conn, adapter dbus.BusObject, name string, appearance uint16, uuids []string, logf func(string, ...any)) *leAdvertiser {
 	shortName := name
 	if len(shortName) > 16 {
 		shortName = shortName[:16]
 	}
+	a := &leAdvertiser{
+		conn:       conn,
+		adapter:    adapter,
+		path:       dbusAdvPath,
+		name:       name,
+		shortName:  shortName,
+		appearance: appearance,
+		uuids:      uuids,
+		logf:       logf,
+		kick:       make(chan struct{}, 1),
+	}
+	_ = conn.Export(a, dbusAdvPath, "org.bluez.LEAdvertisement1")
+	return a
+}
 
-	var regErr error
+// Release is called by BlueZ when it drops the advertisement (for example after
+// a peer connects). Re-arm so the host can reconnect later.
+func (a *leAdvertiser) Release() *dbus.Error {
+	a.mu.Lock()
+	a.registered = false
+	a.mu.Unlock()
+	a.kickRearm()
+	return nil
+}
+
+func (a *leAdvertiser) kickRearm() {
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		return
+	}
+	select {
+	case a.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (a *leAdvertiser) export(localName string, app uint16, disc bool, svc []string) error {
+	pmap := map[string]*prop.Prop{
+		"Type": {Value: "peripheral", Emit: prop.EmitConst},
+	}
+	if len(svc) > 0 {
+		pmap["ServiceUUIDs"] = &prop.Prop{Value: svc, Emit: prop.EmitConst}
+	}
+	if strings.TrimSpace(localName) != "" {
+		pmap["LocalName"] = &prop.Prop{Value: localName, Emit: prop.EmitConst}
+	}
+	if app != 0 {
+		pmap["Appearance"] = &prop.Prop{Value: app, Emit: prop.EmitConst}
+	}
+	if disc {
+		pmap["Discoverable"] = &prop.Prop{Value: true, Emit: prop.EmitConst}
+	}
+	_, err := prop.Export(a.conn, a.path, prop.Map{"org.bluez.LEAdvertisement1": pmap})
+	return err
+}
+
+// registerLocked tries progressively simpler advertisement payloads until BlueZ
+// accepts one (the controller rejects oversized or unsupported fields).
+func (a *leAdvertiser) registerLocked() error {
 	attempts := []struct {
 		name string
 		app  uint16
 		disc bool
 		uuid []string
 	}{
-		{name, appearance, true, uuids},
-		{shortName, appearance, true, uuids},
-		{shortName, appearance, false, uuids},
-		{shortName, 0, false, uuids},
-		{shortName, 0, false, nil},
+		{a.name, a.appearance, true, a.uuids},
+		{a.shortName, a.appearance, true, a.uuids},
+		{a.shortName, a.appearance, false, a.uuids},
+		{a.shortName, 0, false, a.uuids},
+		{a.shortName, 0, false, nil},
 	}
-	for _, a := range attempts {
-		regErr = tryRegister(a.name, a.app, a.disc, a.uuid)
-		if regErr == nil {
-			break
+	var lastErr error
+	for _, at := range attempts {
+		if err := a.export(at.name, at.app, at.disc, at.uuid); err != nil {
+			lastErr = err
+			continue
 		}
+		err := a.adapter.Call(bluezLEAdvMgrIface+".RegisterAdvertisement", 0, a.path, map[string]dbus.Variant{}).Err
+		if err == nil {
+			a.registered = true
+			return nil
+		}
+		lastErr = err
 	}
-	if regErr != nil && logf != nil {
-		logf("LE adv warning: %v", regErr)
-		return func() {}
+	a.registered = false
+	if lastErr == nil {
+		lastErr = errors.New("no advertisement variant was accepted")
 	}
-	return func() {
-		_ = adapter.Call(bluezLEAdvMgrIface+".UnregisterAdvertisement", 0, dbusAdvPath).Err
+	return lastErr
+}
+
+// register performs the first registration (called once at startup).
+func (a *leAdvertiser) register() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.registerLocked()
+}
+
+// rearm unregisters and registers the advertisement again so a peer that just
+// dropped off can reconnect.
+func (a *leAdvertiser) rearm() {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	wasRegistered := a.registered
+	a.registered = false
+	a.mu.Unlock()
+
+	// Unregister outside the lock: BlueZ answers with Release(), which needs it.
+	if wasRegistered {
+		_ = a.adapter.Call(bluezLEAdvMgrIface+".UnregisterAdvertisement", 0, a.path).Err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return
+	}
+	if err := a.registerLocked(); err != nil {
+		if a.logf != nil {
+			a.logf("LE adv rearm warning: %v", err)
+		}
+		return
+	}
+	if a.logf != nil {
+		a.logf("Advertising again (waiting for a connection)")
+	}
+}
+
+// start runs the re-arm worker and returns a stop function.
+func (a *leAdvertiser) start(ctx context.Context) func() {
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-a.kick:
+				// Give BlueZ a moment to finish the disconnect bookkeeping
+				// before competing with it for the advertising instance.
+				select {
+				case <-ctx.Done():
+					return
+				case <-done:
+					return
+				case <-time.After(750 * time.Millisecond):
+				}
+				a.rearm()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (a *leAdvertiser) close() {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	a.closed = true
+	reg := a.registered
+	a.registered = false
+	a.mu.Unlock()
+	if reg {
+		_ = a.adapter.Call(bluezLEAdvMgrIface+".UnregisterAdvertisement", 0, a.path).Err
 	}
 }
 
 // --- Peer connection watcher ---
 
-func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), logf func(string, ...any)) func() {
-	if err := conn.AddMatchSignal(
-		dbus.WithMatchSender(bluezService),
-		dbus.WithMatchInterface(dbusPropsIface),
-		dbus.WithMatchMember("PropertiesChanged"),
-		dbus.WithMatchArg(0, bluezDeviceIface),
-	); err != nil {
-		return func() {}
+func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), onDisconnect func(), logf func(string, ...any)) func() {
+	rules := [][]dbus.MatchOption{
+		{
+			dbus.WithMatchSender(bluezService),
+			dbus.WithMatchInterface(dbusPropsIface),
+			dbus.WithMatchMember("PropertiesChanged"),
+			dbus.WithMatchArg(0, bluezDeviceIface),
+		},
+		// ObjectManager signals come from "/" and carry the object path as the
+		// first argument, so they must not be filtered by path namespace.
+		{
+			dbus.WithMatchSender(bluezService),
+			dbus.WithMatchInterface(dbusObjMgrIface),
+			dbus.WithMatchMember("InterfacesAdded"),
+		},
+		{
+			dbus.WithMatchSender(bluezService),
+			dbus.WithMatchInterface(dbusObjMgrIface),
+			dbus.WithMatchMember("InterfacesRemoved"),
+		},
 	}
-	ch := make(chan *dbus.Signal, 32)
+	for _, r := range rules {
+		_ = conn.AddMatchSignal(r...)
+	}
+
+	ch := make(chan *dbus.Signal, 128)
 	conn.Signal(ch)
 
 	prefix := string(adapterPath) + "/dev_"
+	state := make(map[dbus.ObjectPath]bool)
+	var active dbus.ObjectPath
 	done := make(chan struct{})
+
+	var resolvedMu sync.Mutex
+	resolved := make(map[dbus.ObjectPath]bool)
+	markResolved := func(p dbus.ObjectPath) {
+		resolvedMu.Lock()
+		resolved[p] = true
+		resolvedMu.Unlock()
+	}
+	isResolved := func(p dbus.ObjectPath) bool {
+		resolvedMu.Lock()
+		defer resolvedMu.Unlock()
+		return resolved[p]
+	}
+
+	report := func(path dbus.ObjectPath, connected bool) {
+		prev, seen := state[path]
+		if seen && prev == connected {
+			return
+		}
+		if len(state) > 96 {
+			// Drop stale entries from long discovery runs.
+			state = make(map[dbus.ObjectPath]bool)
+		}
+		state[path] = connected
+
+		if connected {
+			active = path
+			// A BR/EDR connection never triggers GATT discovery, and that is the
+			// most common reason a PC appears to connect and then drops us.
+			go func(p dbus.ObjectPath) {
+				select {
+				case <-ctx.Done():
+				case <-done:
+				case <-time.After(6 * time.Second):
+					if !isResolved(p) && logf != nil {
+						logf("No GATT discovery yet: the host may have connected over Classic BR/EDR")
+					}
+				}
+			}(path)
+		} else if active != path {
+			// Discovery churn for unrelated devices is not interesting.
+			return
+		} else {
+			active = ""
+		}
+
+		addr, name := addrFromPath(path), ""
+		if connected {
+			if a, n := readDeviceInfo(conn, path); a != "" {
+				addr, name = a, n
+			}
+		}
+		if name == "" {
+			name = addr
+		}
+		if emit != nil {
+			emit(EmuEvent{
+				Kind:      "peer",
+				Connected: connected,
+				PeerAddr:  addr,
+				PeerName:  name,
+			})
+		}
+		if logf != nil {
+			if connected {
+				logf("Connected: %s (%s)", name, addr)
+			} else {
+				logf("Disconnected: %s (%s)", name, addr)
+			}
+		}
+		if !connected && onDisconnect != nil {
+			onDisconnect()
+		}
+	}
+
+	// Catch a peer that connected before we finished initialising.
+	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	if err := conn.Object(bluezService, "/").Call(dbusObjMgrIface+".GetManagedObjects", 0).Store(&objs); err == nil {
+		for p, ifaces := range objs {
+			if !strings.HasPrefix(string(p), prefix) {
+				continue
+			}
+			devProps, ok := ifaces[bluezDeviceIface]
+			if !ok {
+				continue
+			}
+			if v, ok2 := devProps["Connected"]; ok2 {
+				if c, _ := v.Value().(bool); c {
+					report(p, true)
+				}
+			}
+			if v, ok2 := devProps["ServicesResolved"]; ok2 {
+				if r, _ := v.Value().(bool); r {
+					markResolved(p)
+				}
+			}
+		}
+	}
+
 	go func() {
 		defer conn.RemoveSignal(ch)
 		for {
@@ -521,35 +796,72 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 			case <-done:
 				return
 			case sig, ok := <-ch:
-				if !ok {
+				if !ok || sig == nil {
 					return
 				}
-				if !strings.HasPrefix(string(sig.Path), prefix) || len(sig.Body) < 2 {
-					continue
-				}
-				changed, ok := sig.Body[1].(map[string]dbus.Variant)
-				if !ok {
-					continue
-				}
-				connVar, hasConn := changed["Connected"]
-				if !hasConn {
-					continue
-				}
-				connected, _ := connVar.Value().(bool)
-				addr, name := readDeviceInfo(conn, sig.Path)
-				if emit != nil {
-					emit(EmuEvent{
-						Kind:      "peer",
-						Connected: connected,
-						PeerAddr:  addr,
-						PeerName:  name,
-					})
-				}
-				if logf != nil {
-					if connected {
-						logf("Connected: %s (%s)", name, addr)
-					} else {
-						logf("Disconnected: %s (%s)", name, addr)
+				switch sig.Name {
+				case "PropertiesChanged":
+					if len(sig.Body) < 2 || !strings.HasPrefix(string(sig.Path), prefix) {
+						continue
+					}
+					if iface, _ := sig.Body[0].(string); iface != bluezDeviceIface {
+						continue
+					}
+					changed, ok := sig.Body[1].(map[string]dbus.Variant)
+					if !ok {
+						continue
+					}
+					if v, has := changed["Connected"]; has {
+						c, _ := v.Value().(bool)
+						report(sig.Path, c)
+						continue
+					}
+					if v, has := changed["ServicesResolved"]; has {
+						if r, _ := v.Value().(bool); r {
+							markResolved(sig.Path)
+							if logf != nil {
+								logf("Host finished service discovery")
+							}
+						}
+					}
+				case "InterfacesAdded":
+					if len(sig.Body) < 2 {
+						continue
+					}
+					p, _ := sig.Body[0].(dbus.ObjectPath)
+					if !strings.HasPrefix(string(p), prefix) {
+						continue
+					}
+					objs, ok := sig.Body[1].(map[string]map[string]dbus.Variant)
+					if !ok {
+						continue
+					}
+					devProps, has := objs[bluezDeviceIface]
+					if !has {
+						continue
+					}
+					c := false
+					if v, ok2 := devProps["Connected"]; ok2 {
+						c, _ = v.Value().(bool)
+					}
+					report(p, c)
+				case "InterfacesRemoved":
+					if len(sig.Body) < 2 {
+						continue
+					}
+					p, _ := sig.Body[0].(dbus.ObjectPath)
+					if !strings.HasPrefix(string(p), prefix) {
+						continue
+					}
+					ifaces, ok := sig.Body[1].([]string)
+					if !ok {
+						continue
+					}
+					for _, i := range ifaces {
+						if i == bluezDeviceIface {
+							report(p, false)
+							break
+						}
 					}
 				}
 			}
@@ -559,6 +871,16 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 	return func() {
 		close(done)
 	}
+}
+
+// addrFromPath decodes the BD_ADDR BlueZ encodes in device object paths.
+func addrFromPath(p dbus.ObjectPath) string {
+	base := string(p)
+	idx := strings.LastIndex(base, "/dev_")
+	if idx < 0 {
+		return ""
+	}
+	return strings.ReplaceAll(base[idx+5:], "_", ":")
 }
 
 func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string) {
@@ -578,10 +900,7 @@ func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string
 		}
 	}
 	if addr == "" {
-		base := string(devPath)
-		if idx := strings.LastIndex(base, "/dev_"); idx >= 0 {
-			addr = strings.ReplaceAll(base[idx+5:], "_", ":")
-		}
+		addr = addrFromPath(devPath)
 	}
 	if name == "" {
 		name = addr
@@ -592,9 +911,10 @@ func readDeviceInfo(conn *dbus.Conn, devPath dbus.ObjectPath) (addr, name string
 // --- GATT HID Application ---
 
 type hidGattApp struct {
-	conn *dbus.Conn
-	spec EmuProfileSpec
-	logf func(string, ...any)
+	conn   *dbus.Conn
+	spec   EmuProfileSpec
+	secure bool
+	logf   func(string, ...any)
 
 	objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
@@ -606,10 +926,32 @@ type hidGattApp struct {
 	lastButton uint8
 }
 
-func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), logf func(string, ...any)) *hidGattApp {
+// reportFlags builds the characteristic flags for a HID report. HOGP requires
+// reports to live on an encrypted link, so secure mode marks them accordingly;
+// open mode keeps the flags plain so a host without a working pairer can still
+// read them.
+func (a *hidGattApp) reportFlags(extras ...string) []string {
+	flags := make([]string, 0, len(extras)+2)
+	if a.secure {
+		flags = append(flags, "encrypt-read")
+	} else {
+		flags = append(flags, "read")
+	}
+	for _, e := range extras {
+		if a.secure && (e == "notify" || e == "write") {
+			flags = append(flags, "encrypt-"+e)
+			continue
+		}
+		flags = append(flags, e)
+	}
+	return flags
+}
+
+func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs func(uint8), logf func(string, ...any)) *hidGattApp {
 	app := &hidGattApp{
 		conn:    conn,
 		spec:    spec,
+		secure:  secure,
 		logf:    logf,
 		objects: make(map[dbus.ObjectPath]map[string]map[string]dbus.Variant),
 	}
@@ -654,8 +996,8 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), log
 		p := nextChar()
 		app.kbChar = &gattChar{
 			conn: conn, path: p, service: svc0,
-			uuid: uuidHIDReport, flags: []string{"read", "notify"},
-			value: make([]byte, 8),
+			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
+			value: make([]byte, 9), label: "Keyboard",
 		}
 		app.addChar(app.kbChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDKeyboard, 0x01})
@@ -664,10 +1006,16 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), log
 		outPath := nextChar()
 		app.addChar(&gattChar{
 			conn: conn, path: outPath, service: svc0,
-			uuid: uuidHIDReport, flags: []string{"read", "write", "write-without-response"},
-			value: []byte{0x00},
+			uuid: uuidHIDReport, flags: app.reportFlags("write", "write-without-response"),
+			value: []byte{0x00}, label: "Keyboard LEDs",
 			onWrite: func(v []byte) {
-				if len(v) > 0 && onLEDs != nil {
+				if onLEDs == nil {
+					return
+				}
+				// Output report layout: [report ID, LED bits].
+				if len(v) >= 2 && v[0] == HIDReportIDKeyboard {
+					onLEDs(v[1])
+				} else if len(v) == 1 {
 					onLEDs(v[0])
 				}
 			},
@@ -678,8 +1026,8 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), log
 		p := nextChar()
 		app.mouseChar = &gattChar{
 			conn: conn, path: p, service: svc0,
-			uuid: uuidHIDReport, flags: []string{"read", "notify"},
-			value: make([]byte, 4),
+			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
+			value: make([]byte, 5), label: "Mouse",
 		}
 		app.addChar(app.mouseChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDMouse, 0x01})
@@ -688,8 +1036,8 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), log
 		p := nextChar()
 		app.consChar = &gattChar{
 			conn: conn, path: p, service: svc0,
-			uuid: uuidHIDReport, flags: []string{"read", "notify"},
-			value: make([]byte, 2),
+			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
+			value: make([]byte, 3), label: "Media",
 		}
 		app.addChar(app.consChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDConsumer, 0x01})
@@ -698,8 +1046,8 @@ func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, onLEDs func(uint8), log
 		p := nextChar()
 		app.padChar = &gattChar{
 			conn: conn, path: p, service: svc0,
-			uuid: uuidHIDReport, flags: []string{"read", "notify"},
-			value: make([]byte, 4),
+			uuid: uuidHIDReport, flags: app.reportFlags("notify"),
+			value: make([]byte, 5), label: "Gamepad",
 		}
 		app.addChar(app.padChar)
 		app.addDesc(p, "desc0", uuidReportRef, []string{"read"}, []byte{HIDReportIDGamepad, 0x01})
@@ -745,6 +1093,12 @@ func (a *hidGattApp) addService(path dbus.ObjectPath, uuid string, primary bool)
 }
 
 func (a *hidGattApp) addChar(c *gattChar) {
+	if c.logf == nil {
+		c.logf = a.logf
+	}
+	if c.label == "" {
+		c.label = charLabel(c.uuid)
+	}
 	_ = a.conn.Export(c, c.path, "org.bluez.GattCharacteristic1")
 	props, _ := prop.Export(a.conn, c.path, prop.Map{
 		"org.bluez.GattCharacteristic1": {
@@ -812,16 +1166,40 @@ func (a *hidGattApp) unregister(adapter dbus.BusObject) {
 	_ = adapter.Call(bluezGattMgrIface+".UnregisterApplication", 0, dbusAppPath).Err
 }
 
+// Every report in the composite map carries a Report ID, so each notification
+// payload is "<report ID><report bytes>". Hosts silently drop reports whose
+// leading byte is not one of the advertised IDs, so build them in one place.
+
+// keyboardReport builds Report ID 1: modifiers, reserved, 6 key slots.
+func keyboardReport(mods, code uint8) []byte {
+	return []byte{HIDReportIDKeyboard, mods, 0x00, code, 0, 0, 0, 0, 0}
+}
+
+// mouseReport builds Report ID 2: buttons, X, Y, wheel.
+func mouseReport(buttons uint8, dx, dy, wheel int8) []byte {
+	return []byte{HIDReportIDMouse, buttons, byte(dx), byte(dy), byte(wheel)}
+}
+
+// consumerReport builds Report ID 3: one 16-bit consumer usage.
+func consumerReport(usage uint16) []byte {
+	return []byte{HIDReportIDConsumer, byte(usage), byte(usage >> 8)}
+}
+
+// gamepadReport builds Report ID 4: 16 buttons, X, Y.
+func gamepadReport(buttons uint16, dx, dy int8) []byte {
+	return []byte{HIDReportIDGamepad, byte(buttons), byte(buttons >> 8), byte(dx), byte(dy)}
+}
+
 func (a *hidGattApp) sendKeyTap(code, mods uint8) error {
 	if a.kbChar == nil {
 		return errors.New("keyboard report not active")
 	}
-	down := []byte{mods, 0x00, code, 0, 0, 0, 0, 0}
+	down := keyboardReport(mods, code)
 	if err := a.kbChar.notify(down); err != nil {
 		return err
 	}
 	time.Sleep(12 * time.Millisecond)
-	up := []byte{0, 0, 0, 0, 0, 0, 0, 0}
+	up := keyboardReport(0, 0)
 	return a.kbChar.notify(up)
 }
 
@@ -830,7 +1208,7 @@ func (a *hidGattApp) sendMouse(buttons uint8, dx, dy, wheel int8) error {
 		return errors.New("mouse report not active")
 	}
 	a.lastButton = buttons
-	rep := []byte{buttons, byte(dx), byte(dy), byte(wheel)}
+	rep := mouseReport(buttons, dx, dy, wheel)
 	return a.mouseChar.notify(rep)
 }
 
@@ -838,13 +1216,13 @@ func (a *hidGattApp) sendGamepad(buttons uint16, dx, dy int8) error {
 	if a.padChar == nil {
 		return errors.New("gamepad report not active")
 	}
-	rep := []byte{byte(buttons), byte(buttons >> 8), byte(dx), byte(dy)}
+	rep := gamepadReport(buttons, dx, dy)
 	if err := a.padChar.notify(rep); err != nil {
 		return err
 	}
 	if buttons != 0 {
 		time.Sleep(45 * time.Millisecond)
-		return a.padChar.notify([]byte{0, 0, byte(dx), byte(dy)})
+		return a.padChar.notify(gamepadReport(0, dx, dy))
 	}
 	return nil
 }
@@ -853,15 +1231,33 @@ func (a *hidGattApp) sendConsumer(usage uint16) error {
 	if a.consChar == nil {
 		return errors.New("consumer report not active")
 	}
-	down := []byte{byte(usage), byte(usage >> 8)}
+	down := consumerReport(usage)
 	if err := a.consChar.notify(down); err != nil {
 		return err
 	}
 	time.Sleep(20 * time.Millisecond)
-	return a.consChar.notify([]byte{0, 0})
+	return a.consChar.notify(consumerReport(0))
 }
 
 type gattService struct{}
+
+func charLabel(uuid string) string {
+	switch uuid {
+	case uuidProtocolMode:
+		return "Protocol Mode"
+	case uuidHIDInfo:
+		return "HID Info"
+	case uuidReportMap:
+		return "Report Map"
+	case uuidHIDControlPoint:
+		return "Control Point"
+	case uuidBatteryLevel:
+		return "Battery"
+	case uuidPnPID:
+		return "PnP ID"
+	}
+	return ""
+}
 
 type gattChar struct {
 	conn    *dbus.Conn
@@ -871,27 +1267,78 @@ type gattChar struct {
 	flags   []string
 	props   *prop.Properties
 	onWrite func([]byte)
+	label   string
+	logf    func(string, ...any)
 
 	mu        sync.Mutex
 	value     []byte
 	notifying bool
 }
 
+// attOffset extracts the ATT read/write offset from the options BlueZ passes to
+// ReadValue/WriteValue.
+func attOffset(options map[string]dbus.Variant) int {
+	v, ok := options["offset"]
+	if !ok {
+		return 0
+	}
+	switch n := v.Value().(type) {
+	case uint16:
+		return int(n)
+	case uint32:
+		return int(n)
+	case int32:
+		return int(n)
+	case int:
+		return n
+	}
+	return 0
+}
+
+// readChunk applies the ATT Read Blob offset. Attributes larger than the
+// negotiated MTU are read as a Read Request followed by Read Blob Requests with
+// increasing offsets. A handler that ignores the offset replays the head of the
+// value on every chunk, so the peer reassembles corrupt data and (for the HID
+// Report Map) drops the link as soon as it parses the descriptor.
+func readChunk(val []byte, options map[string]dbus.Variant) []byte {
+	off := attOffset(options)
+	if off <= 0 {
+		return val
+	}
+	if off >= len(val) {
+		return []byte{}
+	}
+	return val[off:]
+}
+
 func (c *gattChar) ReadValue(options map[string]dbus.Variant) ([]byte, *dbus.Error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	cp := make([]byte, len(c.value))
-	copy(cp, c.value)
-	return cp, nil
+	cp := append([]byte(nil), c.value...)
+	c.mu.Unlock()
+	return readChunk(cp, options), nil
 }
 
 func (c *gattChar) WriteValue(value []byte, options map[string]dbus.Variant) *dbus.Error {
 	c.mu.Lock()
-	c.value = append([]byte(nil), value...)
+	if off := attOffset(options); off > 0 {
+		// Long/prepared write: overwrite in place at the requested offset.
+		if off > len(c.value) {
+			off = len(c.value)
+		}
+		buf := append([]byte(nil), c.value...)
+		if need := off + len(value); need > len(buf) {
+			buf = append(buf, make([]byte, need-len(buf))...)
+		}
+		copy(buf[off:], value)
+		c.value = buf
+	} else {
+		c.value = append([]byte(nil), value...)
+	}
+	snapshot := append([]byte(nil), c.value...)
 	cb := c.onWrite
 	c.mu.Unlock()
 	if cb != nil {
-		cb(value)
+		cb(snapshot)
 	}
 	return nil
 }
@@ -899,9 +1346,15 @@ func (c *gattChar) WriteValue(value []byte, options map[string]dbus.Variant) *db
 func (c *gattChar) StartNotify() *dbus.Error {
 	c.mu.Lock()
 	c.notifying = true
+	logf := c.logf
+	label := c.label
 	c.mu.Unlock()
+	if logf != nil && label != "" {
+		logf("%s notifications enabled", label)
+	}
 	if c.props != nil {
-		c.props.SetMust("org.bluez.GattCharacteristic1", "Notifying", true)
+		// Set (not SetMust) so a peer that vanished mid-request cannot panic.
+		safePropSet(c.props, "org.bluez.GattCharacteristic1", "Notifying", true)
 	}
 	return nil
 }
@@ -909,9 +1362,14 @@ func (c *gattChar) StartNotify() *dbus.Error {
 func (c *gattChar) StopNotify() *dbus.Error {
 	c.mu.Lock()
 	c.notifying = false
+	logf := c.logf
+	label := c.label
 	c.mu.Unlock()
+	if logf != nil && label != "" {
+		logf("%s notifications disabled", label)
+	}
 	if c.props != nil {
-		c.props.SetMust("org.bluez.GattCharacteristic1", "Notifying", false)
+		safePropSet(c.props, "org.bluez.GattCharacteristic1", "Notifying", false)
 	}
 	return nil
 }
@@ -921,13 +1379,26 @@ func (c *gattChar) notify(val []byte) error {
 	c.value = append([]byte(nil), val...)
 	c.mu.Unlock()
 	if c.props != nil {
-		c.props.SetMust("org.bluez.GattCharacteristic1", "Value", append([]byte(nil), val...))
+		// Set (not SetMust): a disconnect races the emit and must not panic.
+		safePropSet(c.props, "org.bluez.GattCharacteristic1", "Value", append([]byte(nil), val...))
 		return nil
 	}
 	return c.conn.Emit(c.path, dbusPropsIface+".PropertiesChanged",
 		"org.bluez.GattCharacteristic1",
 		map[string]dbus.Variant{"Value": dbus.MakeVariant(val)},
 		[]string{})
+}
+
+// safePropSet updates an exported property and emits PropertiesChanged (BlueZ
+// forwards characteristic Value changes to subscribed peers this way). A peer
+// that disconnects mid-emit surfaces as a panic from prop.SetMust, so it is
+// recovered here instead of taking the whole emulator down.
+func safePropSet(p *prop.Properties, iface, name string, v any) {
+	if p == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	p.SetMust(iface, name, v)
 }
 
 type gattDesc struct {
@@ -937,10 +1408,9 @@ type gattDesc struct {
 
 func (d *gattDesc) ReadValue(options map[string]dbus.Variant) ([]byte, *dbus.Error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	cp := make([]byte, len(d.value))
-	copy(cp, d.value)
-	return cp, nil
+	cp := append([]byte(nil), d.value...)
+	d.mu.Unlock()
+	return readChunk(cp, options), nil
 }
 
 func (d *gattDesc) WriteValue(value []byte, options map[string]dbus.Variant) *dbus.Error {
