@@ -220,7 +220,13 @@ type filesAudioDoneMsg struct {
 	err error
 }
 
-type filesPlayTickMsg struct{}
+type filesPlayTickMsg struct {
+	seq    int
+	pos    float64
+	dur    float64
+	paused bool
+	err    error
+}
 
 type filesRecordDoneMsg struct {
 	seq int
@@ -709,9 +715,23 @@ func playAudioCmd(ctx context.Context, seq int, path string) tea.Cmd {
 	}
 }
 
-func filesPlayTickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg {
-		return filesPlayTickMsg{}
+func waitAudioPlayerCmd(seq int, p *audio.Player) tea.Cmd {
+	return func() tea.Msg {
+		if p == nil {
+			return nil
+		}
+		return filesAudioDoneMsg{seq: seq, err: p.Wait()}
+	}
+}
+
+func filesPlayTickCmd(seq int, p *audio.Player) tea.Cmd {
+	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+		msg := filesPlayTickMsg{seq: seq}
+		if p != nil && p.Controllable() {
+			pos, dur, paused, err := p.Status()
+			msg.pos, msg.dur, msg.paused, msg.err = pos, dur, paused, err
+		}
+		return msg
 	})
 }
 
@@ -1075,6 +1095,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case btAttackDoneMsg:
 		m.BluetoothScan.DrainRunLines(msg.seq)
 		m.BluetoothScan.FinishAttack(msg.seq, msg.err)
+		if msg.kind == bluetooth.AttackCarwhisperer {
+			m.BluetoothScan.CleanupCWMessage()
+		}
 		switch {
 		case msg.err == nil:
 			return m, tea.Batch(m.setStatus(msg.kind.String()+" done"), m.resetMarquee())
@@ -1113,13 +1136,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.setStatus("Playback finished"), m.resetMarquee())
 
 	case filesPlayTickMsg:
-		if !m.Files.Playing {
+		if !m.Files.Playing || msg.seq != m.Files.PlaySeq {
 			return m, nil
 		}
-		if !m.Files.PlayStarted.IsZero() {
-			m.Files.PlayElapsed = time.Since(m.Files.PlayStarted)
-		}
-		return m, filesPlayTickCmd()
+		m.Files.ApplyPlayStatus(msg.seq, msg.pos, msg.dur, msg.paused, msg.err)
+		return m, filesPlayTickCmd(msg.seq, m.Files.Player)
 
 	case filesRecordDoneMsg:
 		if errors.Is(msg.err, context.Canceled) {
@@ -1142,21 +1163,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, filesRecordTickCmd()
 
 	case btMicDoneMsg:
-		if errors.Is(msg.err, context.Canceled) {
-			m.BluetoothScan.FinishCWRecord(msg.seq, nil)
-			return m, tea.Batch(m.setStatus("Recording stopped"), m.resetMarquee())
-		}
-		m.BluetoothScan.FinishCWRecord(msg.seq, msg.err)
-		if msg.err != nil {
+		canceled := errors.Is(msg.err, context.Canceled)
+		m.BluetoothScan.FinishCWRecord(msg.seq, nil)
+		discard := m.BluetoothScan.CWDiscardMsg
+		m.BluetoothScan.CWDiscardMsg = false
+		if msg.err != nil && !canceled {
+			m.BluetoothScan.CleanupCWMessage()
 			return m, tea.Batch(m.setStatus("Mic recording failed"), m.resetMarquee())
 		}
-		if msg.path != "" {
-			return m, tea.Batch(
-				m.setStatus("Converting message..."),
-				btConvertCmd(context.Background(), msg.path, m.BluetoothScan.ConvertPath()),
-			)
+		if discard || msg.path == "" {
+			m.BluetoothScan.CleanupCWMessage()
+			return m, m.setStatus("Message discarded")
 		}
-		return m, nil
+		// Recording stopped (Enter) -> convert and drive the SCO link with it.
+		m.BluetoothScan.CWStartTap = m.BluetoothScan.CWTap
+		return m, tea.Batch(
+			m.setStatus("Sending message..."),
+			btConvertCmd(context.Background(), msg.path, m.BluetoothScan.ConvertPath()),
+		)
 
 	case btMicTickMsg:
 		if !m.BluetoothScan.CWRecord {
@@ -1169,6 +1193,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case btConvertDoneMsg:
 		if msg.err != nil {
+			m.BluetoothScan.CleanupCWMessage()
 			return m, tea.Batch(m.setStatus("Audio convert failed"), m.resetMarquee())
 		}
 		m.BluetoothScan.Mode = btModeCWMenu
@@ -2433,9 +2458,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					return m, m.setStatus(err.Error())
 				}
 				if kind == "audio" {
-					ctx, seq, playPath, ok := m.Files.StartPlayback(path)
+					_, seq, _, ok := m.Files.StartPlayback(path)
 					if ok {
-						return m, tea.Batch(m.setStatus("Playing "+m.Files.PlayName), playAudioCmd(ctx, seq, playPath), filesPlayTickCmd())
+						return m, tea.Batch(m.setStatus("Playing "+m.Files.PlayName), waitAudioPlayerCmd(seq, m.Files.Player), filesPlayTickCmd(seq, m.Files.Player))
+					}
+					if m.Files.PlayErr != "" {
+						return m, m.setStatus(m.Files.PlayErr)
 					}
 				} else if kind != "" {
 					return m, playMediaCmd(path, kind == "video")
@@ -2473,8 +2501,24 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case filesModePlay:
-			if k == "enter" || k == " " {
+			switch {
+			case k == "enter" || k == " ":
+				if paused, err := m.Files.TogglePause(); err == nil {
+					if paused {
+						return m, m.setStatus("Paused")
+					}
+					return m, m.setStatus("Playing")
+				}
+				// Player without remote control: stop instead.
 				m.Files.StopPlayback()
+			case m.isLeft(k):
+				if err := m.Files.Seek(-5); err == nil {
+					return m, tea.Batch(m.setStatus("−5s"), filesPlayTickCmd(m.Files.PlaySeq, m.Files.Player))
+				}
+			case m.isRight(k):
+				if err := m.Files.Seek(5); err == nil {
+					return m, tea.Batch(m.setStatus("+5s"), filesPlayTickCmd(m.Files.PlaySeq, m.Files.Player))
+				}
 			}
 			return m, nil
 
@@ -3364,7 +3408,7 @@ func (m AppModel) currentHints() []Hint {
 		case filesModeRecord:
 			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
 		case filesModePlay:
-			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
+			return []Hint{{Key: "⏎", Desc: "pause"}, {Key: "←→", Desc: "±5s"}, {Key: "Esc", Desc: "stop"}}
 		default:
 			return []Hint{
 				{Key: "⏎", Desc: "open"},
