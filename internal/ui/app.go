@@ -909,6 +909,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewBluetooth {
 			cmds = append(cmds, collectBluetoothCmd())
 		}
+		if m.ActiveView == ViewWiFi {
+			cmds = append(cmds, collectWifiCmd(), collectLocalIfacesCmd())
+		}
 		return m, tea.Batch(cmds...)
 
 	case wifiRefreshedMsg:
@@ -1322,6 +1325,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
+		m.WifiEvil.SyncUplinks(msg.ifaces)
 		return m, nil
 
 	case localScanProgressMsg:

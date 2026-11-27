@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/czhax/czhax/internal/localscan"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/wifi"
 )
@@ -52,6 +53,9 @@ type WifiEvilView struct {
 
 	Interfaces []wifi.Interface
 	APCapable  map[string]bool
+	// Uplinks are every non-wifi-capable route out: ethernet, USB tethering and
+	// wifi interfaces that are not used as the AP.
+	Uplinks []localscan.Interface
 
 	Cursor int
 	Mode   WifiEvilMode
@@ -106,22 +110,82 @@ func (v WifiEvilView) apIndexes() []int {
 	return out
 }
 
-// UplinkIface returns the selected uplink, excluding the AP interface.
-func (v WifiEvilView) UplinkIface() string {
-	if len(v.Interfaces) < 2 {
-		return ""
-	}
+// uplinkCandidates lists every interface that can carry the uplink, with the AP
+// interface excluded: ethernet ports, USB tethering gadgets and spare wifi.
+func (v WifiEvilView) uplinkCandidates() []localscan.Interface {
 	ap := v.EffectiveAP()
-	cands := make([]wifi.Interface, 0, len(v.Interfaces))
-	for _, inf := range v.Interfaces {
-		if inf.Name != ap {
-			cands = append(cands, inf)
+	if len(v.Uplinks) > 0 {
+		out := make([]localscan.Interface, 0, len(v.Uplinks))
+		for _, inf := range v.Uplinks {
+			if inf.Name == ap {
+				continue
+			}
+			out = append(out, inf)
 		}
+		return out
 	}
+	// Fallback when the broader discovery has not run yet.
+	out := make([]localscan.Interface, 0, len(v.Interfaces))
+	for _, inf := range v.Interfaces {
+		if inf.Name == ap {
+			continue
+		}
+		out = append(out, localscan.Interface{Name: inf.Name, Kind: localscan.KindWiFi, Up: inf.Up, Connected: inf.Up})
+	}
+	return out
+}
+
+// UplinkIface returns the selected uplink name, or "" when none is available.
+func (v WifiEvilView) UplinkIface() string {
+	cands := v.uplinkCandidates()
 	if len(cands) == 0 {
 		return ""
 	}
 	return cands[clampIndex(v.UplinkIdx, len(cands))].Name
+}
+
+// uplinkLabel renders the selected uplink with its kind ("eth0 · Eth").
+func (v WifiEvilView) uplinkLabel() (string, bool) {
+	cands := v.uplinkCandidates()
+	if len(cands) == 0 {
+		return "", false
+	}
+	inf := cands[clampIndex(v.UplinkIdx, len(cands))]
+	label := inf.Name
+	if inf.Kind != "" {
+		label += " · " + string(inf.Kind)
+	}
+	return label, true
+}
+
+// SyncUplinks keeps the broader interface discovery (ethernet, USB tethering,
+// wifi) available for the uplink picker.
+func (v *WifiEvilView) SyncUplinks(ifaces []localscan.Interface) {
+	prev := v.UplinkIface()
+	v.Uplinks = ifaces
+	if len(ifaces) == 0 {
+		v.UplinkIdx = 0
+		return
+	}
+	cands := v.uplinkCandidates()
+	if len(cands) == 0 {
+		v.UplinkIdx = 0
+		return
+	}
+	for i, inf := range cands {
+		if inf.Name == prev {
+			v.UplinkIdx = i
+			return
+		}
+	}
+	// Prefer a connected wired/tethered uplink over wifi.
+	for i, inf := range cands {
+		if inf.Kind != localscan.KindWiFi && inf.Connected {
+			v.UplinkIdx = i
+			return
+		}
+	}
+	v.UplinkIdx = 0
 }
 
 func (v WifiEvilView) IsTextInput() bool { return v.Mode == evilModeEditSSID }
@@ -198,8 +262,9 @@ func (v *WifiEvilView) Adjust(delta int) {
 			v.APIdx = idx[next]
 		}
 	case evilFieldUplink:
-		n := max(1, len(v.Interfaces)-1)
-		v.UplinkIdx = (v.UplinkIdx + delta + n) % n
+		if n := len(v.uplinkCandidates()); n > 0 {
+			v.UplinkIdx = (v.UplinkIdx + delta + n) % n
+		}
 	case evilFieldNAT:
 		v.NAT = !v.NAT
 	case evilFieldPortal:
@@ -372,8 +437,8 @@ func (v WifiEvilView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 			}
 		case evilFieldUplink:
 			lbl = "Uplink"
-			if up := v.UplinkIface(); up != "" {
-				val = up
+			if label, ok := v.uplinkLabel(); ok {
+				val = label
 			} else {
 				val, style = "none", bad
 			}

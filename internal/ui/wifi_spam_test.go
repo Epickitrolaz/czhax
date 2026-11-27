@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/czhax/czhax/internal/config"
+	"github.com/czhax/czhax/internal/localscan"
 	"github.com/czhax/czhax/internal/wifi"
 )
 
@@ -238,5 +239,66 @@ func TestEvilFromScanPrefillsWithoutStarting(t *testing.T) {
 	}
 	if !m.WifiEvil.Portal || !m.WifiEvil.NAT {
 		t.Fatal("the remaining options must keep their defaults")
+	}
+}
+
+// TestEvilUplinkSupportsEthernetAndUSB is the "uplink can be eth0 or USB
+// tethering" request: the picker must offer wired and tethered interfaces, not
+// only spare wifi, and exclude the AP interface itself.
+func TestEvilUplinkSupportsEthernetAndUSB(t *testing.T) {
+	v := NewWifiEvilView()
+	v.SyncInterfaces([]wifi.Interface{{Name: "wlan0"}, {Name: "wlan1"}})
+	v.SyncUplinks([]localscan.Interface{
+		{Name: "wlan0", Kind: localscan.KindWiFi, Up: true, Connected: true},
+		{Name: "eth0", Kind: localscan.KindEthernet, Up: true, Connected: true},
+		{Name: "usb0", Kind: localscan.KindUSB, Up: true, Connected: true},
+	})
+
+	if got := v.EffectiveAP(); got != "wlan0" {
+		t.Fatalf("AP = %q, want wlan0", got)
+	}
+	// A connected wired/tethered uplink is preferred over wifi.
+	if got := v.UplinkIface(); got != "eth0" {
+		t.Fatalf("uplink = %q, want eth0", got)
+	}
+	if label, ok := v.uplinkLabel(); !ok || label != "eth0 · Eth" {
+		t.Fatalf("uplink label = %q (%v), want \"eth0 · Eth\"", label, ok)
+	}
+
+	// Cycling reaches the USB tether and never the AP interface.
+	for i, f := range v.fields() {
+		if f == evilFieldUplink {
+			v.Cursor = i
+		}
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		seen[v.UplinkIface()] = true
+		v.Adjust(1)
+	}
+	if seen["wlan0"] {
+		t.Fatalf("AP interface offered as uplink: %v", seen)
+	}
+	if !seen["usb0"] || !seen["eth0"] {
+		t.Fatalf("expected eth0 and usb0 in the uplink list, saw %v", seen)
+	}
+
+	// NAT passes the chosen uplink to the helper.
+	cfg := v.Config()
+	if cfg.UplinkIface == "" || !cfg.NAT {
+		t.Fatalf("config lost the uplink: %+v", cfg)
+	}
+}
+
+// TestEvilUplinkFallsBackToWifi keeps the single-adapter case working.
+func TestEvilUplinkFallsBackToWifi(t *testing.T) {
+	v := NewWifiEvilView()
+	v.SyncInterfaces([]wifi.Interface{{Name: "wlan0"}, {Name: "wlan1"}})
+	if got := v.UplinkIface(); got != "wlan1" {
+		t.Fatalf("uplink = %q, want wlan1", got)
+	}
+	v.SyncInterfaces([]wifi.Interface{{Name: "wlan0"}})
+	if got := v.UplinkIface(); got != "" {
+		t.Fatalf("uplink = %q, want none with a single radio", got)
 	}
 }
