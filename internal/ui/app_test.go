@@ -321,17 +321,13 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "down")
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/DetailScroll")
 
-		// Enter from Detail opens Connect Interface Picker; pick wlan1 while scan iface is wlan0
+		// Enter from Detail connects on the interface chosen for the scan - the
+		// picker must not be shown again.
 		m = sendKey(m, "enter")
-		if m.WifiScan.Mode != scanModePickIface {
-			t.Fatalf("expected scanModePickIface, got %v", m.WifiScan.Mode)
+		if m.WifiScan.Mode != scanModePassword || m.WifiScan.ConnectIface != m.WifiScan.EffectiveScanIface() {
+			t.Fatalf("expected a password prompt on the scan interface, got mode=%v iface=%q", m.WifiScan.Mode, m.WifiScan.ConnectIface)
 		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PickIface")
-		m = sendKey(m, "down") // wlan1
-		m = sendKey(m, "enter")
-		if m.WifiScan.Mode != scanModePassword || m.WifiScan.ConnectIface != "wlan1" {
-			t.Fatalf("expected scanModePassword on wlan1, got mode=%v iface=%q", m.WifiScan.Mode, m.WifiScan.ConnectIface)
-		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordPrompt")
 		// Typing q/r/? must go to password input, not global handlers
 		for _, ch := range []string{"q", "r", "?", " ", "x"} {
 			m = sendKey(m, ch)
@@ -356,11 +352,7 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected Tab to hide password")
 		}
 		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/PasswordMasked")
-		// Esc steps back: Password -> PickIface -> Detail -> Actions -> List -> FocusTabs
-		m = sendKey(m, "esc")
-		if m.WifiScan.Mode != scanModePickIface || m.Focus != FocusContent {
-			t.Fatalf("expected back to PickIface, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
-		}
+		// Esc steps back: Password -> Detail -> Actions -> List -> FocusTabs
 		m = sendKey(m, "esc")
 		if m.WifiScan.Mode != scanModeDetail || m.Focus != FocusContent {
 			t.Fatalf("expected back to Detail, got mode=%v focus=%v", m.WifiScan.Mode, m.Focus)
@@ -624,13 +616,9 @@ func TestWifiScanConnectHiddenOpenAndErrors(t *testing.T) {
 	})
 	m = nextM.(AppModel)
 
-	// Connect to hidden network via 'c' shortcut -> PickIface -> SSID -> Password
+	// Connect to hidden network via 'c' shortcut -> SSID -> Password, on the
+	// interface that was used to scan (no picker).
 	m = sendKey(m, "c")
-	if m.WifiScan.Mode != scanModePickIface {
-		t.Fatalf("expected scanModePickIface on 'c', got %v", m.WifiScan.Mode)
-	}
-	m = sendKey(m, "down")  // select wlan1
-	m = sendKey(m, "enter") // confirm wlan1 -> hidden SSID prompt
 	if m.WifiScan.Mode != scanModeSSID {
 		t.Fatalf("expected scanModeSSID for hidden network, got %v", m.WifiScan.Mode)
 	}
@@ -646,7 +634,7 @@ func TestWifiScanConnectHiddenOpenAndErrors(t *testing.T) {
 		m = sendKey(m, ch)
 	}
 	req := m.WifiScan.BuildConnectRequest()
-	if req.Iface != "wlan1" || req.SSID != "Secret" || req.Password != "pass" || !req.Hidden {
+	if req.Iface != "wlan0" || req.SSID != "Secret" || req.Password != "pass" || !req.Hidden {
 		t.Fatalf("unexpected hidden connect request: %+v", req)
 	}
 	m = sendKey(m, "enter")

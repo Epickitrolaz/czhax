@@ -311,8 +311,13 @@ func TestActionsMenuRowsDispatchToTheirOwnAction(t *testing.T) {
 				t.Fatalf("Details row %d opened mode %v instead of details", i, next.WifiScan.Mode)
 			}
 		case wifiActConnect:
-			if next.WifiScan.Mode != scanModePickIface {
-				t.Fatalf("Connect row %d opened mode %v instead of the interface picker", i, next.WifiScan.Mode)
+			// Connect goes straight to the passphrase prompt on the scan
+			// interface; there is no second interface question.
+			if next.WifiScan.Mode != scanModePassword {
+				t.Fatalf("Connect row %d opened mode %v instead of the password prompt", i, next.WifiScan.Mode)
+			}
+			if next.WifiScan.ConnectIface != next.WifiScan.EffectiveScanIface() {
+				t.Fatalf("Connect row %d used iface %q, want the scan iface %q", i, next.WifiScan.ConnectIface, next.WifiScan.EffectiveScanIface())
 			}
 		}
 		m = sendKey(m, "down")
@@ -368,14 +373,16 @@ func TestWPSConnectWithRecoveredPSK(t *testing.T) {
 			t.Fatalf("[%s] expected PSK and connect hint:\n%s", sz.name, view)
 		}
 
-		// 'c' opens the interface picker, then Enter connects using the PSK.
+		// 'c' connects immediately with the recovered PSK on the scan interface.
 		m = sendKey(m, "c")
-		if m.WifiScan.Mode != scanModePickIface || !m.WifiScan.UseWPSCreds {
-			t.Fatalf("[%s] expected picker with WPS creds, mode=%v use=%v", sz.name, m.WifiScan.Mode, m.WifiScan.UseWPSCreds)
+		if !m.WifiScan.Connecting || !m.WifiScan.UseWPSCreds {
+			t.Fatalf("[%s] expected an immediate connect with WPS creds, connecting=%v use=%v mode=%v",
+				sz.name, m.WifiScan.Connecting, m.WifiScan.UseWPSCreds, m.WifiScan.Mode)
 		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/WiFi/WPSConnectPicker")
-		m = sendKey(m, "enter")
-		if !m.WifiScan.Connecting || m.WifiScan.Password != "s3cret-psk" {
+		if m.WifiScan.ConnectIface != m.WifiScan.EffectiveScanIface() {
+			t.Fatalf("[%s] expected the scan iface, got %q", sz.name, m.WifiScan.ConnectIface)
+		}
+		if m.WifiScan.Password != "s3cret-psk" {
 			t.Fatalf("[%s] expected connect with recovered PSK, connecting=%v pass=%q", sz.name, m.WifiScan.Connecting, m.WifiScan.Password)
 		}
 		req := m.WifiScan.BuildConnectRequest()
