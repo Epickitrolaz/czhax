@@ -703,6 +703,7 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 	}
 
 	pairedState := make(map[dbus.ObjectPath]bool)
+	lastName := make(map[dbus.ObjectPath]string)
 
 	report := func(path dbus.ObjectPath, connected bool) {
 		prev, seen := state[path]
@@ -726,6 +727,7 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 			}
 			state[path] = true
 			pairedState[path] = paired
+			lastName[path] = name
 			if !linkChanged && !pairedChanged {
 				return
 			}
@@ -737,9 +739,12 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 					select {
 					case <-ctx.Done():
 					case <-done:
-					case <-time.After(6 * time.Second):
-						if !isResolved(p) && logf != nil {
-							logf("No GATT discovery yet: the host may have connected over Classic BR/EDR")
+					case <-time.After(10 * time.Second):
+						// Only worth flagging while the peer is still up: slow hosts
+						// resolve later, and a peer that already dropped is reported
+						// by the disconnect itself.
+						if !isResolved(p) && state[p] && logf != nil {
+							logf("Peer is linked but no GATT discovery yet (Classic BR/EDR connection?)")
 						}
 					}
 				}(path)
@@ -774,7 +779,11 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 			return
 		}
 		active = ""
-		addr, name := addrFromPath(path), ""
+		addr, name := addrFromPath(path), lastName[path]
+		if name == "" {
+			name = addr
+		}
+		delete(lastName, path)
 		if emit != nil {
 			emit(EmuEvent{Kind: "peer", Connected: false, PeerAddr: addr, PeerName: name})
 		}
