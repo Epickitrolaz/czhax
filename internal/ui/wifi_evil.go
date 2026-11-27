@@ -207,7 +207,7 @@ func (v *WifiEvilView) Config() wifi.EvilConfig {
 }
 
 func (v *WifiEvilView) Start(workDir, captureDir string) (context.Context, int, wifi.EvilConfig, chan string, error) {
-	v.WorkDir = workDir
+	v.WorkDir = workDir + "/eviltwin"
 	v.CaptureDir = captureDir
 	cfg := v.Config()
 	if cfg.SSID == "" {
