@@ -59,11 +59,16 @@ func TestParseTaskProgressTag(t *testing.T) {
 func TestBuildNmapArgs(t *testing.T) {
 	req := ScanRequest{Iface: "usb0", Target: "192.168.42.0/24", Mode: ScanOS}
 	priv := strings.Join(BuildNmapArgs(req, true), " ")
-	if !strings.Contains(priv, "-A") || !strings.Contains(priv, "-e usb0") || !strings.Contains(priv, "-oX -") {
+	if !strings.Contains(priv, "-A") || strings.Contains(priv, "-e usb0") || !strings.Contains(priv, "-oX -") {
 		t.Fatalf("unexpected privileged args: %q", priv)
 	}
 	unpriv := strings.Join(BuildNmapArgs(req, false), " ")
-	if strings.Contains(unpriv, " -A ") || !strings.Contains(unpriv, "-sV -sC") || strings.Contains(unpriv, "-e usb0") {
+	if strings.Contains(unpriv, " -A ") || !strings.Contains(unpriv, "-sV -sC") {
 		t.Fatalf("unexpected unprivileged args: %q", unpriv)
+	}
+
+	single := strings.Join(BuildNmapArgs(ScanRequest{Target: "192.168.42.1", Mode: ScanQuick, SingleHost: true}, true), " ")
+	if !strings.Contains(single, "-F") || !strings.Contains(single, "-Pn") || !strings.Contains(single, "-n") {
+		t.Fatalf("expected -Pn -n for single-host port scan, got %q", single)
 	}
 }

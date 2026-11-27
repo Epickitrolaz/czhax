@@ -151,7 +151,7 @@ func TestLocalAllSizesAndFullScanFlow(t *testing.T) {
 		}
 		optView := m.View()
 		assertFitsBounds(t, optView, sz.w, sz.h, sz.name+"/Local/Options")
-		if !strings.Contains(optView, "192.168.42.0/24") || !strings.Contains(optView, "Host Discovery") {
+		if !strings.Contains(optView, "192.168.42.0/24") || !strings.Contains(optView, "Discover Hosts") {
 			t.Fatalf("[%s] expected target and options in:\n%s", sz.name, optView)
 		}
 
@@ -247,5 +247,98 @@ func TestLocalAllSizesAndFullScanFlow(t *testing.T) {
 		if m.Focus != FocusTabs {
 			t.Fatalf("[%s] expected FocusTabs on final Esc, got %v", sz.name, m.Focus)
 		}
+	}
+}
+
+func TestLocalSingleHostPortScanMergesAndOpensDetail(t *testing.T) {
+	m := newLocalTestModel(t, 53, 14)
+	next, _ := m.Update(localIfacesMsg{ifaces: sampleLocalIfaces()})
+	m = next.(AppModel)
+	m = sendKey(m, "enter") // options
+	m = sendKey(m, "enter") // Discover Hosts
+	next, _ = m.Update(localScanDoneMsg{
+		seq: m.Local.ScanSeq,
+		res: localscan.ScanResult{
+			Target: "10.0.0.0/24",
+			Mode:   localscan.ScanDiscovery,
+			Hosts: []localscan.Host{
+				{IP: "10.0.0.1", Hostname: "gw", Status: "up", Reason: "arp-response"},
+				{IP: "10.0.0.2", Hostname: "nas", Status: "up", Reason: "arp-response"},
+			},
+		},
+	})
+	m = next.(AppModel)
+
+	// Select second host and press 's' directly from results.
+	m = sendKey(m, "down")
+	m = sendKey(m, "s")
+	if m.Local.Mode != localModeOptions || m.Local.TargetHost != "10.0.0.2" {
+		t.Fatalf("expected single-host options for 10.0.0.2, got mode=%v target=%q", m.Local.Mode, m.Local.TargetHost)
+	}
+	optView := m.View()
+	if strings.Contains(optView, "Discover Hosts") || !strings.Contains(optView, "Quick Port Scan") {
+		t.Fatalf("single-host menu should show port scan options only:\n%s", optView)
+	}
+
+	// Start Quick Port Scan (-F).
+	m = sendKey(m, "enter")
+	if !m.Local.RunSingleHost || m.Local.RunMode != localscan.ScanQuick {
+		t.Fatalf("expected RunSingleHost=true RunMode=Quick, got %v %v", m.Local.RunSingleHost, m.Local.RunMode)
+	}
+
+	// Complete scan with open ports: must land directly in HostDetail showing ports.
+	next, _ = m.Update(localScanDoneMsg{
+		seq: m.Local.ScanSeq,
+		res: localscan.ScanResult{
+			Target: "10.0.0.2",
+			Mode:   localscan.ScanQuick,
+			Hosts: []localscan.Host{
+				{
+					IP:           "10.0.0.2",
+					Status:       "up",
+					Reason:       "user-set",
+					PortsScanned: true,
+					Ports: []localscan.Port{
+						{Number: 22, Protocol: "tcp", State: "open", Service: "ssh"},
+						{Number: 80, Protocol: "tcp", State: "open", Service: "http"},
+					},
+				},
+			},
+		},
+	})
+	m = next.(AppModel)
+	if m.Local.Mode != localModeHostDetail {
+		t.Fatalf("expected single-host scan to open HostDetail directly, got %v", m.Local.Mode)
+	}
+	detView := m.View()
+	if !strings.Contains(detView, "22/tcp") || !strings.Contains(detView, "80/tcp") {
+		t.Fatalf("expected open ports in HostDetail:\n%s", detView)
+	}
+
+	// Esc returns to the full subnet host list with both hosts preserved and port summary visible.
+	m = sendKey(m, "esc")
+	if m.Local.Mode != localModeResults || len(m.Local.Result.Hosts) != 2 {
+		t.Fatalf("expected 2 preserved hosts in Results, got mode=%v count=%d", m.Local.Mode, len(m.Local.Result.Hosts))
+	}
+	resView := m.View()
+	if !strings.Contains(resView, "10.0.0.1") || !strings.Contains(resView, "2p:22,80") {
+		t.Fatalf("expected preserved subnet hosts and port summary:\n%s", resView)
+	}
+
+	// Host scanned with 0 open ports distinguishes scanned vs not scanned.
+	m.Local.HostCursor = 0
+	m = sendKey(m, "s")
+	m = sendKey(m, "enter")
+	next, _ = m.Update(localScanDoneMsg{
+		seq: m.Local.ScanSeq,
+		res: localscan.ScanResult{
+			Target: "10.0.0.1",
+			Mode:   localscan.ScanQuick,
+			Hosts:  []localscan.Host{{IP: "10.0.0.1", Status: "up", PortsScanned: true}},
+		},
+	})
+	m = next.(AppModel)
+	if !strings.Contains(m.View(), "0 open (scanned)") {
+		t.Fatalf("expected '0 open (scanned)' in HostDetail:\n%s", m.View())
 	}
 }
