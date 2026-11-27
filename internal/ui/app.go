@@ -248,6 +248,27 @@ type btSudoAuthMsg struct {
 	err  error
 }
 
+type btEmuEventMsg struct {
+	seq int
+	ev  bluetooth.EmuEvent
+}
+
+type btEmuDoneMsg struct {
+	seq int
+	err error
+}
+
+type btEmuSudoAuthMsg struct {
+	err error
+}
+
+type btEmuPlayDoneMsg struct {
+	seq int
+	err error
+}
+
+type btEmuPlayTickMsg struct{}
+
 type localIfacesMsg struct {
 	ifaces []localscan.Interface
 }
@@ -293,6 +314,7 @@ type AppModel struct {
 	IR            IRView
 	Bluetooth     BluetoothView
 	BluetoothScan BluetoothScanView
+	BluetoothEmu  BluetoothEmuView
 	Files         FilesView
 	Help          HelpView
 	WorkDir       string
@@ -330,10 +352,12 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		IR:            NewIRView(cfgPath),
 		Bluetooth:     NewBluetoothView(),
 		BluetoothScan: NewBluetoothScanView(),
+		BluetoothEmu:  NewBluetoothEmuView(),
 		Files:         NewFilesView(root),
 		WorkDir:       root,
 	}
 	m.BluetoothScan.WorkDir = root
+	m.BluetoothEmu.WorkDir = root
 	m.WifiScan.ColorMode = cfg.WiFiColor
 	m.WifiScan.SetOneShotRefresh(cfg.OneShotDir)
 	if cfg.IRFlipperDir != "" {
@@ -1021,6 +1045,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bluetoothRefreshedMsg:
 		m.Bluetooth.SetAdapters(msg.adapters)
 		m.BluetoothScan.SyncAdapters(msg.adapters)
+		m.BluetoothEmu.SyncAdapters(msg.adapters)
 		return m, nil
 
 	case btDevicesScannedMsg:
@@ -1161,6 +1186,63 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next, cmd := m.startBluetoothActionWithOptions(msg.kind, msg.opts)
 		return next, tea.Batch(tea.ClearScreen, cmd)
+
+	case btEmuEventMsg:
+		if !m.BluetoothEmu.Active || msg.seq != m.BluetoothEmu.Seq {
+			return m, nil
+		}
+		prevConn := m.BluetoothEmu.Connected
+		m.BluetoothEmu.ApplyEvent(msg.seq, msg.ev)
+		cmds := []tea.Cmd{waitBluetoothEmuEventCmd(msg.seq, m.BluetoothEmu.EventCh)}
+		if msg.ev.Kind == "peer" && msg.ev.Connected != prevConn {
+			if msg.ev.Connected {
+				cmds = append(cmds, m.setStatus("BT connected: "+msg.ev.PeerName))
+			} else {
+				cmds = append(cmds, m.setStatus("BT disconnected"))
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case btEmuDoneMsg:
+		m.BluetoothEmu.FinishEmulation(msg.seq, msg.err)
+		switch {
+		case msg.err == nil:
+			return m, tea.Batch(m.setStatus("Emulator stopped"), m.resetMarquee())
+		case strings.Contains(msg.err.Error(), "canceled"):
+			return m, tea.Batch(m.setStatus("Emulator stopped"), m.resetMarquee())
+		default:
+			return m, tea.Batch(m.setStatus("Emulator failed"), m.resetMarquee())
+		}
+
+	case btEmuSudoAuthMsg:
+		if msg.err != nil {
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("sudo cancelled"), m.resetMarquee())
+		}
+		if bluetooth.NeedsSudo() {
+			return m, tea.Batch(tea.ClearScreen, m.setStatus("sudo unavailable"), m.resetMarquee())
+		}
+		next, cmd := m.startBluetoothEmu()
+		return next, tea.Batch(tea.ClearScreen, cmd)
+
+	case btEmuPlayDoneMsg:
+		if errors.Is(msg.err, context.Canceled) {
+			m.BluetoothEmu.FinishPlayLast(msg.seq, nil)
+			return m, tea.Batch(m.setStatus("Playback stopped"), m.resetMarquee())
+		}
+		m.BluetoothEmu.FinishPlayLast(msg.seq, msg.err)
+		if msg.err != nil {
+			return m, tea.Batch(m.setStatus("Playback failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("Playback finished"), m.resetMarquee())
+
+	case btEmuPlayTickMsg:
+		if m.BluetoothEmu.Mode != btEmuPlayWAV {
+			return m, nil
+		}
+		if !m.BluetoothEmu.PlayStarted.IsZero() {
+			m.BluetoothEmu.PlayElapsed = time.Since(m.BluetoothEmu.PlayStarted)
+		}
+		return m, btEmuPlayTickCmd()
 
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
@@ -1410,6 +1492,13 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.BluetoothScan.StopCWRecord()
 		return m, m.setStatus("Stopping mic recording...")
 	}
+	if m.BluetoothEmu.Active && k == "ctrl+c" {
+		m.BluetoothEmu.StopEmulation()
+		return m, m.setStatus("Stopping Bluetooth emulator...")
+	}
+	if m.Focus == FocusContent && m.ActiveView == ViewBluetooth && m.ActiveTabs[ViewBluetooth] == BTTabEmu && m.BluetoothEmu.CapturesDirectKeys() {
+		return m.handleBluetoothEmuDirectKey(msg)
+	}
 
 	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
 		if k == "esc" {
@@ -1485,6 +1574,14 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setStatus("Bluetooth action running")
 		}
 		if m.ActiveView == ViewBluetooth && m.Focus == FocusContent {
+			if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+				if m.BluetoothEmu.Active && m.BluetoothEmu.Spec.IsAudio && m.BluetoothEmu.SubMode == btEmuCtrlMenu {
+					m.BluetoothEmu.RecordAudio = !m.BluetoothEmu.RecordAudio
+					m.BluetoothEmu.SendCmd(bluetooth.EmuCommand{Op: "record", Enabled: m.BluetoothEmu.RecordAudio})
+					return m, m.resetMarquee()
+				}
+				return m, collectBluetoothCmd()
+			}
 			switch m.BluetoothScan.Mode {
 			case btModeList:
 				if !m.BluetoothScan.Scanning {
@@ -1605,6 +1702,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return m, collectLocalIfacesCmd()
 			} else if m.ActiveView == ViewBluetooth {
+				if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+					m.BluetoothEmu.SyncAdapters(m.Bluetooth.Adapters)
+					return m, collectBluetoothCmd()
+				}
 				m.BluetoothScan.SyncAdapters(m.Bluetooth.Adapters)
 				if !m.BluetoothScan.HasScanned && !m.BluetoothScan.Scanning {
 					hci := m.BluetoothScan.EffectiveHCI()
@@ -1742,6 +1843,33 @@ func (m AppModel) launchLocalScan(opt localscan.ScanOption) (tea.Model, tea.Cmd)
 		waitLocalScanProgressCmd(seq, ch),
 		localScanTickCmd(),
 	)
+}
+
+func (m AppModel) startBluetoothEmu() (tea.Model, tea.Cmd) {
+	if bluetooth.NeedsSudo() {
+		c := exec.Command("sudo", "-v")
+		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return btEmuSudoAuthMsg{err: err}
+		})
+	}
+	ctx, seq, cfg, cmdCh, evCh := m.BluetoothEmu.StartEmulation()
+	return m, tea.Batch(
+		m.setStatus("BT Emu: "+cfg.Name),
+		runBluetoothEmuCmd(ctx, seq, cfg, cmdCh, evCh),
+		waitBluetoothEmuEventCmd(seq, evCh),
+	)
+}
+
+func playBTEmuAudioCmd(ctx context.Context, seq int, path string) tea.Cmd {
+	return func() tea.Msg {
+		return btEmuPlayDoneMsg{seq: seq, err: audio.PlayAudio(ctx, path)}
+	}
+}
+
+func btEmuPlayTickCmd() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return btEmuPlayTickMsg{}
+	})
 }
 
 func (m AppModel) startBluetoothAction(kind BTActionKind) (tea.Model, tea.Cmd) {
@@ -1910,8 +2038,14 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewLocal && m.Local.HandleEsc() {
 			return m, nil
 		}
-		if m.ActiveView == ViewBluetooth && m.BluetoothScan.HandleEsc() {
-			return m, nil
+		if m.ActiveView == ViewBluetooth {
+			if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+				if m.BluetoothEmu.HandleEsc() {
+					return m, nil
+				}
+			} else if m.BluetoothScan.HandleEsc() {
+				return m, nil
+			}
 		}
 		if m.ActiveView == ViewFiles && m.Files.HandleEsc() {
 			return m, nil
@@ -2155,6 +2289,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ViewBluetooth:
+		if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+			return m.handleBluetoothEmuKey(k)
+		}
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
 		switch m.BluetoothScan.Mode {
@@ -2972,9 +3109,15 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		localView.Marquee = mq
 		mainLines = localView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 	case m.ActiveView == ViewBluetooth:
-		btScanView := m.BluetoothScan
-		btScanView.Marquee = mq
-		mainLines = btScanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+			btEmuView := m.BluetoothEmu
+			btEmuView.Marquee = mq
+			mainLines = btEmuView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		} else {
+			btScanView := m.BluetoothScan
+			btScanView.Marquee = mq
+			mainLines = btScanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		}
 	case m.ActiveView == ViewFiles:
 		filesView := m.Files
 		filesView.Marquee = mq
@@ -3150,6 +3293,35 @@ func (m AppModel) currentHints() []Hint {
 		}
 	}
 	if m.ActiveView == ViewBluetooth {
+		if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
+			switch m.BluetoothEmu.Mode {
+			case btEmuEditName, btEmuEditCoD, btEmuEditUUID:
+				return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
+			case btEmuPlayWAV:
+				return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "⏎", Desc: "stop"}}
+			case btEmuActive:
+				switch m.BluetoothEmu.SubMode {
+				case btEmuCtrlLiveKB:
+					return []Hint{{Key: "key", Desc: "type"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlSendText:
+					return []Hint{{Key: "⏎", Desc: "send"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlMacros:
+					return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "send"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlMouse:
+					return []Hint{{Key: "↑↓←→", Desc: "move"}, {Key: "⏎/r", Desc: "click"}, {Key: "+/-", Desc: "spd"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlGamepad:
+					return []Hint{{Key: "↑↓←→", Desc: "pad"}, {Key: "zxcv", Desc: "btn"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlMedia:
+					return []Hint{{Key: "⏎", Desc: "play"}, {Key: "←→", Desc: "trk"}, {Key: "↑↓", Desc: "vol"}, {Key: "Esc", Desc: "menu"}}
+				case btEmuCtrlLog:
+					return []Hint{{Key: "↑↓", Desc: "scr"}, {Key: "Esc", Desc: "menu"}}
+				default:
+					return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "stop"}}
+				}
+			default:
+				return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
+			}
+		}
 		switch m.BluetoothScan.Mode {
 		case btModeActions:
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "run"}, {Key: "Esc", Desc: "back"}}
@@ -3295,4 +3467,418 @@ func (m AppModel) currentHints() []Hint {
 		{Key: "Esc", Desc: "tabs"},
 		{Key: "q", Desc: "quit"},
 	}
+}
+
+func (m AppModel) handleBluetoothEmuDirectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	v := &m.BluetoothEmu
+
+	if k == "esc" {
+		v.HandleEsc()
+		return m, m.resetMarquee()
+	}
+
+	switch v.Mode {
+	case btEmuEditName, btEmuEditCoD, btEmuEditUUID:
+		switch k {
+		case "enter":
+			val := strings.TrimSpace(v.InputBuf)
+			switch v.Mode {
+			case btEmuEditName:
+				if val != "" {
+					v.CustomName = val
+					v.NameEdited = true
+				}
+			case btEmuEditCoD:
+				if val == "" {
+					v.CustomCoDHex = ""
+				} else if parsed, err := bluetooth.ParseHexUint32(val); err == nil {
+					v.CustomCoDHex = fmt.Sprintf("0x%06X", parsed)
+				} else {
+					v.ErrMsg = "Invalid hex CoD"
+				}
+			case btEmuEditUUID:
+				v.CustomUUID = val
+			}
+			v.Mode = btEmuSetup
+			v.InputBuf = ""
+			return m, m.resetMarquee()
+		case "backspace":
+			if len(v.InputBuf) > 0 {
+				rs := []rune(v.InputBuf)
+				v.InputBuf = string(rs[:len(rs)-1])
+			}
+		default:
+			if msg.Type == tea.KeySpace {
+				v.InputBuf += " "
+			} else if len(msg.Runes) > 0 {
+				v.InputBuf += string(msg.Runes)
+			}
+		}
+		return m, nil
+	}
+
+	if v.Mode != btEmuActive {
+		return m, nil
+	}
+
+	switch v.SubMode {
+	case btEmuCtrlLiveKB:
+		sendKey := k
+		if msg.Type == tea.KeySpace {
+			sendKey = "space"
+		} else if len(msg.Runes) == 1 && !strings.HasPrefix(k, "ctrl+") && !strings.HasPrefix(k, "alt+") {
+			sendKey = string(msg.Runes)
+		}
+		if code, mods, ok := bluetooth.KeyToHID(sendKey); ok {
+			v.SendCmd(bluetooth.EmuCommand{Op: "key", Code: code, Mods: mods})
+			v.LastSent = sendKey
+		} else {
+			v.LastSent = "unmapped: " + k
+		}
+		return m, m.resetMarquee()
+
+	case btEmuCtrlSendText:
+		switch k {
+		case "enter":
+			txt := v.InputBuf
+			v.InputBuf = ""
+			if txt != "" {
+				v.SendCmd(bluetooth.EmuCommand{Op: "text", Text: txt})
+				v.LastSent = txt
+			}
+			v.SubMode = btEmuCtrlMenu
+			return m, m.resetMarquee()
+		case "backspace":
+			if len(v.InputBuf) > 0 {
+				rs := []rune(v.InputBuf)
+				v.InputBuf = string(rs[:len(rs)-1])
+			}
+		default:
+			if msg.Type == tea.KeySpace {
+				v.InputBuf += " "
+			} else if len(msg.Runes) > 0 {
+				v.InputBuf += string(msg.Runes)
+			}
+		}
+		return m, nil
+
+	case btEmuCtrlMouse:
+		step := v.MouseStep()
+		var dragBtn uint8
+		if v.MouseDrag {
+			dragBtn = 0x01
+		}
+		switch k {
+		case "up", "w":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, DY: -step})
+			v.LastSent = fmt.Sprintf("move 0,-%d", step)
+		case "down", "s":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, DY: step})
+			v.LastSent = fmt.Sprintf("move 0,+%d", step)
+		case "left", "a":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, DX: -step})
+			v.LastSent = fmt.Sprintf("move -%d,0", step)
+		case "right", "d":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, DX: step})
+			v.LastSent = fmt.Sprintf("move +%d,0", step)
+		case "g":
+			v.MouseDrag = !v.MouseDrag
+			var btn uint8
+			if v.MouseDrag {
+				btn = 0x01
+				v.LastSent = "drag HOLD"
+			} else {
+				v.LastSent = "drag OFF"
+			}
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: btn})
+		case "enter", " ", "l", "1":
+			v.MouseDrag = false
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse_click", Buttons: 0x01})
+			v.LastSent = "left click"
+		case "r", "2":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse_click", Buttons: 0x02})
+			v.LastSent = "right click"
+		case "m", "3":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse_click", Buttons: 0x04})
+			v.LastSent = "middle click"
+		case "u", "[":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, Wheel: 2})
+			v.LastSent = "wheel up"
+		case "j", "]":
+			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, Wheel: -2})
+			v.LastSent = "wheel down"
+		case "+", "=":
+			v.MouseStepIdx = min(2, v.MouseStepIdx+1)
+			v.LastSent = "speed " + v.MouseStepLabel()
+		case "-", "_":
+			v.MouseStepIdx = max(0, v.MouseStepIdx-1)
+			v.LastSent = "speed " + v.MouseStepLabel()
+		}
+		return m, m.resetMarquee()
+
+	case btEmuCtrlGamepad:
+		switch k {
+		case "up":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", DY: -127})
+			v.LastSent = "pad up"
+		case "down":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", DY: 127})
+			v.LastSent = "pad down"
+		case "left":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", DX: -127})
+			v.LastSent = "pad left"
+		case "right":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", DX: 127})
+			v.LastSent = "pad right"
+		case "z", "a":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 0})
+			v.LastSent = "btn A"
+		case "x", "b":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 1})
+			v.LastSent = "btn B"
+		case "c":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 2})
+			v.LastSent = "btn X"
+		case "v":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 3})
+			v.LastSent = "btn Y"
+		case "q":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 4})
+			v.LastSent = "btn L1"
+		case "e":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 5})
+			v.LastSent = "btn R1"
+		case "enter":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 7})
+			v.LastSent = "Start"
+		case " ":
+			v.SendCmd(bluetooth.EmuCommand{Op: "gamepad", GBtn: 1 << 6})
+			v.LastSent = "Select"
+		}
+		return m, m.resetMarquee()
+
+	case btEmuCtrlMedia:
+		switch k {
+		case "enter", " ":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerPlayPause})
+			v.LastSent = "Play/Pause"
+		case "left":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerPrevTrack})
+			v.LastSent = "Prev Track"
+		case "right":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerNextTrack})
+			v.LastSent = "Next Track"
+		case "up":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerVolUp})
+			v.LastSent = "Volume +"
+		case "down":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerVolDown})
+			v.LastSent = "Volume -"
+		case "m":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerMute})
+			v.LastSent = "Mute"
+		case "h":
+			v.SendCmd(bluetooth.EmuCommand{Op: "consumer", Usage: bluetooth.ConsumerHome})
+			v.LastSent = "Home"
+		}
+		return m, m.resetMarquee()
+	}
+
+	return m, nil
+}
+
+func (m AppModel) handleBluetoothEmuKey(k string) (tea.Model, tea.Cmd) {
+	v := &m.BluetoothEmu
+	switch v.Mode {
+	case btEmuPlayWAV:
+		if k == "enter" || k == " " {
+			v.StopPlayLast()
+			v.Mode = btEmuSetup
+		}
+		return m, nil
+
+	case btEmuActive:
+		switch v.SubMode {
+		case btEmuCtrlMacros:
+			switch {
+			case m.isUp(k):
+				v.MoveMacro(-1)
+			case m.isDown(k):
+				v.MoveMacro(1)
+			case k == "enter" || k == " ":
+				mc := btEmuMacros[clampIndex(v.MacroCursor, len(btEmuMacros))]
+				v.SendCmd(bluetooth.EmuCommand{Op: mc.Op, Key: mc.Key, Code: mc.Code, Mods: mc.Mods, Usage: mc.Usage})
+				v.LastSent = mc.Label
+				return m, tea.Batch(m.setStatus("Sent "+mc.Label), m.resetMarquee())
+			}
+			return m, nil
+
+		case btEmuCtrlLog:
+			_, _, bodyH := m.dimensions()
+			slots := max(1, bodyH-2)
+			maxScr := max(0, len(v.Logs)-slots)
+			switch {
+			case m.isUp(k):
+				v.LogScroll = max(0, v.LogScroll-1)
+			case m.isDown(k):
+				v.LogScroll = min(maxScr, v.LogScroll+1)
+			}
+			return m, nil
+
+		default: // btEmuCtrlMenu
+			items := v.menuItems()
+			switch {
+			case m.isUp(k):
+				v.MoveMenu(-1)
+			case m.isDown(k):
+				v.MoveMenu(1)
+			case k == "m" && v.Spec.IsAudio:
+				v.MonitorAudio = !v.MonitorAudio
+				v.SendCmd(bluetooth.EmuCommand{Op: "monitor", Enabled: v.MonitorAudio})
+			case k == "p" && v.Spec.IsAudio:
+				act := "pause"
+				if v.AVRCPPaused {
+					act = "play"
+				}
+				v.AVRCPPaused = !v.AVRCPPaused
+				v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: act})
+			case k == "n" && v.Spec.IsAudio:
+				v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: "next"})
+			case k == "b" && v.Spec.IsAudio:
+				v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: "prev"})
+			case k == "enter" || k == " ":
+				if len(items) == 0 {
+					return m, nil
+				}
+				act := items[clampIndex(v.MenuCursor, len(items))]
+				switch act {
+				case emuActLiveKB:
+					v.SubMode = btEmuCtrlLiveKB
+				case emuActSendText:
+					v.InputBuf = ""
+					v.SubMode = btEmuCtrlSendText
+				case emuActMacros:
+					v.SubMode = btEmuCtrlMacros
+				case emuActMouse:
+					v.SubMode = btEmuCtrlMouse
+				case emuActGamepad:
+					v.SubMode = btEmuCtrlGamepad
+				case emuActMedia:
+					v.SubMode = btEmuCtrlMedia
+				case emuActMonitor:
+					v.MonitorAudio = !v.MonitorAudio
+					v.SendCmd(bluetooth.EmuCommand{Op: "monitor", Enabled: v.MonitorAudio})
+				case emuActRecord:
+					v.RecordAudio = !v.RecordAudio
+					v.SendCmd(bluetooth.EmuCommand{Op: "record", Enabled: v.RecordAudio})
+				case emuActAVRCPPlay:
+					action := "pause"
+					if v.AVRCPPaused {
+						action = "play"
+					}
+					v.AVRCPPaused = !v.AVRCPPaused
+					v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: action})
+				case emuActAVRCPNext:
+					v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: "next"})
+				case emuActAVRCPPrev:
+					v.SendCmd(bluetooth.EmuCommand{Op: "avrcp", Action: "prev"})
+				case emuActLog:
+					_, _, bodyH := m.dimensions()
+					slots := max(1, bodyH-2)
+					v.LogScroll = max(0, len(v.Logs)-slots)
+					v.SubMode = btEmuCtrlLog
+				case emuActStop:
+					v.StopEmulation()
+					if !v.Active {
+						v.Mode = btEmuSetup
+					}
+				}
+			}
+			return m, m.resetMarquee()
+		}
+	}
+
+	// btEmuSetup
+	fields := v.setupFields()
+	if len(fields) == 0 {
+		return m, nil
+	}
+	cur := clampIndex(v.SetupCursor, len(fields))
+	f := fields[cur]
+
+	switch {
+	case m.isUp(k):
+		v.MoveSetup(-1)
+	case m.isDown(k):
+		v.MoveSetup(1)
+	case m.isLeft(k):
+		switch f {
+		case emuFieldProfile:
+			v.CycleProfile(-1)
+		case emuFieldAdapter:
+			v.CycleAdapter(-1)
+			return m, collectBluetoothCmd()
+		case emuFieldCustomMode:
+			v.CycleCustomMode(-1)
+		case emuFieldClass:
+			v.CycleCoDPreset(-1)
+		case emuFieldMonitor:
+			v.MonitorAudio = !v.MonitorAudio
+		case emuFieldRecord:
+			v.RecordAudio = !v.RecordAudio
+		}
+	case m.isRight(k):
+		switch f {
+		case emuFieldProfile:
+			v.CycleProfile(1)
+		case emuFieldAdapter:
+			v.CycleAdapter(1)
+			return m, collectBluetoothCmd()
+		case emuFieldCustomMode:
+			v.CycleCustomMode(1)
+		case emuFieldClass:
+			v.CycleCoDPreset(1)
+		case emuFieldMonitor:
+			v.MonitorAudio = !v.MonitorAudio
+		case emuFieldRecord:
+			v.RecordAudio = !v.RecordAudio
+		}
+	case k == "enter" || k == " ":
+		switch f {
+		case emuFieldProfile:
+			v.CycleProfile(1)
+		case emuFieldName:
+			v.InputBuf = v.CustomName
+			v.Mode = btEmuEditName
+		case emuFieldAdapter:
+			v.CycleAdapter(1)
+			return m, collectBluetoothCmd()
+		case emuFieldCustomMode:
+			v.CycleCustomMode(1)
+		case emuFieldClass:
+			if v.CustomCoDHex != "" {
+				v.InputBuf = v.CustomCoDHex
+			} else {
+				preset := bluetooth.EmuCoDPresets[clampIndex(v.CoDPresetIdx, len(bluetooth.EmuCoDPresets))]
+				v.InputBuf = fmt.Sprintf("0x%06X", preset.CoD)
+			}
+			v.Mode = btEmuEditCoD
+		case emuFieldCustomUUID:
+			v.InputBuf = v.CustomUUID
+			v.Mode = btEmuEditUUID
+		case emuFieldMonitor:
+			v.MonitorAudio = !v.MonitorAudio
+		case emuFieldRecord:
+			v.RecordAudio = !v.RecordAudio
+		case emuFieldStart:
+			return m.startBluetoothEmu()
+		case emuFieldPlayLast:
+			ctx, seq, path, ok := v.StartPlayLast()
+			if ok {
+				return m, tea.Batch(m.setStatus("Playing capture..."), playBTEmuAudioCmd(ctx, seq, path), btEmuPlayTickCmd())
+			}
+		}
+	}
+	return m, m.resetMarquee()
 }

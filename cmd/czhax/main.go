@@ -302,8 +302,64 @@ func main() {
 			}
 			return
 		}
+		if len(os.Args) > 2 && os.Args[2] == "emulate" {
+			fs := flag.NewFlagSet("bt emulate", flag.ExitOnError)
+			hci := fs.String("hci", "hci0", "HCI device (hci0)")
+			profileStr := fs.String("profile", "keyboard", "Profile: keyboard|mouse|combo|gamepad|media|speaker|headset|custom")
+			name := fs.String("name", "", "Advertised Bluetooth device name")
+			codStr := fs.String("cod", "", "Hex Class of Device (e.g. 0x002540)")
+			appStr := fs.String("appearance", "", "Hex BLE Appearance (e.g. 0x03c1)")
+			customMode := fs.String("custom-mode", "hid", "Custom mode: hid|speaker|advertise")
+			customUUID := fs.String("custom-uuid", "", "Custom BLE service UUID")
+			recordDir := fs.String("record-dir", "", "Directory for speaker WAV captures")
+			monitor := fs.Bool("monitor", false, "Play received speaker audio locally")
+			record := fs.Bool("record", false, "Record received speaker audio to WAV")
+			uid := fs.Int("uid", -1, "Owner UID for capture files")
+			gid := fs.Int("gid", -1, "Owner GID for capture files")
+			_ = fs.Parse(os.Args[3:])
+
+			prof, err := bluetooth.ParseEmuProfile(*profileStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "bt emulate: %v\n", err)
+				os.Exit(1)
+			}
+			var cod uint32
+			if strings.TrimSpace(*codStr) != "" {
+				if v, perr := bluetooth.ParseHexUint32(*codStr); perr == nil {
+					cod = v
+				}
+			}
+			var app uint16
+			if strings.TrimSpace(*appStr) != "" {
+				if v, perr := bluetooth.ParseHexUint32(*appStr); perr == nil {
+					app = uint16(v)
+				}
+			}
+			cfg := bluetooth.EmuConfig{
+				HCI:          *hci,
+				Profile:      prof,
+				Name:         *name,
+				CoD:          cod,
+				Appearance:   app,
+				CustomMode:   bluetooth.EmuCustomMode(*customMode),
+				CustomUUID:   *customUUID,
+				RecordDir:    *recordDir,
+				MonitorAudio: *monitor,
+				RecordAudio:  *record,
+				UID:          *uid,
+				GID:          *gid,
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			if err := bluetooth.RunEmulatorCLI(ctx, cfg, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "bt emulate error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		fmt.Fprintln(os.Stderr, "usage: czhax bt scan [--hci hci0] [--mode both|le|classic] [--raw]")
 		fmt.Fprintln(os.Stderr, "       czhax bt carwhisperer --hci hci0 --addr AA:BB:.. --record out.wav [--play playback.raw]")
+		fmt.Fprintln(os.Stderr, "       czhax bt emulate [--hci hci0] [--profile keyboard|mouse|combo|gamepad|media|speaker|headset|custom]")
 		os.Exit(1)
 	}
 
