@@ -1180,6 +1180,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setStatus("Nmap failed"), m.resetMarquee())
 		case m.Local.Result.Canceled:
 			return m, tea.Batch(m.setStatus("Nmap stopped"), m.resetMarquee())
+		case m.Local.Mode == localModeHostDetail:
+			if h, ok := m.Local.SelectedHost(); ok {
+				return m, tea.Batch(m.setStatus(fmt.Sprintf("Nmap: %d open", len(h.Ports))), m.resetMarquee())
+			}
+			return m, tea.Batch(m.setStatus("Nmap done"), m.resetMarquee())
 		default:
 			return m, tea.Batch(m.setStatus(fmt.Sprintf("Nmap: %d hosts", len(m.Local.Result.Hosts))), m.resetMarquee())
 		}
@@ -1501,8 +1506,9 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewLocal && m.Focus == FocusContent {
 			switch m.Local.Mode {
 			case localModeResults:
+				m.Local.TargetHost = ""
 				for _, opt := range localscan.ScanOptions {
-					if opt.Mode == m.Local.RunMode {
+					if opt.Mode == m.Local.LastSubnetMode {
 						return m.launchLocalScan(opt)
 					}
 				}
@@ -2119,13 +2125,16 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				m.Local.MoveHost(-1)
 			case m.isDown(k):
 				m.Local.MoveHost(1)
+			case k == "s":
+				m.Local.ScanSelectedHost()
 			case k == "enter" || k == " ":
 				if len(m.Local.Result.Hosts) > 0 {
 					m.Local.OpenHostDetail()
 					return m, nil
 				}
+				m.Local.TargetHost = ""
 				for _, opt := range localscan.ScanOptions {
-					if opt.Mode == m.Local.RunMode {
+					if opt.Mode == m.Local.LastSubnetMode {
 						return m.launchLocalScan(opt)
 					}
 				}
@@ -3131,7 +3140,7 @@ func (m AppModel) currentHints() []Hint {
 			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
 		case localModeResults:
 			if len(m.Local.Result.Hosts) > 0 {
-				return []Hint{{Key: "↑↓", Desc: "host"}, {Key: "⏎", Desc: "info"}, {Key: "r", Desc: "rescan"}, {Key: "Esc", Desc: "back"}}
+				return []Hint{{Key: "↑↓", Desc: "host"}, {Key: "⏎", Desc: "ports"}, {Key: "s", Desc: "scan"}, {Key: "Esc", Desc: "opts"}}
 			}
 			return []Hint{{Key: "⏎", Desc: "rescan"}, {Key: "Esc", Desc: "back"}}
 		case localModeHostDetail:

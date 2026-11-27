@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/czhax/czhax/internal/oui"
 )
 
 type ScanMode int
@@ -38,13 +40,16 @@ type ScanOption struct {
 }
 
 var ScanOptions = []ScanOption{
-	{Mode: ScanDiscovery, Name: "Host Discovery", Flag: "-sn", Desc: "fast ping/ARP sweep"},
-	{Mode: ScanQuick, Name: "Quick Ports", Flag: "-F", Desc: "top 100 TCP ports"},
+	{Mode: ScanDiscovery, Name: "Discover Hosts", Flag: "-sn", Desc: "fast ping/ARP sweep"},
+	{Mode: ScanQuick, Name: "Quick Port Scan", Flag: "-F", Desc: "top 100 TCP ports"},
 	{Mode: ScanService, Name: "Service Scan", Flag: "-sV", Desc: "top 100 + versions"},
 	{Mode: ScanOS, Name: "OS & Scripts", Flag: "-A", Desc: "OS, ver, scripts", Warn: true},
 	{Mode: ScanTop1000, Name: "Top 1000 Ports", Flag: "1k", Desc: "default 1000 ports"},
 	{Mode: ScanAllPorts, Name: "Full Port Scan", Flag: "-p-", Desc: "all 65535 TCP ports", Warn: true},
 }
+
+// HostScanOptions are the scan modes shown when targeting a single host.
+var HostScanOptions = ScanOptions[1:]
 
 type Port struct {
 	Number   int
@@ -68,14 +73,15 @@ func (p Port) Summary() string {
 }
 
 type Host struct {
-	IP       string
-	Hostname string
-	MAC      string
-	Vendor   string
-	OS       string
-	Status   string
-	Reason   string
-	Ports    []Port
+	IP           string
+	Hostname     string
+	MAC          string
+	Vendor       string
+	OS           string
+	Status       string
+	Reason       string
+	PortsScanned bool
+	Ports        []Port
 }
 
 func (h Host) DisplayName() string {
@@ -89,9 +95,10 @@ func (h Host) DisplayName() string {
 }
 
 type ScanRequest struct {
-	Iface  string
-	Target string
-	Mode   ScanMode
+	Iface      string
+	Target     string
+	Mode       ScanMode
+	SingleHost bool
 }
 
 type ScanProgress struct {
@@ -184,8 +191,14 @@ func BuildNmapArgs(req ScanRequest, privileged bool) []string {
 		args = append(args, "-sn")
 	}
 
-	if privileged && strings.TrimSpace(req.Iface) != "" {
-		args = append(args, "-e", strings.TrimSpace(req.Iface))
+	// Single-host port scans target an already-discovered IP: skip host-discovery
+	// ping probes (-Pn) so firewalled hosts still get port-scanned, and skip
+	// reverse DNS (-n) so dead local DNS servers don't stall scans for 10+ seconds.
+	if req.SingleHost && req.Mode != ScanDiscovery {
+		args = append(args, "-Pn", "-n")
+	} else if req.Mode != ScanDiscovery {
+		// Subnet port scans also avoid reverse-DNS stalls while keeping ARP/ICMP discovery.
+		args = append(args, "-n")
 	}
 	args = append(args, "--stats-every", "1s", "-oX", "-", strings.TrimSpace(req.Target))
 	return args
@@ -381,6 +394,11 @@ func RunScan(ctx context.Context, req ScanRequest, onProgress func(ScanProgress)
 		mu.Unlock()
 		sortHosts(res.Hosts)
 	}
+	if req.Mode != ScanDiscovery {
+		for i := range res.Hosts {
+			res.Hosts[i].PortsScanned = true
+		}
+	}
 
 	if ctx.Err() != nil {
 		res.Canceled = true
@@ -402,7 +420,18 @@ func RunScan(ctx context.Context, req ScanRequest, onProgress func(ScanProgress)
 
 func hostBrief(h Host) string {
 	if len(h.Ports) > 0 {
-		return fmt.Sprintf("%d open", len(h.Ports))
+		var nums []string
+		for i, p := range h.Ports {
+			if i >= 3 {
+				break
+			}
+			nums = append(nums, strconv.Itoa(p.Number))
+		}
+		summary := fmt.Sprintf("%d open (%s", len(h.Ports), strings.Join(nums, ","))
+		if len(h.Ports) > 3 {
+			summary += ",…"
+		}
+		return summary + ")"
 	}
 	if h.Hostname != "" {
 		return h.Hostname
@@ -418,11 +447,17 @@ type xmlNmapRun struct {
 }
 
 type xmlHost struct {
-	Status    xmlStatus     `xml:"status"`
-	Addresses []xmlAddress  `xml:"address"`
-	Hostnames []xmlHostname `xml:"hostnames>hostname"`
-	Ports     []xmlPort     `xml:"ports>port"`
-	OSMatches []xmlOSMatch  `xml:"os>osmatch"`
+	Status     xmlStatus       `xml:"status"`
+	Addresses  []xmlAddress    `xml:"address"`
+	Hostnames  []xmlHostname   `xml:"hostnames>hostname"`
+	ExtraPorts []xmlExtraPorts `xml:"ports>extraports"`
+	Ports      []xmlPort       `xml:"ports>port"`
+	OSMatches  []xmlOSMatch    `xml:"os>osmatch"`
+}
+
+type xmlExtraPorts struct {
+	State string `xml:"state,attr"`
+	Count int    `xml:"count,attr"`
 }
 
 type xmlStatus struct {
@@ -540,6 +575,12 @@ func convertXMLHost(xh xmlHost) (Host, bool) {
 			h.Hostname = hn.Name
 			break
 		}
+	}
+	if h.MAC != "" && h.Vendor == "" {
+		h.Vendor = oui.Lookup(h.MAC)
+	}
+	if len(xh.Ports) > 0 || len(xh.ExtraPorts) > 0 {
+		h.PortsScanned = true
 	}
 	for _, p := range xh.Ports {
 		if !strings.EqualFold(p.State.State, "open") {

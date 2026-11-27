@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,10 @@ type LocalView struct {
 	RunLines       []string
 
 	Result           localscan.ScanResult
+	SubnetHosts      []localscan.Host
+	SubnetTarget     string
+	LastSubnetMode   localscan.ScanMode
+	RunSingleHost    bool
 	ScanErr          string
 	HostCursor       int
 	HostDetailScroll int
@@ -169,8 +174,15 @@ func (v *LocalView) ConfirmIface() bool {
 	return true
 }
 
+func (v LocalView) activeOptions() []localscan.ScanOption {
+	if strings.TrimSpace(v.TargetHost) != "" {
+		return localscan.HostScanOptions
+	}
+	return localscan.ScanOptions
+}
+
 func (v LocalView) optionCount() int {
-	return len(localscan.ScanOptions) + 1 // +1 for Back
+	return len(v.activeOptions()) + 1 // +1 for Back
 }
 
 func (v *LocalView) MoveOption(delta int) {
@@ -179,14 +191,15 @@ func (v *LocalView) MoveOption(delta int) {
 }
 
 func (v LocalView) SelectedOption() (localscan.ScanOption, bool) {
-	if v.OptionCursor < 0 || v.OptionCursor >= len(localscan.ScanOptions) {
+	opts := v.activeOptions()
+	if v.OptionCursor < 0 || v.OptionCursor >= len(opts) {
 		return localscan.ScanOption{}, false
 	}
-	return localscan.ScanOptions[v.OptionCursor], true
+	return opts[v.OptionCursor], true
 }
 
 func (v LocalView) IsBackOption() bool {
-	return v.OptionCursor == len(localscan.ScanOptions)
+	return v.OptionCursor == len(v.activeOptions())
 }
 
 func (v LocalView) ActiveTarget() string {
@@ -230,6 +243,10 @@ func (v *LocalView) StartScan(opt localscan.ScanOption) (context.Context, int, l
 	v.RunMode = opt.Mode
 	v.RunOptionName = opt.Name
 	v.RunTarget = target
+	v.RunSingleHost = strings.TrimSpace(v.TargetHost) != ""
+	if !v.RunSingleHost {
+		v.LastSubnetMode = opt.Mode
+	}
 	v.RunTask = ""
 	v.RunPct = 0
 	v.RunHasPct = false
@@ -241,9 +258,10 @@ func (v *LocalView) StartScan(opt localscan.ScanOption) (context.Context, int, l
 	v.Mode = localModeRunning
 
 	req := localscan.ScanRequest{
-		Iface:  v.SelectedIface.Name,
-		Target: target,
-		Mode:   opt.Mode,
+		Iface:      v.SelectedIface.Name,
+		Target:     target,
+		Mode:       opt.Mode,
+		SingleHost: v.RunSingleHost,
 	}
 	return ctx, v.ScanSeq, req, v.ScanProgressCh, true
 }
@@ -302,9 +320,94 @@ func (v *LocalView) FinishScan(seq int, res localscan.ScanResult, err error) {
 	} else {
 		v.ScanErr = ""
 	}
+
+	if v.RunMode != localscan.ScanDiscovery {
+		for i := range v.Result.Hosts {
+			v.Result.Hosts[i].PortsScanned = true
+		}
+	}
+
+	if v.RunSingleHost {
+		targetIP := strings.TrimSpace(v.RunTarget)
+		v.TargetHost = ""
+		v.RunSingleHost = false
+		if len(v.Result.Hosts) > 0 {
+			for _, scanned := range v.Result.Hosts {
+				v.SubnetHosts = upsertHost(v.SubnetHosts, scanned)
+			}
+		} else if len(v.SubnetHosts) > 0 && targetIP != "" && v.ScanErr == "" && !v.Result.Canceled {
+			// Single-host scan completed with 0 open ports and no <host> block: still mark PortsScanned.
+			for i := range v.SubnetHosts {
+				if v.SubnetHosts[i].IP == targetIP {
+					v.SubnetHosts[i].PortsScanned = true
+				}
+			}
+		}
+		if len(v.SubnetHosts) > 0 {
+			v.Result.Hosts = v.SubnetHosts
+			if v.SubnetTarget != "" {
+				v.Result.Target = v.SubnetTarget
+			}
+		}
+		v.HostCursor = findHostIndex(v.Result.Hosts, targetIP)
+		v.HostDetailScroll = 0
+		if len(v.Result.Hosts) > 0 {
+			v.Mode = localModeHostDetail
+			return
+		}
+		v.Mode = localModeResults
+		return
+	}
+
+	v.SubnetHosts = append([]localscan.Host(nil), v.Result.Hosts...)
+	if v.Result.Target != "" {
+		v.SubnetTarget = v.Result.Target
+	}
 	v.HostCursor = 0
 	v.HostDetailScroll = 0
 	v.Mode = localModeResults
+}
+
+func upsertHost(hosts []localscan.Host, scanned localscan.Host) []localscan.Host {
+	for i := range hosts {
+		if hosts[i].IP == scanned.IP {
+			merged := hosts[i]
+			if scanned.Hostname != "" {
+				merged.Hostname = scanned.Hostname
+			}
+			if scanned.MAC != "" {
+				merged.MAC = scanned.MAC
+			}
+			if scanned.Vendor != "" {
+				merged.Vendor = scanned.Vendor
+			}
+			if scanned.OS != "" {
+				merged.OS = scanned.OS
+			}
+			if scanned.Status != "" {
+				merged.Status = scanned.Status
+			}
+			if scanned.Reason != "" {
+				merged.Reason = scanned.Reason
+			}
+			if scanned.PortsScanned || len(scanned.Ports) > 0 {
+				merged.PortsScanned = true
+				merged.Ports = append([]localscan.Port(nil), scanned.Ports...)
+			}
+			hosts[i] = merged
+			return hosts
+		}
+	}
+	return append(hosts, scanned)
+}
+
+func findHostIndex(hosts []localscan.Host, ip string) int {
+	for i, h := range hosts {
+		if h.IP == ip {
+			return i
+		}
+	}
+	return 0
 }
 
 func (v *LocalView) MoveHost(delta int) {
@@ -338,10 +441,7 @@ func (v *LocalView) ScanSelectedHost() bool {
 		return false
 	}
 	v.TargetHost = h.IP
-	v.OptionCursor = 1 // Quick Ports (-F) is the most useful next step for a single host
-	if v.OptionCursor >= len(localscan.ScanOptions) {
-		v.OptionCursor = 0
-	}
+	v.OptionCursor = 0 // Quick Port Scan (-F) is first in HostScanOptions
 	v.ScanErr = ""
 	v.Mode = localModeOptions
 	return true
@@ -523,8 +623,12 @@ func (v LocalView) renderOptions(w, h int, pal theme.Palette, focused bool) []st
 	if ifName == "" {
 		ifName = "iface"
 	}
+	title := "Scan · " + ifName
+	if strings.TrimSpace(v.TargetHost) != "" {
+		title = "Port Scan · " + strings.TrimSpace(v.TargetHost)
+	}
 	lines := []string{
-		" " + accent.Render(v.Marquee.Truncate("Nmap · "+ifName, max(6, w-2))),
+		" " + accent.Render(v.Marquee.Truncate(title, max(6, w-2))),
 		" " + sec.Render("Net ") + txt.Render(v.Marquee.Truncate(v.ActiveTargetLabel(), max(6, w-6))),
 	}
 
@@ -534,14 +638,15 @@ func (v LocalView) renderOptions(w, h int, pal theme.Palette, focused bool) []st
 		listH = max(1, h-4)
 	}
 
+	opts := v.activeOptions()
 	total := v.optionCount()
 	cursor := clampIndex(v.OptionCursor, total)
 	start, end := ScrollWindow(total, cursor, listH)
 	for i := start; i < end; i++ {
 		var label, val string
 		var isBack, isWarn bool
-		if i < len(localscan.ScanOptions) {
-			opt := localscan.ScanOptions[i]
+		if i < len(opts) {
+			opt := opts[i]
 			label = opt.Name
 			val = opt.Flag
 			isWarn = opt.Warn
@@ -728,7 +833,7 @@ func (v LocalView) renderResults(w, h int, pal theme.Palette, focused bool) []st
 		}
 		hint := "⏎:rescan Esc:options"
 		if len(v.Result.Hosts) > 0 {
-			hint = "↑↓:host ⏎:info r:rescan Esc:opts"
+			hint = "↑↓:host ⏎:ports s:scan Esc:opts"
 		}
 		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(hint, max(6, w-2))))
 	}
@@ -739,7 +844,9 @@ func (v LocalView) renderResults(w, h int, pal theme.Palette, focused bool) []st
 func hostResultSummary(h localscan.Host) string {
 	var parts []string
 	if len(h.Ports) > 0 {
-		parts = append(parts, fmt.Sprintf("%dp", len(h.Ports)))
+		parts = append(parts, fmt.Sprintf("%dp:%s", len(h.Ports), formatPortList(h.Ports)))
+	} else if h.PortsScanned {
+		parts = append(parts, "0p")
 	}
 	if h.Hostname != "" {
 		parts = append(parts, h.Hostname)
@@ -752,16 +859,32 @@ func hostResultSummary(h localscan.Host) string {
 	return strings.Join(parts, " ")
 }
 
+func formatPortList(ports []localscan.Port) string {
+	var nums []string
+	for i, p := range ports {
+		if i >= 3 {
+			nums = append(nums, "…")
+			break
+		}
+		nums = append(nums, strconv.Itoa(p.Number))
+	}
+	return strings.Join(nums, ",")
+}
+
 func (v LocalView) buildHostRows(w int, pal theme.Palette, host localscan.Host) []string {
 	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
 	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
+	danger := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 	txt := lipgloss.NewStyle().Foreground(pal.Text)
 
 	valW := max(6, w-9)
 	var rows []string
 
+	if v.ScanErr != "" {
+		rows = append(rows, " "+danger.Render("Err    ")+danger.Render(v.Marquee.Truncate(v.ScanErr, valW)))
+	}
 	if host.Hostname != "" {
 		rows = append(rows, " "+sec.Render("Host   ")+txt.Render(v.Marquee.Truncate(host.Hostname, valW)))
 	}
@@ -777,13 +900,16 @@ func (v LocalView) buildHostRows(w int, pal theme.Palette, host localscan.Host) 
 	if host.Reason != "" {
 		rows = append(rows, " "+sec.Render("State  ")+ok.Render(host.Status)+" "+muted.Render(v.Marquee.Truncate("("+host.Reason+")", max(4, valW-len(host.Status)-1))))
 	}
-	if len(host.Ports) == 0 {
-		rows = append(rows, " "+sec.Render("Ports  ")+muted.Render("none / not scanned"))
-	} else {
+	switch {
+	case len(host.Ports) > 0:
 		rows = append(rows, " "+sec.Render("Ports  ")+ok.Render(fmt.Sprintf("%d open", len(host.Ports))))
 		for _, p := range host.Ports {
 			rows = append(rows, "  "+txt.Render(v.Marquee.Truncate(p.Summary(), max(6, w-3))))
 		}
+	case host.PortsScanned:
+		rows = append(rows, " "+sec.Render("Ports  ")+muted.Render("0 open (scanned)"))
+	default:
+		rows = append(rows, " "+sec.Render("Ports  ")+muted.Render("not scanned (⏎/s:scan)"))
 	}
 	return rows
 }
@@ -794,10 +920,14 @@ func (v LocalView) renderHostDetail(w, h int, pal theme.Palette, focused bool) [
 		return v.renderResults(w, h, pal, focused)
 	}
 	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
+	okSty := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
 
+	rightPill := sec.Render("[s]") + okSty.Render("Scan")
+	titleW := max(6, w-lipgloss.Width(rightPill)-3)
 	lines := []string{
-		" " + accent.Render(v.Marquee.Truncate("Host · "+host.IP, max(6, w-2))),
+		" " + v.Marquee.FitLine(accent.Render("Host · "+host.IP), titleW) + " " + rightPill + " ",
 	}
 	if h <= 1 {
 		return v.Marquee.SplitLinesPadded(lines, w, h)
@@ -813,7 +943,7 @@ func (v LocalView) renderHostDetail(w, h int, pal theme.Palette, focused bool) [
 	for len(lines) < h-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:scr s:scan host Esc:back", max(6, w-2))))
+	lines = append(lines, " "+muted.Render(v.Marquee.Truncate("↑↓:scr s/⏎:scan ports Esc:back", max(6, w-2))))
 	if len(lines) > h && h >= 2 {
 		lines = append(lines[:h-1], lines[len(lines)-1])
 	}
