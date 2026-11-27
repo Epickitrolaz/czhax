@@ -18,6 +18,7 @@ const (
 	SDRTabRadio SDRTab = iota
 	SDRTabSpec
 	SDRTabISM
+	SDRTabServer
 )
 
 type sdrRadioMode int
@@ -36,6 +37,7 @@ const (
 	sdrFieldFreq sdrRadioField = iota
 	sdrFieldStep
 	sdrFieldMod
+	sdrFieldBW
 	sdrFieldGain
 	sdrFieldSquelch
 	sdrFieldPreset
@@ -49,16 +51,45 @@ type sdrRunField int
 const (
 	sdrRunFreq sdrRunField = iota
 	sdrRunStep
+	sdrRunBW
 	sdrRunMute
 	sdrRunRecord
 	sdrRunStop
 )
 
-type sdrSpecKind int
+// sdrSpecView selects how a sweep is displayed (bargraph or ranked signal list).
+type sdrSpecView int
 
 const (
-	sdrSpecLive sdrSpecKind = iota
-	sdrSpecSweep
+	sdrSpecViewChart sdrSpecView = iota
+	sdrSpecViewList
+	sdrSpecViewCount
+)
+
+func (v sdrSpecView) String() string {
+	if v == sdrSpecViewList {
+		return "Top 50"
+	}
+	return "Bars"
+}
+
+type sdrSpecField int
+
+const (
+	sdrSpecFStart sdrSpecField = iota
+	sdrSpecFEnd
+	sdrSpecFPreset
+	sdrSpecFView
+	sdrSpecFGain
+	sdrSpecFAction
+)
+
+type sdrSpecEdit int
+
+const (
+	sdrSpecEditNone sdrSpecEdit = iota
+	sdrSpecEditStart
+	sdrSpecEditEnd
 )
 
 type sdrISMMode int
@@ -79,7 +110,29 @@ const (
 	sdrISMViewPkts
 )
 
-// SDRView implements the Radio, Spec (FFT/sweep), and 433 (rtl_433) tabs.
+type sdrSrvField int
+
+const (
+	sdrSrvBind sdrSrvField = iota
+	sdrSrvPort
+	sdrSrvFreq
+	sdrSrvRate
+	sdrSrvGain
+	sdrSrvAction
+)
+
+type sdrSrvEdit int
+
+const (
+	sdrSrvEditNone sdrSrvEdit = iota
+	sdrSrvEditPort
+	sdrSrvEditFreq
+)
+
+// SDRServerBinds lists the rtl_tcp listen addresses.
+var SDRServerBinds = []string{"0.0.0.0", "127.0.0.1"}
+
+// SDRView implements the Radio, Spec (FFT/sweep), 433, and Srv (rtl_tcp) tabs.
 type SDRView struct {
 	Tab           SDRTab
 	WorkDir       string
@@ -99,6 +152,7 @@ type SDRView struct {
 	RadioFreqHz  int64
 	RadioStepIdx int
 	RadioMod     sdr.DemodMode
+	RadioBwHz    int
 	RadioGainIdx int
 	RadioSquelch int
 	PresetIdx    int
@@ -123,10 +177,13 @@ type SDRView struct {
 	RadioElapsed time.Duration
 	RadioErr     string
 
-	// Spectrum / band sweep state
-	SpecKind      sdrSpecKind
-	SpecCenterHz  int64
-	SpecBandIdx   int
+	// Spectrum / custom sweep state
+	SpecStartHz   int64
+	SpecEndHz     int64
+	SpecPresetIdx int
+	SpecView      sdrSpecView
+	SpecCursor    int
+	SpecEdit      sdrSpecEdit
 	SpecActive    bool
 	SpecSeq       int
 	SpecCancel    context.CancelFunc
@@ -134,6 +191,7 @@ type SDRView struct {
 	SpecFrame     sdr.SpectrumFrame
 	SpecHasFrame  bool
 	SpecMarker    int
+	SpecListCur   int
 	SpecStarted   time.Time
 	SpecElapsed   time.Duration
 	SpecErr       string
@@ -155,6 +213,25 @@ type SDRView struct {
 	ISMStarted      time.Time
 	ISMElapsed      time.Duration
 	ISMErr          string
+
+	// rtl_tcp server state
+	SrvBindIdx  int
+	SrvPort     int
+	SrvFreqHz   int64
+	SrvRateIdx  int
+	SrvGainIdx  int
+	SrvCursor   int
+	SrvEdit     sdrSrvEdit
+	SrvActive   bool
+	SrvSeq      int
+	SrvCancel   context.CancelFunc
+	SrvLines    []string
+	SrvLineCh   chan string
+	SrvStarted  time.Time
+	SrvElapsed  time.Duration
+	SrvErr      string
+	SrvClients  int
+	SrvLastLine string
 }
 
 func NewSDRView(workDir, captureDir, bookmarksPath string) SDRView {
@@ -169,11 +246,17 @@ func NewSDRView(workDir, captureDir, bookmarksPath string) SDRView {
 		RadioFreqHz:   98_500_000,
 		RadioStepIdx:  3, // 100 kHz
 		RadioMod:      sdr.ModeWBFM,
+		RadioBwHz:     sdr.DefaultBandwidth(sdr.ModeWBFM),
 		RadioGainIdx:  0, // Auto
-		SpecCenterHz:  98_500_000,
+		SpecStartHz:   87_500_000,
+		SpecEndHz:     108_000_000,
 		SpecLastWidth: 34,
 		Bookmarks:     bms,
 		ISMLog:        true,
+		SrvPort:       1234,
+		SrvFreqHz:     100_000_000,
+		SrvRateIdx:    1, // 2.048M
+		SrvGainIdx:    0, // Auto
 	}
 	v.rebuildPresets()
 	return v
@@ -211,16 +294,34 @@ func (v SDRView) CurrentISMGainDB() int {
 	return sdr.GainOptions[clampIndex(v.ISMGainIdx, len(sdr.GainOptions))]
 }
 
-func (v SDRView) CurrentBand() sdr.BandPreset {
-	return sdr.BandPresets[clampIndex(v.SpecBandIdx, len(sdr.BandPresets))]
+// SpecPresetCount is "Custom" plus every band preset.
+func (v SDRView) SpecPresetCount() int { return len(sdr.BandPresets) + 1 }
+
+func (v SDRView) SpecPresetName() string {
+	if v.SpecPresetIdx <= 0 {
+		return "Custom"
+	}
+	idx := clampIndex(v.SpecPresetIdx-1, len(sdr.BandPresets))
+	return sdr.BandPresets[idx].Name
 }
 
+func (v SDRView) ExplicitPreset() bool { return v.SpecPresetIdx > 0 }
+
 func (v SDRView) IsTextInput() bool {
-	return v.Tab == SDRTabRadio && (v.RadioMode == sdrRadioEditFreq || v.RadioMode == sdrRadioSaveName)
+	if v.Tab == SDRTabRadio {
+		return v.RadioMode == sdrRadioEditFreq || v.RadioMode == sdrRadioSaveName
+	}
+	if v.Tab == SDRTabSpec {
+		return v.SpecEdit != sdrSpecEditNone
+	}
+	if v.Tab == SDRTabServer {
+		return v.SrvEdit != sdrSrvEditNone
+	}
+	return false
 }
 
 func (v SDRView) AnyActive() bool {
-	return v.RadioActive || v.SpecActive || v.ISMActive
+	return v.RadioActive || v.SpecActive || v.ISMActive || v.SrvActive
 }
 
 func (v *SDRView) StopRadio() {
@@ -247,10 +348,18 @@ func (v *SDRView) StopISM() {
 	}
 }
 
+func (v *SDRView) StopServer() {
+	if v.SrvCancel != nil {
+		v.SrvCancel()
+		v.SrvCancel = nil
+	}
+}
+
 func (v *SDRView) StopAll() {
 	v.StopRadio()
 	v.StopSpec()
 	v.StopISM()
+	v.StopServer()
 }
 
 func (v *SDRView) SetProbeResult(st sdr.ProbeStatus) {
@@ -288,8 +397,20 @@ func (v *SDRView) HandleEsc() bool {
 			return true
 		}
 	case SDRTabSpec:
+		if v.SpecEdit != sdrSpecEditNone {
+			v.SpecEdit = sdrSpecEditNone
+			v.Input = ""
+			v.InputErr = ""
+			return true
+		}
 		if v.SpecActive {
 			v.StopSpec()
+			return true
+		}
+		if v.SpecHasFrame {
+			// Leave the results view back to the sweep configuration.
+			v.SpecHasFrame = false
+			v.SpecFrame = sdr.SpectrumFrame{}
 			return true
 		}
 	case SDRTabISM:
@@ -305,6 +426,17 @@ func (v *SDRView) HandleEsc() bool {
 			v.ISMMode = sdrISMSetup
 			return true
 		}
+	case SDRTabServer:
+		if v.SrvEdit != sdrSrvEditNone {
+			v.SrvEdit = sdrSrvEditNone
+			v.Input = ""
+			v.InputErr = ""
+			return true
+		}
+		if v.SrvActive {
+			v.StopServer()
+			return true
+		}
 	}
 	return false
 }
@@ -316,6 +448,7 @@ func (v SDRView) radioFields() []sdrRadioField {
 		sdrFieldFreq,
 		sdrFieldStep,
 		sdrFieldMod,
+		sdrFieldBW,
 		sdrFieldGain,
 		sdrFieldSquelch,
 		sdrFieldPreset,
@@ -328,7 +461,7 @@ func (v SDRView) radioFields() []sdrRadioField {
 }
 
 func (v SDRView) runFields() []sdrRunField {
-	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunMute, sdrRunRecord, sdrRunStop}
+	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunBW, sdrRunMute, sdrRunRecord, sdrRunStop}
 }
 
 func (v *SDRView) MoveRadioCursor(delta int) {
@@ -354,10 +487,12 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 		switch f[clampIndex(v.RunCursor, len(f))] {
 		case sdrRunFreq:
 			v.RadioFreqHz = sdr.ClampFreq(v.RadioFreqHz + int64(delta)*v.CurrentStepHz())
-			v.SpecCenterHz = v.RadioFreqHz
 			return true
 		case sdrRunStep:
 			v.RadioStepIdx = (v.RadioStepIdx + delta + len(sdr.FreqSteps)) % len(sdr.FreqSteps)
+		case sdrRunBW:
+			v.setBandwidth(sdr.CycleBandwidth(v.RadioMod, v.RadioBwHz, delta))
+			return true
 		case sdrRunMute:
 			v.ToggleMute()
 		case sdrRunRecord:
@@ -370,11 +505,13 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 	switch f[clampIndex(v.RadioCursor, len(f))] {
 	case sdrFieldFreq:
 		v.RadioFreqHz = sdr.ClampFreq(v.RadioFreqHz + int64(delta)*v.CurrentStepHz())
-		v.SpecCenterHz = v.RadioFreqHz
 	case sdrFieldStep:
 		v.RadioStepIdx = (v.RadioStepIdx + delta + len(sdr.FreqSteps)) % len(sdr.FreqSteps)
 	case sdrFieldMod:
 		v.RadioMod = sdr.CycleDemodMode(v.RadioMod, delta)
+		v.RadioBwHz = sdr.NormalizeBandwidth(v.RadioMod, v.RadioBwHz)
+	case sdrFieldBW:
+		v.setBandwidth(sdr.CycleBandwidth(v.RadioMod, v.RadioBwHz, delta))
 	case sdrFieldGain:
 		v.RadioGainIdx = (v.RadioGainIdx + delta + len(sdr.GainOptions)) % len(sdr.GainOptions)
 	case sdrFieldSquelch:
@@ -382,8 +519,7 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 	case sdrFieldPreset:
 		if len(v.Presets) > 0 {
 			v.PresetIdx = (v.PresetIdx + delta + len(v.Presets)) % len(v.Presets)
-			p := v.Presets[v.PresetIdx]
-			v.applyPreset(p)
+			v.applyPreset(v.Presets[v.PresetIdx])
 		}
 	case sdrFieldDevice:
 		if len(v.Probe.Devices) > 0 {
@@ -393,10 +529,19 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 	return false
 }
 
+// setBandwidth records a bandwidth and keeps it valid for the current mode.
+func (v *SDRView) setBandwidth(hz int) {
+	v.RadioBwHz = sdr.NormalizeBandwidth(v.RadioMod, hz)
+}
+
 func (v *SDRView) applyPreset(p sdr.Preset) {
 	v.RadioFreqHz = sdr.ClampFreq(p.FreqHz)
-	v.SpecCenterHz = v.RadioFreqHz
 	v.RadioMod = p.Mode
+	if p.BandwidthHz > 0 {
+		v.RadioBwHz = sdr.NormalizeBandwidth(p.Mode, p.BandwidthHz)
+	} else {
+		v.RadioBwHz = sdr.DefaultBandwidth(p.Mode)
+	}
 	if p.GainDB != 0 || p.User {
 		for i, g := range sdr.GainOptions {
 			if g == p.GainDB {
@@ -413,14 +558,22 @@ func (v *SDRView) BeginEditFreq() {
 	v.RadioMode = sdrRadioEditFreq
 }
 
-func (v *SDRView) CommitEditFreq() (ok bool, wasRunning bool) {
+// ApplyFrequencyInput parses the current Input as a frequency in MHz.
+func (v *SDRView) ApplyFrequencyInput() (hz int64, ok bool) {
 	hz, err := sdr.ParseFreqMHz(v.Input)
 	if err != nil {
 		v.InputErr = err.Error()
+		return 0, false
+	}
+	return hz, true
+}
+
+func (v *SDRView) CommitEditFreq() (ok bool, wasRunning bool) {
+	hz, ok := v.ApplyFrequencyInput()
+	if !ok {
 		return false, false
 	}
 	v.RadioFreqHz = hz
-	v.SpecCenterHz = hz
 	v.Input = ""
 	v.InputErr = ""
 	if v.RadioActive {
@@ -444,11 +597,12 @@ func (v *SDRView) CommitSaveBookmark() error {
 		return fmt.Errorf("empty bookmark name")
 	}
 	bm := sdr.Preset{
-		Name:   name,
-		FreqHz: v.RadioFreqHz,
-		Mode:   v.RadioMod,
-		GainDB: v.CurrentGainDB(),
-		User:   true,
+		Name:        name,
+		FreqHz:      v.RadioFreqHz,
+		Mode:        v.RadioMod,
+		BandwidthHz: v.RadioBwHz,
+		GainDB:      v.CurrentGainDB(),
+		User:        true,
 	}
 	v.Bookmarks = append([]sdr.Preset{bm}, v.Bookmarks...)
 	v.rebuildPresets()
@@ -531,11 +685,12 @@ func (v *SDRView) StartRadio() (context.Context, int, sdr.RadioConfig, *sdr.Radi
 		DeviceIndex: v.EffectiveDevice(),
 		FreqHz:      v.RadioFreqHz,
 		Mode:        v.RadioMod,
+		BandwidthHz: v.RadioBwHz,
 		GainDB:      v.CurrentGainDB(),
 		Squelch:     v.RadioSquelch,
 		CaptureDir:  v.CaptureDir,
 	}
-	_, rate := sdr.BuildRTLFMArgs(cfg)
+	_, _, rate := sdr.BuildRTLFMArgs(cfg)
 	ctrl := sdr.NewRadioController(rate)
 	ctrl.SetMuted(v.RadioMuted)
 	v.RadioCtrl = ctrl
@@ -579,53 +734,152 @@ func (v *SDRView) FinishRadio(seq int, err error) {
 
 // --- Spec Tab state transitions ---
 
-func (v *SDRView) ToggleSpecKind() {
+func (v SDRView) specFields() []sdrSpecField {
+	return []sdrSpecField{sdrSpecFStart, sdrSpecFEnd, sdrSpecFPreset, sdrSpecFView, sdrSpecFGain, sdrSpecFAction}
+}
+
+func (v *SDRView) MoveSpecCursor(delta int) {
 	if v.SpecActive {
-		v.StopSpec()
+		return
 	}
-	if v.SpecKind == sdrSpecLive {
-		v.SpecKind = sdrSpecSweep
+	f := v.specFields()
+	v.SpecCursor = (v.SpecCursor + delta + len(f)) % len(f)
+}
+
+// AdjustSpec modifies the highlighted sweep setting and reports whether the
+// running sweep must restart to apply it.
+func (v *SDRView) AdjustSpec(delta int) (restart bool) {
+	if v.SpecActive {
+		return false
+	}
+	f := v.specFields()
+	switch f[clampIndex(v.SpecCursor, len(f))] {
+	case sdrSpecFStart, sdrSpecFEnd:
+		v.nudgeSweepEdge(f[clampIndex(v.SpecCursor, len(f))], delta)
+	case sdrSpecFPreset:
+		v.cycleSpecPreset(delta)
+	case sdrSpecFView:
+		v.SpecView = sdrSpecView((int(v.SpecView) + delta + int(sdrSpecViewCount)) % int(sdrSpecViewCount))
+	case sdrSpecFGain:
+		v.RadioGainIdx = (v.RadioGainIdx + delta + len(sdr.GainOptions)) % len(sdr.GainOptions)
+	}
+	return false
+}
+
+func (v *SDRView) nudgeSweepEdge(edge sdrSpecField, delta int) {
+	step := int64(1_000_000)
+	if v.CurrentStepHz() < 1_000_000 {
+		step = v.CurrentStepHz()
+	}
+	if edge == sdrSpecFStart {
+		v.SpecStartHz = sdr.ClampFreq(v.SpecStartHz + int64(delta)*step)
+		if v.SpecStartHz >= v.SpecEndHz {
+			v.SpecEndHz = sdr.ClampFreq(v.SpecStartHz + step)
+		}
 	} else {
-		v.SpecKind = sdrSpecLive
+		v.SpecEndHz = sdr.ClampFreq(v.SpecEndHz + int64(delta)*step)
+		if v.SpecEndHz <= v.SpecStartHz {
+			v.SpecStartHz = sdr.ClampFreq(v.SpecEndHz - step)
+		}
 	}
-	v.SpecHasFrame = false
-	v.SpecErr = ""
+	v.markCustomSweep()
+}
+
+// markCustomSweep clears the band preset when the user hand-edits an edge.
+func (v *SDRView) markCustomSweep() {
+	if !v.sweepMatchesPreset() {
+		v.SpecPresetIdx = 0
+	}
+}
+
+func (v *SDRView) sweepMatchesPreset() bool {
+	if v.SpecPresetIdx <= 0 {
+		return false
+	}
+	b := sdr.BandPresets[clampIndex(v.SpecPresetIdx-1, len(sdr.BandPresets))]
+	return v.SpecStartHz == int64(b.StartMHz*1e6) && v.SpecEndHz == int64(b.EndMHz*1e6)
+}
+
+func (v *SDRView) cycleSpecPreset(delta int) {
+	n := v.SpecPresetCount()
+	v.SpecPresetIdx = (v.SpecPresetIdx + delta + n) % n
+	if v.SpecPresetIdx == 0 {
+		return
+	}
+	b := sdr.BandPresets[clampIndex(v.SpecPresetIdx-1, len(sdr.BandPresets))]
+	v.SpecStartHz = sdr.ClampFreq(int64(b.StartMHz * 1e6))
+	v.SpecEndHz = sdr.ClampFreq(int64(b.EndMHz * 1e6))
+}
+
+func (v *SDRView) BeginEditSweep(which sdrSpecEdit) {
+	v.SpecEdit = which
+	v.InputErr = ""
+	hz := v.SpecStartHz
+	if which == sdrSpecEditEnd {
+		hz = v.SpecEndHz
+	}
+	v.Input = fmt.Sprintf("%.3f", float64(hz)/1e6)
+}
+
+func (v *SDRView) CommitEditSweep() bool {
+	hz, ok := v.ApplyFrequencyInput()
+	if !ok {
+		return false
+	}
+	if v.SpecEdit == sdrSpecEditStart {
+		if hz >= v.SpecEndHz {
+			v.InputErr = "start must be below end"
+			return false
+		}
+		v.SpecStartHz = hz
+	} else {
+		if hz <= v.SpecStartHz {
+			v.InputErr = "end must be above start"
+			return false
+		}
+		v.SpecEndHz = hz
+	}
+	v.markCustomSweep()
+	v.SpecEdit = sdrSpecEditNone
+	v.Input = ""
+	v.InputErr = ""
+	return true
+}
+
+// ToggleSpecView switches between bargraph and ranked signal list while running.
+func (v *SDRView) ToggleSpecView() {
+	v.SpecView = sdrSpecView((int(v.SpecView) + 1) % int(sdrSpecViewCount))
 }
 
 func (v *SDRView) MoveSpecMarker(delta int) {
+	if v.SpecView == sdrSpecViewList {
+		n := len(v.SpecFrame.TopSignals)
+		if n > 0 {
+			v.SpecListCur = (v.SpecListCur + delta + n) % n
+		}
+		return
+	}
 	n := len(v.SpecFrame.Bins)
 	if n <= 0 {
-		if v.SpecKind == sdrSpecSweep {
-			v.SpecBandIdx = (v.SpecBandIdx + delta + len(sdr.BandPresets)) % len(sdr.BandPresets)
-		} else {
-			v.SpecCenterHz = sdr.ClampFreq(v.SpecCenterHz + int64(delta)*v.CurrentStepHz())
-		}
 		return
 	}
 	v.SpecMarker = (v.SpecMarker + delta + n) % n
 }
 
-func (v *SDRView) StepSpecSpan(delta int) (restart bool) {
-	if v.SpecKind == sdrSpecSweep {
-		v.SpecBandIdx = (v.SpecBandIdx + delta + len(sdr.BandPresets)) % len(sdr.BandPresets)
-		return v.SpecActive
+// SpeedUpSpecMarker jumps the chart cursor for faster navigation on small keypads.
+func (v *SDRView) JumpSpecMarker(delta int) {
+	if v.SpecView == sdrSpecViewList {
+		v.MoveSpecMarker(delta)
+		return
 	}
-	v.SpecCenterHz = sdr.ClampFreq(v.SpecCenterHz + int64(delta)*1_000_000)
-	return v.SpecActive
+	n := len(v.SpecFrame.Bins)
+	if n <= 0 {
+		return
+	}
+	v.SpecMarker = (v.SpecMarker + delta*5 + n*5) % n
 }
 
-func (v *SDRView) MarkerFreqHz() (int64, sdr.DemodMode) {
-	mode := v.RadioMod
-	if v.SpecKind == sdrSpecSweep {
-		mode = v.CurrentBand().DefaultMode
-	}
-	if v.SpecHasFrame && len(v.SpecFrame.Bins) > 0 {
-		return v.SpecFrame.BinFreqHz(v.SpecMarker), mode
-	}
-	return v.SpecCenterHz, mode
-}
-
-func (v *SDRView) StartSpecLive(width int) (context.Context, int, sdr.SpectrumConfig, chan sdr.SpectrumFrame) {
+func (v *SDRView) StartSweep(width int) (context.Context, int, sdr.SweepConfig, chan sdr.SpectrumFrame) {
 	v.StopAll()
 	if width <= 0 {
 		width = 34
@@ -639,31 +893,15 @@ func (v *SDRView) StartSpecLive(width int) (context.Context, int, sdr.SpectrumCo
 	v.SpecStarted = time.Now()
 	v.SpecElapsed = 0
 	v.SpecFrameCh = make(chan sdr.SpectrumFrame, 4)
-	cfg := sdr.SpectrumConfig{
+	cfg := sdr.SweepConfig{
 		DeviceIndex: v.EffectiveDevice(),
-		CenterHz:    v.SpecCenterHz,
-		SampleRate:  sdr.DefaultSpecRate,
+		StartHz:     v.SpecStartHz,
+		EndHz:       v.SpecEndHz,
 		GainDB:      v.CurrentGainDB(),
 		OutBins:     width,
-		FFTSize:     sdr.DefaultFFTSize,
+		Interval:    sdr.SweepRefresh,
 	}
 	return ctx, v.SpecSeq, cfg, v.SpecFrameCh
-}
-
-func (v *SDRView) StartSpecSweep(width int) (context.Context, int, int, sdr.BandPreset, int, int) {
-	v.StopAll()
-	if width <= 0 {
-		width = 34
-	}
-	v.SpecLastWidth = width
-	ctx, cancel := context.WithCancel(context.Background())
-	v.SpecSeq++
-	v.SpecActive = true
-	v.SpecCancel = cancel
-	v.SpecErr = ""
-	v.SpecStarted = time.Now()
-	v.SpecElapsed = 0
-	return ctx, v.SpecSeq, v.EffectiveDevice(), v.CurrentBand(), v.CurrentGainDB(), width
 }
 
 func (v *SDRView) ApplySpecFrame(seq int, frame sdr.SpectrumFrame) {
@@ -675,7 +913,6 @@ func (v *SDRView) ApplySpecFrame(seq int, frame sdr.SpectrumFrame) {
 	v.SpecHasFrame = true
 	if len(frame.Bins) > 0 {
 		if first {
-			// Snap marker to peak on first frame.
 			peakIdx := 0
 			for i, b := range frame.Bins {
 				if b > frame.Bins[peakIdx] {
@@ -683,10 +920,12 @@ func (v *SDRView) ApplySpecFrame(seq int, frame sdr.SpectrumFrame) {
 				}
 			}
 			v.SpecMarker = peakIdx
+			v.SpecListCur = 0
 		} else {
 			v.SpecMarker = clampIndex(v.SpecMarker, len(frame.Bins))
 		}
 	}
+	v.SpecListCur = clampIndex(v.SpecListCur, max(1, len(frame.TopSignals)))
 }
 
 func (v *SDRView) FinishSpec(seq int, frame sdr.SpectrumFrame, hasFrame bool, err error) {
@@ -701,6 +940,24 @@ func (v *SDRView) FinishSpec(seq int, frame sdr.SpectrumFrame, hasFrame bool, er
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "canceled") {
 		v.SpecErr = err.Error()
 	}
+}
+
+// MarkerFreqHz returns the frequency under the cursor and the mode to tune with.
+func (v *SDRView) MarkerFreqHz() (int64, sdr.DemodMode) {
+	mode := v.RadioMod
+	if v.ExplicitPreset() {
+		mode = sdr.BandPresets[clampIndex(v.SpecPresetIdx-1, len(sdr.BandPresets))].DefaultMode
+	}
+	if v.SpecHasFrame {
+		if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
+			p := v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))]
+			return p.FreqHz, mode
+		}
+		if len(v.SpecFrame.Bins) > 0 {
+			return v.SpecFrame.BinFreqHz(v.SpecMarker), mode
+		}
+	}
+	return (v.SpecStartHz + v.SpecEndHz) / 2, mode
 }
 
 // --- 433 / ISM Tab state transitions ---
@@ -788,6 +1045,133 @@ func (v *SDRView) FinishISM(seq int, err error) {
 	}
 }
 
+// --- rtl_tcp server Tab state transitions ---
+
+func (v SDRView) SrvRate() int64 {
+	return sdr.ServerRates[clampIndex(v.SrvRateIdx, len(sdr.ServerRates))]
+}
+
+func (v SDRView) SrvBind() string {
+	return SDRServerBinds[clampIndex(v.SrvBindIdx, len(SDRServerBinds))]
+}
+
+func (v SDRView) SrvGainDB() int {
+	return sdr.GainOptions[clampIndex(v.SrvGainIdx, len(sdr.GainOptions))]
+}
+
+func (v SDRView) srvFields() []sdrSrvField {
+	return []sdrSrvField{sdrSrvBind, sdrSrvPort, sdrSrvFreq, sdrSrvRate, sdrSrvGain, sdrSrvAction}
+}
+
+func (v *SDRView) MoveSrvCursor(delta int) {
+	if v.SrvActive {
+		return
+	}
+	f := v.srvFields()
+	v.SrvCursor = (v.SrvCursor + delta + len(f)) % len(f)
+}
+
+func (v *SDRView) AdjustSrv(delta int) {
+	if v.SrvActive {
+		return
+	}
+	f := v.srvFields()
+	switch f[clampIndex(v.SrvCursor, len(f))] {
+	case sdrSrvBind:
+		v.SrvBindIdx = (v.SrvBindIdx + delta + len(SDRServerBinds)) % len(SDRServerBinds)
+	case sdrSrvPort:
+		v.SrvPort = clampInt(v.SrvPort+delta, 1024, 65535)
+	case sdrSrvFreq:
+		v.SrvFreqHz = sdr.ClampFreq(v.SrvFreqHz + int64(delta)*1_000_000)
+	case sdrSrvRate:
+		v.SrvRateIdx = (v.SrvRateIdx + delta + len(sdr.ServerRates)) % len(sdr.ServerRates)
+	case sdrSrvGain:
+		v.SrvGainIdx = (v.SrvGainIdx + delta + len(sdr.GainOptions)) % len(sdr.GainOptions)
+	}
+}
+
+func (v *SDRView) BeginEditSrv(which sdrSrvEdit) {
+	v.SrvEdit = which
+	v.InputErr = ""
+	if which == sdrSrvEditPort {
+		v.Input = fmt.Sprintf("%d", v.SrvPort)
+	} else {
+		v.Input = fmt.Sprintf("%.3f", float64(v.SrvFreqHz)/1e6)
+	}
+}
+
+func (v *SDRView) CommitEditSrv() bool {
+	if v.SrvEdit == sdrSrvEditPort {
+		port := 0
+		if _, err := fmt.Sscanf(strings.TrimSpace(v.Input), "%d", &port); err != nil || port < 1024 || port > 65535 {
+			v.InputErr = "port: 1024-65535"
+			return false
+		}
+		v.SrvPort = port
+	} else {
+		hz, ok := v.ApplyFrequencyInput()
+		if !ok {
+			return false
+		}
+		v.SrvFreqHz = hz
+	}
+	v.SrvEdit = sdrSrvEditNone
+	v.Input = ""
+	v.InputErr = ""
+	return true
+}
+
+func (v *SDRView) StartServer() (context.Context, int, sdr.ServerConfig, chan string) {
+	v.StopAll()
+	ctx, cancel := context.WithCancel(context.Background())
+	v.SrvSeq++
+	v.SrvActive = true
+	v.SrvCancel = cancel
+	v.SrvErr = ""
+	v.SrvLines = nil
+	v.SrvClients = 0
+	v.SrvStarted = time.Now()
+	v.SrvElapsed = 0
+	v.SrvLineCh = make(chan string, 64)
+	cfg := sdr.ServerConfig{
+		DeviceIndex: v.EffectiveDevice(),
+		ListenAddr:  v.SrvBind(),
+		Port:        v.SrvPort,
+		FreqHz:      v.SrvFreqHz,
+		SampleRate:  v.SrvRate(),
+		GainDB:      v.SrvGainDB(),
+	}
+	return ctx, v.SrvSeq, cfg, v.SrvLineCh
+}
+
+func (v *SDRView) AppendSrvLine(seq int, line string) {
+	if seq != v.SrvSeq {
+		return
+	}
+	if line = sanitizeLogLine(line); line == "" {
+		return
+	}
+	v.SrvLastLine = line
+	if strings.Contains(strings.ToLower(line), "client") && strings.Contains(strings.ToLower(line), "connect") {
+		v.SrvClients++
+	}
+	v.SrvLines = append(v.SrvLines, line)
+	if len(v.SrvLines) > 120 {
+		v.SrvLines = v.SrvLines[len(v.SrvLines)-120:]
+	}
+}
+
+func (v *SDRView) FinishServer(seq int, err error) {
+	if seq != v.SrvSeq {
+		return
+	}
+	v.SrvActive = false
+	v.SrvCancel = nil
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "canceled") {
+		v.SrvErr = err.Error()
+	}
+}
+
 // --- Rendering ---
 
 func (v SDRView) RenderLines(w, h int, pal theme.Palette, focused bool) []string {
@@ -796,6 +1180,8 @@ func (v SDRView) RenderLines(w, h int, pal theme.Palette, focused bool) []string
 		return v.renderSpec(w, h, pal, focused)
 	case SDRTabISM:
 		return v.renderISM(w, h, pal, focused)
+	case SDRTabServer:
+		return v.renderServer(w, h, pal, focused)
 	default:
 		return v.renderRadio(w, h, pal, focused)
 	}
@@ -830,6 +1216,21 @@ func (v SDRView) dongleHeader(w int, pal theme.Palette) string {
 	return ok.Render(v.Marquee.FitLine(dev.Label(), w))
 }
 
+// fieldRow renders one "label value" line, selected or passive.
+func fieldRow(w int, focused bool, active bool, lbl, val string, valStyle, sec, mut, sel lipgloss.Style) string {
+	const labelW = 8
+	valW := max(8, w-labelW-3)
+	pfx := "  "
+	if active {
+		pfx = "> "
+	}
+	row := fmt.Sprintf("%s%-*s %s", pfx, labelW, lbl, Truncate(val, valW))
+	if active && focused {
+		return sel.Width(w).Render(Truncate(row, w))
+	}
+	return fmt.Sprintf("%s%s %s", mut.Render(pfx), sec.Render(fmt.Sprintf("%-*s", labelW, lbl)), valStyle.Render(Truncate(val, valW)))
+}
+
 func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string {
 	hdr := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 	mut := lipgloss.NewStyle().Foreground(pal.Muted)
@@ -845,7 +1246,7 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 		hint := "e.g. 98.5, 162.55, 433.92M"
 		if v.RadioMode == sdrRadioSaveName {
 			title = "Bookmark name"
-			hint = sdr.FormatFreqMHz(v.RadioFreqHz) + " · " + v.RadioMod.String()
+			hint = sdr.FormatFreqMHz(v.RadioFreqHz) + " · " + v.RadioMod.String() + " " + sdr.FormatBandwidth(v.RadioBwHz)
 		}
 		lines := []string{
 			hdr.Render(v.Marquee.FitLine(title, w)),
@@ -883,7 +1284,7 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 	}
 
 	if v.RadioMode == sdrRadioRunning {
-		flags := v.RadioMod.String()
+		flags := v.RadioMod.String() + " " + sdr.FormatBandwidth(v.RadioBwHz)
 		if v.RadioRecPath != "" {
 			flags += " REC"
 		}
@@ -900,17 +1301,16 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 		fields := v.runFields()
 		body := max(1, h-len(lines))
 		start, end := ScrollWindow(len(fields), v.RunCursor, body)
-		labelW := 8
-		valW := max(8, w-labelW-3)
 		for i := start; i < end; i++ {
-			f := fields[i]
 			var lbl, val string
 			style := txt
-			switch f {
+			switch fields[i] {
 			case sdrRunFreq:
 				lbl, val = "Freq", sdr.FormatFreqMHz(v.RadioFreqHz)
 			case sdrRunStep:
 				lbl, val = "Step", sdr.FormatStep(v.CurrentStepHz())
+			case sdrRunBW:
+				lbl, val = "BW", sdr.FormatBandwidth(v.RadioBwHz)
 			case sdrRunMute:
 				lbl = "Mute"
 				if v.RadioMuted {
@@ -928,17 +1328,7 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 			case sdrRunStop:
 				lbl, val, style = "Action", "Stop radio", warn
 			}
-			active := i == v.RunCursor && focused
-			pfx := "  "
-			if active {
-				pfx = "> "
-			}
-			row := fmt.Sprintf("%s%-*s %s", pfx, labelW, lbl, Truncate(val, valW))
-			if active {
-				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
-			} else {
-				lines = append(lines, fmt.Sprintf("%s%s %s", mut.Render(pfx), sec.Render(fmt.Sprintf("%-*s", labelW, lbl)), style.Render(Truncate(val, valW))))
-			}
+			lines = append(lines, fieldRow(w, focused, i == v.RunCursor, lbl, val, style, sec, mut, sel))
 		}
 		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
@@ -958,19 +1348,18 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 	fields := v.radioFields()
 	body := max(1, h-len(lines))
 	start, end := ScrollWindow(len(fields), v.RadioCursor, body)
-	labelW := 8
-	valW := max(8, w-labelW-3)
 	for i := start; i < end; i++ {
-		f := fields[i]
 		var lbl, val string
 		style := txt
-		switch f {
+		switch fields[i] {
 		case sdrFieldFreq:
 			lbl, val = "Freq", sdr.FormatFreqMHz(v.RadioFreqHz)
 		case sdrFieldStep:
 			lbl, val = "Step", sdr.FormatStep(v.CurrentStepHz())
 		case sdrFieldMod:
 			lbl, val = "Mode", v.RadioMod.String()
+		case sdrFieldBW:
+			lbl, val = "BW", sdr.FormatBandwidth(v.RadioBwHz)
 		case sdrFieldGain:
 			lbl, val = "Gain", sdr.FormatGain(v.CurrentGainDB())
 		case sdrFieldSquelch:
@@ -993,17 +1382,7 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 		case sdrFieldSave:
 			lbl, val, style = "Bookmark", "Save current", sec
 		}
-		active := i == v.RadioCursor && focused
-		pfx := "  "
-		if active {
-			pfx = "> "
-		}
-		row := fmt.Sprintf("%s%-*s %s", pfx, labelW, lbl, Truncate(val, valW))
-		if active {
-			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
-		} else {
-			lines = append(lines, fmt.Sprintf("%s%s %s", mut.Render(pfx), sec.Render(fmt.Sprintf("%-*s", labelW, lbl)), style.Render(Truncate(val, valW))))
-		}
+		lines = append(lines, fieldRow(w, focused, i == v.RadioCursor, lbl, val, style, sec, mut, sel))
 	}
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
@@ -1018,53 +1397,110 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 	bad := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
-	var head string
-	headStyle := hdr
-	switch {
-	case v.SpecActive && v.SpecKind == sdrSpecSweep:
-		head = fmt.Sprintf("● Sweep %s (%ds)", v.CurrentBand().Name, int(v.SpecElapsed.Seconds()))
-		headStyle = ok
-	case v.SpecActive:
-		pk := ""
-		if v.SpecHasFrame {
-			pk = " pk " + sdr.FormatFreqShort(v.SpecFrame.PeakHz)
+	// Frequency input overlay (start/end editor).
+	if v.SpecEdit != sdrSpecEditNone {
+		which := "Start"
+		if v.SpecEdit == sdrSpecEditEnd {
+			which = "End"
 		}
-		head = fmt.Sprintf("● %s ±1M%s", sdr.FormatFreqShort(v.SpecCenterHz), pk)
-		headStyle = ok
-	case v.SpecHasFrame && v.SpecKind == sdrSpecSweep:
-		head = fmt.Sprintf("%s · pk %s", v.CurrentBand().Name, sdr.FormatFreqShort(v.SpecFrame.PeakHz))
-	case v.SpecHasFrame:
-		head = fmt.Sprintf("%s ±1M · pk %s", sdr.FormatFreqShort(v.SpecCenterHz), sdr.FormatFreqShort(v.SpecFrame.PeakHz))
-	case v.SpecKind == sdrSpecSweep:
-		b := v.CurrentBand()
-		head = fmt.Sprintf("Sweep · %s %.0f-%.0fM", b.Name, b.StartMHz, b.EndMHz)
-	default:
-		head = "Spec · " + sdr.FormatFreqMHz(v.SpecCenterHz)
-	}
-
-	lines := []string{headStyle.Render(v.Marquee.FitLine(head, w))}
-	barH := max(2, h-3)
-
-	if !v.SpecHasFrame {
-		if v.SpecErr != "" {
-			lines = append(lines, bad.Render(v.Marquee.FitLine(v.SpecErr, w)))
-		} else if v.SpecActive {
-			lines = append(lines, warn.Render(v.Marquee.FitLine("Capturing spectrum...", w)))
-		} else {
-			lines = append(lines, v.dongleHeader(w, pal))
-			if v.SpecKind == sdrSpecSweep {
-				b := v.CurrentBand()
-				lines = append(lines, txt.Render(v.Marquee.FitLine(fmt.Sprintf("Band: %s (%.1f-%.1fM)", b.Name, b.StartMHz, b.EndMHz), w)))
-				lines = append(lines, mut.Render(v.Marquee.FitLine("↑↓:band  m:Live/Sweep  ⏎:sweep", w)))
-			} else {
-				lines = append(lines, txt.Render(v.Marquee.FitLine("Span: 2.048 MHz FFT", w)))
-				lines = append(lines, mut.Render(v.Marquee.FitLine("←→:freq  m:Live/Sweep  ⏎:start", w)))
-			}
+		lines := []string{
+			hdr.Render(v.Marquee.FitLine("Sweep "+which+" frequency (MHz)", w)),
+			mut.Render(v.Marquee.FitLine("e.g. 87.5, 108, 433.92M", w)),
+			txt.Render(v.Marquee.FitLine("> "+v.Input+"_", w)),
+		}
+		if v.InputErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.InputErr, w)))
 		}
 		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
-	// Render vertical spectrum bars across w columns.
+	spanTxt := sdr.FormatFreqShort(v.SpecStartHz) + "-" + sdr.FormatFreqShort(v.SpecEndHz)
+
+	// Idle: sweep configuration.
+	if !v.SpecActive && !v.SpecHasFrame {
+		lines := []string{v.dongleHeader(w, pal)}
+		if v.SpecErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.SpecErr, w)))
+		}
+		fields := v.specFields()
+		body := max(1, h-len(lines))
+		start, end := ScrollWindow(len(fields), v.SpecCursor, body)
+		for i := start; i < end; i++ {
+			var lbl, val string
+			style := txt
+			switch fields[i] {
+			case sdrSpecFStart:
+				lbl, val = "Start", sdr.FormatFreqMHz(v.SpecStartHz)
+			case sdrSpecFEnd:
+				lbl, val = "End", sdr.FormatFreqMHz(v.SpecEndHz)
+			case sdrSpecFPreset:
+				lbl, val = "Preset", v.SpecPresetName()
+			case sdrSpecFView:
+				lbl, val = "Show", v.SpecView.String()
+			case sdrSpecFGain:
+				lbl, val = "Gain", sdr.FormatGain(v.CurrentGainDB())
+			case sdrSpecFAction:
+				lbl, val, style = "Action", "Start sweep", ok
+			}
+			lines = append(lines, fieldRow(w, focused, i == v.SpecCursor, lbl, val, style, sec, mut, sel))
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	if !v.SpecHasFrame {
+		lines := []string{
+			ok.Render(v.Marquee.FitLine("● Sweeping "+spanTxt, w)),
+			warn.Render(v.Marquee.FitLine("Capturing first sweep...", w)),
+		}
+		if v.SpecErr != "" {
+			lines = append(lines[:1], bad.Render(v.Marquee.FitLine(v.SpecErr, w)))
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	// Live: chart or ranked list.
+	viewTag := "Bars"
+	if v.SpecView == sdrSpecViewList {
+		viewTag = "Top"
+	}
+	head := fmt.Sprintf("%s %s %s %s",
+		map[bool]string{true: "●", false: "■"}[v.SpecActive],
+		spanTxt, viewTag, formatClock(int(v.SpecElapsed.Seconds())))
+	headStyle := ok
+	if !v.SpecActive {
+		headStyle = hdr
+	}
+	lines := []string{headStyle.Render(v.Marquee.FitLine(head, w))}
+
+	if v.SpecView == sdrSpecViewList {
+		body := max(1, h-2)
+		sigs := v.SpecFrame.TopSignals
+		if len(sigs) == 0 {
+			lines = append(lines, mut.Render(v.Marquee.FitLine("No signals above the floor", w)))
+			lines = append(lines, mut.Render(v.Marquee.FitLine("Esc to stop", w)))
+			return v.Marquee.SplitLinesPadded(lines, w, h)
+		}
+		start, end := ScrollWindow(len(sigs), v.SpecListCur, body)
+		for i := start; i < end; i++ {
+			s := sigs[i]
+			freq := fmt.Sprintf("%.3f MHz", float64(s.FreqHz)/1e6)
+			pow := fmt.Sprintf("%.0f dB", s.PowerDB)
+			row := fmt.Sprintf("%2d %s %s", i+1, freq, pow)
+			if i == v.SpecListCur && focused {
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				st := txt
+				if i == 0 {
+					st = warn
+				}
+				lines = append(lines, st.Render(v.Marquee.FitLine(row, w)))
+			}
+		}
+		lines = append(lines, mut.Render(v.Marquee.FitLine("⏎ tune · m view · Esc stop", w)))
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	barH := max(2, h-3)
 	bins := resampleBins(v.SpecFrame.Bins, w)
 	marker := clampIndex(v.SpecMarker, len(bins))
 	peakCol := 0
@@ -1073,7 +1509,6 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 			peakCol = i
 		}
 	}
-
 	blocks := []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 	if v.ASCII {
 		blocks = []string{" ", ".", ".", ":", ":", "|", "|", "#", "#"}
@@ -1115,27 +1550,21 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 		lines = append(lines, sb.String())
 	}
 
-	// Marker track row.
 	markChar := "▲"
 	if v.ASCII {
 		markChar = "^"
 	}
-	track := strings.Repeat(" ", marker) + hdr.Render(markChar)
-	lines = append(lines, FitLine(track, w))
+	lines = append(lines, FitLine(strings.Repeat(" ", marker)+hdr.Render(markChar), w))
 
-	// Bottom frequency/dB readout.
 	mf := v.SpecFrame.BinFreqHz(marker)
 	mdb := bins[marker]
-	modeTag := "Live"
-	if v.SpecKind == sdrSpecSweep {
-		modeTag = "Swp"
-	}
-	readout := fmt.Sprintf("%s %.0fdB [%s]", sdr.FormatFreqMHz(mf), mdb, modeTag)
-	if v.SpecErr != "" {
-		readout = v.SpecErr
-		lines = append(lines, bad.Render(v.Marquee.FitLine(readout, w)))
-	} else {
-		lines = append(lines, sec.Render(v.Marquee.FitLine(readout, w)))
+	if v.SpecHasFrame && len(v.SpecFrame.TopSignals) > 0 {
+		readout := fmt.Sprintf("%s %.0fdB · pk %d", sdr.FormatFreqMHz(mf), mdb, len(v.SpecFrame.TopSignals))
+		if v.SpecErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.SpecErr, w)))
+		} else {
+			lines = append(lines, sec.Render(v.Marquee.FitLine(readout, w)))
+		}
 	}
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
@@ -1265,13 +1694,10 @@ func (v SDRView) renderISM(w, h int, pal theme.Palette, focused bool) []string {
 	fields := v.ismFields()
 	body := max(1, h-len(lines))
 	start, end := ScrollWindow(len(fields), v.ISMCursor, body)
-	labelW := 8
-	valW := max(8, w-labelW-3)
 	for i := start; i < end; i++ {
-		f := fields[i]
 		var lbl, val string
 		style := txt
-		switch f {
+		switch fields[i] {
 		case sdrISMBand:
 			lbl, val = "Band", sdr.FormatFreqMHz(v.CurrentISMFreqHz())
 		case sdrISMGain:
@@ -1291,17 +1717,96 @@ func (v SDRView) renderISM(w, h int, pal theme.Palette, focused bool) []string {
 		case sdrISMViewPkts:
 			lbl, val, style = "Packets", fmt.Sprintf("View %d decoded", len(v.ISMPackets)), sec
 		}
-		active := i == v.ISMCursor && focused
-		pfx := "  "
-		if active {
-			pfx = "> "
+		lines = append(lines, fieldRow(w, focused, i == v.ISMCursor, lbl, val, style, sec, mut, sel))
+	}
+	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+func (v SDRView) renderServer(w, h int, pal theme.Palette, focused bool) []string {
+	hdr := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	mut := lipgloss.NewStyle().Foreground(pal.Muted)
+	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	bad := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+
+	if v.SrvEdit != sdrSrvEditNone {
+		title, hint := "rtl_tcp port", "1024-65535"
+		if v.SrvEdit == sdrSrvEditFreq {
+			title, hint = "rtl_tcp start frequency (MHz)", "e.g. 100, 433.92"
 		}
-		row := fmt.Sprintf("%s%-*s %s", pfx, labelW, lbl, Truncate(val, valW))
-		if active {
-			lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
-		} else {
-			lines = append(lines, fmt.Sprintf("%s%s %s", mut.Render(pfx), sec.Render(fmt.Sprintf("%-*s", labelW, lbl)), style.Render(Truncate(val, valW))))
+		lines := []string{
+			hdr.Render(v.Marquee.FitLine(title, w)),
+			mut.Render(v.Marquee.FitLine(hint, w)),
+			txt.Render(v.Marquee.FitLine("> "+v.Input+"_", w)),
 		}
+		if v.InputErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.InputErr, w)))
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	if v.SrvActive {
+		head := fmt.Sprintf("● rtl_tcp :%d · %s", v.SrvPort, formatClock(int(v.SrvElapsed.Seconds())))
+		addr := fmt.Sprintf("rtl_tcp -a %s:%d %s", v.SrvBind(), v.SrvPort, sdr.FormatSampleRate(v.SrvRate()))
+		lines := []string{
+			ok.Render(v.Marquee.FitLine(head, w)),
+			sec.Render(v.Marquee.FitLine("Connect to "+sdr.LocalIPHint()+":"+fmt.Sprintf("%d", v.SrvPort), w)),
+			mut.Render(v.Marquee.FitLine(addr, w)),
+		}
+		if v.SrvErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.SrvErr, w)))
+		}
+		body := max(1, h-len(lines))
+		tail := v.SrvLines
+		if len(tail) > body {
+			tail = tail[len(tail)-body:]
+		}
+		for _, l := range tail {
+			lines = append(lines, mut.Render(v.Marquee.FitLine(l, w)))
+		}
+		return v.Marquee.SplitLinesPadded(lines, w, h)
+	}
+
+	var head string
+	headStyle := hdr
+	switch {
+	case v.Probe.Tools.RTLTCP == "":
+		head = "rtl_tcp missing (apt rtl-sdr)"
+		headStyle = bad
+	case len(v.Probe.Devices) == 0:
+		head = "No RTL-SDR USB dongle"
+		headStyle = bad
+	default:
+		head = "rtl_tcp IQ server for remote SDR apps"
+	}
+	lines := []string{headStyle.Render(v.Marquee.FitLine(head, w))}
+	if v.SrvErr != "" {
+		lines = append(lines, bad.Render(v.Marquee.FitLine(v.SrvErr, w)))
+	}
+
+	fields := v.srvFields()
+	body := max(1, h-len(lines))
+	start, end := ScrollWindow(len(fields), v.SrvCursor, body)
+	for i := start; i < end; i++ {
+		var lbl, val string
+		style := txt
+		switch fields[i] {
+		case sdrSrvBind:
+			lbl, val = "Bind", v.SrvBind()
+		case sdrSrvPort:
+			lbl, val = "Port", fmt.Sprintf("%d", v.SrvPort)
+		case sdrSrvFreq:
+			lbl, val = "Freq", sdr.FormatFreqMHz(v.SrvFreqHz)
+		case sdrSrvRate:
+			lbl, val = "Rate", sdr.FormatSampleRate(v.SrvRate())
+		case sdrSrvGain:
+			lbl, val = "Gain", sdr.FormatGain(v.SrvGainDB())
+		case sdrSrvAction:
+			lbl, val, style = "Action", "Start server", ok
+		}
+		lines = append(lines, fieldRow(w, focused, i == v.SrvCursor, lbl, val, style, sec, mut, sel))
 	}
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }

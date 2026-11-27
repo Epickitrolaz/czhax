@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,6 +44,16 @@ type sdrISMPacketMsg struct {
 }
 
 type sdrISMDoneMsg struct {
+	seq int
+	err error
+}
+
+type sdrSrvLineMsg struct {
+	seq  int
+	line string
+}
+
+type sdrSrvDoneMsg struct {
 	seq int
 	err error
 }
@@ -91,10 +102,10 @@ func waitSDRRadioUpdateCmd(seq int, ch <-chan sdr.RadioUpdate) tea.Cmd {
 	}
 }
 
-func runSDRSpecLiveCmd(ctx context.Context, seq int, cfg sdr.SpectrumConfig, ch chan sdr.SpectrumFrame) tea.Cmd {
+func runSDRSweepCmd(ctx context.Context, seq int, cfg sdr.SweepConfig, ch chan sdr.SpectrumFrame) tea.Cmd {
 	return func() tea.Msg {
 		defer close(ch)
-		err := sdr.RunSpectrum(ctx, cfg, func(f sdr.SpectrumFrame) {
+		err := sdr.RunSweep(ctx, cfg, func(f sdr.SpectrumFrame) {
 			select {
 			case ch <- f:
 			default:
@@ -125,13 +136,6 @@ func waitSDRSpecFrameCmd(seq int, ch <-chan sdr.SpectrumFrame) tea.Cmd {
 	}
 }
 
-func runSDRSpecSweepCmd(ctx context.Context, seq, devIdx int, band sdr.BandPreset, gainDB, outBins int) tea.Cmd {
-	return func() tea.Msg {
-		frame, err := sdr.RunBandSweep(ctx, devIdx, band, gainDB, outBins)
-		return sdrSpecDoneMsg{seq: seq, frame: frame, hasFrame: err == nil, err: err}
-	}
-}
-
 func runSDRISMCmd(ctx context.Context, seq int, cfg sdr.ISMConfig, ch chan sdr.ISMPacket) tea.Cmd {
 	return func() tea.Msg {
 		defer close(ch)
@@ -158,6 +162,32 @@ func waitSDRISMPacketCmd(seq int, ch <-chan sdr.ISMPacket) tea.Cmd {
 	}
 }
 
+func runSDRServerCmd(ctx context.Context, seq int, cfg sdr.ServerConfig, ch chan string) tea.Cmd {
+	return func() tea.Msg {
+		defer close(ch)
+		err := sdr.RunServer(ctx, cfg, func(line string) {
+			select {
+			case ch <- line:
+			default:
+			}
+		})
+		return sdrSrvDoneMsg{seq: seq, err: err}
+	}
+}
+
+func waitSDRServerLineCmd(seq int, ch <-chan string) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return sdrSrvLineMsg{seq: seq, line: line}
+	}
+}
+
 func sdrTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return sdrTickMsg{} })
 }
@@ -172,20 +202,12 @@ func (m AppModel) startSDRRadio() (tea.Model, tea.Cmd) {
 	)
 }
 
-func (m AppModel) startSDRSpec() (tea.Model, tea.Cmd) {
+func (m AppModel) startSDRSweep() (tea.Model, tea.Cmd) {
 	_, mainW, _ := m.dimensions()
-	if m.SDR.SpecKind == sdrSpecSweep {
-		ctx, seq, devIdx, band, gain, width := m.SDR.StartSpecSweep(mainW)
-		return m, tea.Batch(
-			m.setStatus("Sweeping "+band.Name+"..."),
-			runSDRSpecSweepCmd(ctx, seq, devIdx, band, gain, width),
-			sdrTickCmd(),
-		)
-	}
-	ctx, seq, cfg, ch := m.SDR.StartSpecLive(mainW)
+	ctx, seq, cfg, ch := m.SDR.StartSweep(mainW)
 	return m, tea.Batch(
-		m.setStatus("Spectrum "+sdr.FormatFreqShort(cfg.CenterHz)),
-		runSDRSpecLiveCmd(ctx, seq, cfg, ch),
+		m.setStatus("Sweep "+sdr.FormatFreqShort(cfg.StartHz)+"-"+sdr.FormatFreqShort(cfg.EndHz)),
+		runSDRSweepCmd(ctx, seq, cfg, ch),
 		waitSDRSpecFrameCmd(seq, ch),
 		sdrTickCmd(),
 	)
@@ -201,14 +223,33 @@ func (m AppModel) startSDRISM() (tea.Model, tea.Cmd) {
 	)
 }
 
-func (m AppModel) handleSDRTextKey(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m AppModel) startSDRServer() (tea.Model, tea.Cmd) {
+	ctx, seq, cfg, ch := m.SDR.StartServer()
+	return m, tea.Batch(
+		m.setStatus(fmt.Sprintf("rtl_tcp :%d", cfg.Port)),
+		runSDRServerCmd(ctx, seq, cfg, ch),
+		waitSDRServerLineCmd(seq, ch),
+		sdrTickCmd(),
+	)
+}
+
+// sdrTextInput routes printable keys into the active inline editor.
+func (m AppModel) sdrTextInput(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	v := &m.SDR
 	switch k {
 	case "esc":
 		v.HandleEsc()
 		return m, nil
+	case "backspace", "ctrl+h":
+		if len(v.Input) > 0 {
+			_, sz := utf8.DecodeLastRuneInString(v.Input)
+			v.Input = v.Input[:len(v.Input)-sz]
+			v.InputErr = ""
+		}
+		return m, nil
 	case "enter":
-		if v.RadioMode == sdrRadioEditFreq {
+		switch {
+		case v.Tab == SDRTabRadio && v.RadioMode == sdrRadioEditFreq:
 			ok, wasRunning := v.CommitEditFreq()
 			if !ok {
 				return m, nil
@@ -217,29 +258,33 @@ func (m AppModel) handleSDRTextKey(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 				return m.startSDRRadio()
 			}
 			return m, m.setStatus("Tuned " + sdr.FormatFreqMHz(v.RadioFreqHz))
-		}
-		if err := v.CommitSaveBookmark(); err != nil {
-			return m, nil
-		}
-		return m, m.setStatus(v.Note)
-	case "backspace", "ctrl+h":
-		if len(v.Input) > 0 {
-			_, sz := utf8.DecodeLastRuneInString(v.Input)
-			v.Input = v.Input[:len(v.Input)-sz]
-			v.InputErr = ""
-		}
-		return m, nil
-	default:
-		if len(msg.Runes) > 0 {
-			for _, r := range msg.Runes {
-				if r >= ' ' && len(v.Input) < 32 {
-					v.Input += string(r)
-				}
+		case v.Tab == SDRTabRadio && v.RadioMode == sdrRadioSaveName:
+			if err := v.CommitSaveBookmark(); err != nil {
+				return m, nil
 			}
-			v.InputErr = ""
+			return m, m.setStatus(v.Note)
+		case v.Tab == SDRTabSpec:
+			if v.CommitEditSweep() {
+				return m, m.setStatus("Sweep " + sdr.FormatFreqShort(v.SpecStartHz) + "-" + sdr.FormatFreqShort(v.SpecEndHz))
+			}
+			return m, nil
+		case v.Tab == SDRTabServer:
+			if v.CommitEditSrv() {
+				return m, m.setStatus("Updated server settings")
+			}
+			return m, nil
 		}
 		return m, nil
 	}
+	if len(msg.Runes) > 0 {
+		for _, r := range msg.Runes {
+			if r >= ' ' && len(v.Input) < 32 {
+				v.Input += string(r)
+			}
+		}
+		v.InputErr = ""
+	}
+	return m, nil
 }
 
 func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
@@ -247,48 +292,78 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 	v.Tab = SDRTab(m.ActiveTabs[ViewSDR])
 	switch v.Tab {
 	case SDRTabSpec:
+		switch v.SpecActive {
+		case true:
+			switch {
+			case k == "m":
+				v.ToggleSpecView()
+				return m, m.resetMarquee()
+			case m.isLeft(k):
+				v.MoveSpecMarker(-1)
+			case m.isRight(k):
+				v.MoveSpecMarker(1)
+			case m.isUp(k):
+				v.JumpSpecMarker(-1)
+			case m.isDown(k):
+				v.JumpSpecMarker(1)
+			case k == "s" || k == " ":
+				v.StopSpec()
+				return m, m.setStatus("Stopping sweep...")
+			case k == "enter":
+				return m.tuneFromSweep()
+			}
+			return m, nil
+		case false:
+			if v.SpecHasFrame {
+				// Results view kept after a stop: browse and tune the last frame.
+				switch {
+				case k == "m":
+					v.ToggleSpecView()
+					return m, m.resetMarquee()
+				case m.isLeft(k):
+					v.MoveSpecMarker(-1)
+				case m.isRight(k):
+					v.MoveSpecMarker(1)
+				case m.isUp(k):
+					v.JumpSpecMarker(-1)
+				case m.isDown(k):
+					v.JumpSpecMarker(1)
+				case k == "s" || k == " ":
+					return m.startSDRSweep()
+				case k == "enter":
+					return m.tuneFromSweep()
+				}
+				return m, nil
+			}
+		}
 		switch {
 		case k == "m":
-			v.ToggleSpecKind()
+			v.ToggleSpecView()
 			return m, m.resetMarquee()
-		case k == "s" || k == " ":
-			if v.SpecActive {
-				v.StopSpec()
-				return m, m.setStatus("Stopping spectrum...")
-			}
-			return m.startSDRSpec()
-		case m.isLeft(k):
-			v.MoveSpecMarker(-1)
-		case m.isRight(k):
-			v.MoveSpecMarker(1)
 		case m.isUp(k):
-			delta := 1
-			if v.SpecKind == sdrSpecSweep {
-				delta = -1
-			}
-			if v.StepSpecSpan(delta) {
-				return m.startSDRSpec()
-			}
+			v.MoveSpecCursor(-1)
 		case m.isDown(k):
-			delta := -1
-			if v.SpecKind == sdrSpecSweep {
-				delta = 1
+			v.MoveSpecCursor(1)
+		case m.isLeft(k):
+			v.AdjustSpec(-1)
+		case m.isRight(k):
+			v.AdjustSpec(1)
+		case k == "enter" || k == " ":
+			f := v.specFields()
+			switch f[clampIndex(v.SpecCursor, len(f))] {
+			case sdrSpecFStart:
+				v.BeginEditSweep(sdrSpecEditStart)
+			case sdrSpecFEnd:
+				v.BeginEditSweep(sdrSpecEditEnd)
+			case sdrSpecFPreset:
+				v.cycleSpecPreset(1)
+			case sdrSpecFView:
+				v.ToggleSpecView()
+			case sdrSpecFGain:
+				v.AdjustSpec(1)
+			case sdrSpecFAction:
+				return m.startSDRSweep()
 			}
-			if v.StepSpecSpan(delta) {
-				return m.startSDRSpec()
-			}
-		case k == "enter":
-			if !v.SpecActive && !v.SpecHasFrame {
-				return m.startSDRSpec()
-			}
-			freq, mode := v.MarkerFreqHz()
-			v.StopSpec()
-			v.RadioFreqHz = freq
-			v.RadioMod = mode
-			v.RadioMode = sdrRadioSetup
-			m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
-			v.Tab = SDRTabRadio
-			return m, m.setStatus("Tuned " + sdr.FormatFreqMHz(freq))
 		}
 		return m, nil
 
@@ -345,6 +420,38 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case SDRTabServer:
+		if v.SrvActive {
+			if k == "esc" || k == "q" || k == "s" || k == " " {
+				v.StopServer()
+				return m, m.setStatus("Stopping rtl_tcp...")
+			}
+			return m, nil
+		}
+		switch {
+		case m.isUp(k):
+			v.MoveSrvCursor(-1)
+		case m.isDown(k):
+			v.MoveSrvCursor(1)
+		case m.isLeft(k):
+			v.AdjustSrv(-1)
+		case m.isRight(k):
+			v.AdjustSrv(1)
+		case k == "enter" || k == " ":
+			f := v.srvFields()
+			switch f[clampIndex(v.SrvCursor, len(f))] {
+			case sdrSrvPort:
+				v.BeginEditSrv(sdrSrvEditPort)
+			case sdrSrvFreq:
+				v.BeginEditSrv(sdrSrvEditFreq)
+			case sdrSrvAction:
+				return m.startSDRServer()
+			default:
+				v.AdjustSrv(1)
+			}
+		}
+		return m, nil
+
 	default: // SDRTabRadio
 		switch v.RadioMode {
 		case sdrRadioPresets:
@@ -378,8 +485,7 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 					return m.startSDRRadio()
 				}
 			case k == "m":
-				muted := v.ToggleMute()
-				if muted {
+				if v.ToggleMute() {
 					return m, m.setStatus("Muted")
 				}
 				return m, m.setStatus("Unmuted")
@@ -390,6 +496,9 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 					v.BeginEditFreq()
 				case sdrRunStep:
 					v.AdjustRadio(1)
+				case sdrRunBW:
+					v.AdjustRadio(1)
+					return m.startSDRRadio()
 				case sdrRunMute:
 					if v.ToggleMute() {
 						return m, m.setStatus("Muted")
@@ -446,17 +555,31 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 	}
 }
 
+// tuneFromSweep moves the marker frequency into the Radio tab and switches to it.
+func (m AppModel) tuneFromSweep() (tea.Model, tea.Cmd) {
+	v := &m.SDR
+	freq, mode := v.MarkerFreqHz()
+	v.StopSpec()
+	v.RadioFreqHz = freq
+	v.RadioMod = mode
+	v.RadioBwHz = sdr.NormalizeBandwidth(mode, v.RadioBwHz)
+	v.RadioMode = sdrRadioSetup
+	m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
+	v.Tab = SDRTabRadio
+	return m, m.setStatus("Tuned " + sdr.FormatFreqMHz(freq))
+}
+
 func (m AppModel) sdrHints() []Hint {
 	v := m.SDR
 	switch SDRTab(m.ActiveTabs[ViewSDR]) {
 	case SDRTabSpec:
-		if v.SpecActive {
-			return []Hint{{Key: "←→", Desc: "mark"}, {Key: "⏎", Desc: "tune"}, {Key: "m", Desc: "mode"}, {Key: "Esc", Desc: "stop"}}
+		if v.IsTextInput() {
+			return []Hint{{Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "cancel"}}
 		}
-		if v.SpecHasFrame {
-			return []Hint{{Key: "←→", Desc: "mark"}, {Key: "⏎", Desc: "tune"}, {Key: "s", Desc: "scan"}, {Key: "m", Desc: "mode"}, {Key: "Esc", Desc: "tabs"}}
+		if v.SpecActive || v.SpecHasFrame {
+			return []Hint{{Key: "←→", Desc: "sig"}, {Key: "⏎", Desc: "tune"}, {Key: "m", Desc: "view"}, {Key: "Esc", Desc: "stop"}}
 		}
-		return []Hint{{Key: "⏎", Desc: "start"}, {Key: "m", Desc: "mode"}, {Key: "↑↓", Desc: "span"}, {Key: "Esc", Desc: "tabs"}}
+		return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
 
 	case SDRTabISM:
 		switch v.ISMMode {
@@ -470,6 +593,15 @@ func (m AppModel) sdrHints() []Hint {
 		default:
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
 		}
+
+	case SDRTabServer:
+		if v.IsTextInput() {
+			return []Hint{{Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "cancel"}}
+		}
+		if v.SrvActive {
+			return []Hint{{Key: "Esc", Desc: "stop"}, {Key: "q", Desc: "stop"}}
+		}
+		return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
 
 	default:
 		switch v.RadioMode {

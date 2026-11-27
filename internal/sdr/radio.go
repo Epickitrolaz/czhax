@@ -179,11 +179,91 @@ func ParseFreqMHz(raw string) (int64, error) {
 
 // Preset is a named frequency + demodulation mode.
 type Preset struct {
-	Name   string    `json:"name"`
-	FreqHz int64     `json:"freq_hz"`
-	Mode   DemodMode `json:"mode"`
-	GainDB int       `json:"gain_db,omitempty"`
-	User   bool      `json:"-"`
+	Name        string    `json:"name"`
+	FreqHz      int64     `json:"freq_hz"`
+	Mode        DemodMode `json:"mode"`
+	BandwidthHz int       `json:"bandwidth_hz,omitempty"`
+	GainDB      int       `json:"gain_db,omitempty"`
+	User        bool      `json:"-"`
+}
+
+// BandwidthsForMode returns the selectable channel bandwidths (Hz) for a mode.
+func BandwidthsForMode(m DemodMode) []int {
+	switch m {
+	case ModeWBFM:
+		return []int{120_000, 170_000, 200_000, 240_000}
+	case ModeNFM:
+		return []int{8_000, 12_000, 16_000, 24_000, 32_000, 48_000}
+	case ModeAM:
+		return []int{6_000, 8_000, 12_000, 16_000, 24_000}
+	case ModeUSB, ModeLSB:
+		return []int{3_000, 4_000, 6_000, 8_000, 12_000}
+	default:
+		return []int{12_000, 24_000}
+	}
+}
+
+// DefaultBandwidth returns the standard IF bandwidth (Hz) for a mode.
+func DefaultBandwidth(m DemodMode) int {
+	switch m {
+	case ModeWBFM:
+		return 170_000
+	case ModeNFM:
+		return 24_000
+	case ModeAM:
+		return 8_000
+	case ModeUSB, ModeLSB:
+		return 3_000
+	default:
+		return 24_000
+	}
+}
+
+// NormalizeBandwidth snaps bwHz to a valid bandwidth for mode m (or its default).
+func NormalizeBandwidth(m DemodMode, bwHz int) int {
+	opts := BandwidthsForMode(m)
+	for _, o := range opts {
+		if o == bwHz {
+			return o
+		}
+	}
+	return DefaultBandwidth(m)
+}
+
+// CycleBandwidth steps to the next/previous bandwidth option for mode m.
+func CycleBandwidth(m DemodMode, curHz, delta int) int {
+	opts := BandwidthsForMode(m)
+	idx := 0
+	found := false
+	for i, o := range opts {
+		if o == curHz {
+			idx = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		def := DefaultBandwidth(m)
+		for i, o := range opts {
+			if o == def {
+				idx = i
+				break
+			}
+		}
+	}
+	next := (idx + delta + len(opts)*4) % len(opts)
+	return opts[next]
+}
+
+// FormatBandwidth formats a channel bandwidth cleanly (e.g. "170 kHz", "3 kHz").
+func FormatBandwidth(hz int) string {
+	if hz <= 0 {
+		return "auto"
+	}
+	if hz%1000 == 0 {
+		return fmt.Sprintf("%d kHz", hz/1000)
+	}
+	return fmt.Sprintf("%.1f kHz", float64(hz)/1000.0)
 }
 
 // DefaultPresets lists common frequencies for quick testing out of the box.
@@ -264,29 +344,38 @@ type RadioConfig struct {
 	DeviceIndex int
 	FreqHz      int64
 	Mode        DemodMode
+	BandwidthHz int // 0 = mode default
 	GainDB      int // -1 = Auto
 	Squelch     int // 0..100
 	PPM         int
 	CaptureDir  string
 }
 
-// BuildRTLFMArgs builds the rtl_fm arguments and returns the output PCM sample rate (Hz).
-func BuildRTLFMArgs(cfg RadioConfig) ([]string, int) {
+// BuildRTLFMArgs builds the rtl_fm arguments and returns the rtl_fm output PCM rate
+// and the downstream audio player rate (Hz). When bandwidth < playerRate, RunRadio
+// upsamples in Go so narrow SSB/AM/NFM bandwidths play cleanly on every audio backend.
+func BuildRTLFMArgs(cfg RadioConfig) (args []string, rtlOutRate int, playerRate int) {
 	freq := ClampFreq(cfg.FreqHz)
-	outRate := 24000
-	sampRate := "24k"
+	bw := NormalizeBandwidth(cfg.Mode, cfg.BandwidthHz)
+	playerRate = 24000
 	if cfg.Mode == ModeWBFM {
-		sampRate = "170k"
-		outRate = 32000
+		playerRate = 32000
 	}
-	args := []string{
+
+	args = []string{
 		"-d", strconv.Itoa(max(0, cfg.DeviceIndex)),
 		"-f", strconv.FormatInt(freq, 10),
 		"-M", cfg.Mode.RTLFMArg(),
-		"-s", sampRate,
-		"-r", strconv.Itoa(outRate),
-		"-A", "fast",
+		"-s", strconv.Itoa(bw),
 	}
+	if bw >= playerRate {
+		rtlOutRate = playerRate
+		args = append(args, "-r", strconv.Itoa(playerRate))
+	} else {
+		// rtl_fm only downsamples with -r; emit native bw rate and upsample in Go.
+		rtlOutRate = bw
+	}
+	args = append(args, "-A", "fast")
 	if cfg.Mode == ModeWBFM {
 		args = append(args, "-F", "9", "-E", "deemp")
 	}
@@ -300,7 +389,7 @@ func BuildRTLFMArgs(cfg RadioConfig) ([]string, int) {
 		args = append(args, "-p", strconv.Itoa(cfg.PPM))
 	}
 	args = append(args, "-")
-	return args, outRate
+	return args, rtlOutRate, playerRate
 }
 
 // AudioPlayerCommand picks an installed raw PCM player reading 16-bit LE mono from stdin.
@@ -476,17 +565,17 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 	if rtlfm == "" {
 		return errors.New("rtl_fm not installed (apt install rtl-sdr)")
 	}
-	args, rate := BuildRTLFMArgs(cfg)
-	playerBin, playerArgs, err := AudioPlayerCommand(rate)
+	args, rtlOutRate, playerRate := BuildRTLFMArgs(cfg)
+	playerBin, playerArgs, err := AudioPlayerCommand(playerRate)
 	if err != nil {
 		return err
 	}
 
 	if ctrl == nil {
-		ctrl = NewRadioController(rate)
+		ctrl = NewRadioController(playerRate)
 	} else {
 		ctrl.mu.Lock()
-		ctrl.rate = rate
+		ctrl.rate = playerRate
 		ctrl.mu.Unlock()
 	}
 	defer ctrl.StopRecording()
@@ -562,7 +651,8 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 	}
 
 	buf := make([]byte, 4096)
-	silence := make([]byte, 4096)
+	var rem [1]byte
+	hasRem := false
 	var totalBytes int64
 	lastTick := time.Now()
 	var peakRMS float64
@@ -570,8 +660,31 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 	for {
 		n, rerr := rtlOut.Read(buf)
 		if n > 0 {
-			chunk := buf[:n]
-			totalBytes += int64(n)
+			raw := buf[:n]
+			if hasRem {
+				merged := make([]byte, 1+n)
+				merged[0] = rem[0]
+				copy(merged[1:], raw)
+				raw = merged
+				hasRem = false
+			}
+			if len(raw)%2 == 1 {
+				rem[0] = raw[len(raw)-1]
+				hasRem = true
+				raw = raw[:len(raw)-1]
+			}
+			if len(raw) == 0 {
+				if rerr != nil {
+					break
+				}
+				continue
+			}
+
+			chunk := resampleS16LE(raw, rtlOutRate, playerRate)
+			if gain := demodGain(cfg.Mode, rtlOutRate); gain > 1 {
+				chunk = applyGainS16LE(chunk, gain)
+			}
+			totalBytes += int64(len(chunk))
 			ctrl.writeRec(chunk)
 
 			rms := pcmRMS(chunk)
@@ -581,7 +694,7 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 
 			outChunk := chunk
 			if ctrl.Muted() {
-				outChunk = silence[:n]
+				outChunk = make([]byte, len(chunk))
 			}
 			if _, werr := playIn.Write(outChunk); werr != nil && rctx.Err() == nil {
 				cancel()
@@ -633,6 +746,73 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 		return rtlWaitErr
 	}
 	return nil
+}
+
+// demodGain compensates rtl_fm's output_scale, which shrinks AM/SSB amplitude
+// as the demod rate drops, so narrow bandwidths are not 10-20 dB quieter.
+func demodGain(mode DemodMode, demodRate int) int {
+	if mode != ModeAM && mode != ModeUSB && mode != ModeLSB {
+		return 1
+	}
+	if demodRate <= 0 {
+		return 1
+	}
+	gain := 24000 / demodRate
+	if gain < 1 {
+		gain = 1
+	}
+	if gain > 16 {
+		gain = 16
+	}
+	return gain
+}
+
+func applyGainS16LE(in []byte, gain int) []byte {
+	if gain <= 1 || len(in) < 2 {
+		return in
+	}
+	out := make([]byte, len(in)-len(in)%2)
+	for i := 0; i+1 < len(in); i += 2 {
+		v := int32(int16(binary.LittleEndian.Uint16(in[i:i+2]))) * int32(gain)
+		if v > 32767 {
+			v = 32767
+		}
+		if v < -32768 {
+			v = -32768
+		}
+		binary.LittleEndian.PutUint16(out[i:i+2], uint16(int16(v)))
+	}
+	return out
+}
+
+func resampleS16LE(in []byte, inRate, outRate int) []byte {
+	if inRate <= 0 || outRate <= 0 || inRate == outRate || len(in) < 4 {
+		return in
+	}
+	inSamples := len(in) / 2
+	outSamples := int(float64(inSamples) * float64(outRate) / float64(inRate))
+	if outSamples <= 0 {
+		return in
+	}
+	out := make([]byte, outSamples*2)
+	for i := 0; i < outSamples; i++ {
+		pos := float64(i) * float64(inRate) / float64(outRate)
+		i0 := int(pos)
+		frac := pos - float64(i0)
+		if i0 >= inSamples-1 {
+			i0 = inSamples - 1
+			frac = 0
+		}
+		i1 := i0 + 1
+		if i1 >= inSamples {
+			i1 = i0
+		}
+		s0 := float64(int16(binary.LittleEndian.Uint16(in[i0*2 : i0*2+2])))
+		s1 := float64(int16(binary.LittleEndian.Uint16(in[i1*2 : i1*2+2])))
+		v := int16(s0*(1-frac) + s1*frac)
+		binary.LittleEndian.PutUint16(out[i*2:i*2+2], uint16(v))
+	}
+	return out
 }
 
 func pcmRMS(pcm []byte) float64 {

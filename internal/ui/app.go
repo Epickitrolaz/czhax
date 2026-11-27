@@ -1394,12 +1394,26 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sdrSpecDoneMsg:
 		m.SDR.FinishSpec(msg.seq, msg.frame, msg.hasFrame, msg.err)
 		if msg.err != nil && !isSdrCanceled(msg.err) {
-			return m, tea.Batch(m.setStatus("Spectrum failed"), m.resetMarquee())
+			return m, tea.Batch(m.setStatus("Sweep failed"), m.resetMarquee())
 		}
 		if msg.hasFrame {
 			return m, tea.Batch(m.setStatus("Peak "+sdr.FormatFreqShort(msg.frame.PeakHz)), m.resetMarquee())
 		}
-		return m, tea.Batch(m.setStatus("Spectrum stopped"), m.resetMarquee())
+		return m, tea.Batch(m.setStatus("Sweep stopped"), m.resetMarquee())
+
+	case sdrSrvLineMsg:
+		if !m.SDR.SrvActive || msg.seq != m.SDR.SrvSeq {
+			return m, nil
+		}
+		m.SDR.AppendSrvLine(msg.seq, msg.line)
+		return m, waitSDRServerLineCmd(msg.seq, m.SDR.SrvLineCh)
+
+	case sdrSrvDoneMsg:
+		m.SDR.FinishServer(msg.seq, msg.err)
+		if msg.err != nil && !isSdrCanceled(msg.err) {
+			return m, tea.Batch(m.setStatus("rtl_tcp failed"), m.resetMarquee())
+		}
+		return m, tea.Batch(m.setStatus("rtl_tcp stopped"), m.resetMarquee())
 
 	case sdrISMPacketMsg:
 		if !m.SDR.ISMActive || msg.seq != m.SDR.ISMSeq {
@@ -1424,6 +1438,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.SDR.ISMActive && !m.SDR.ISMStarted.IsZero() {
 			m.SDR.ISMElapsed = time.Since(m.SDR.ISMStarted)
+		}
+		if m.SDR.SrvActive && !m.SDR.SrvStarted.IsZero() {
+			m.SDR.SrvElapsed = time.Since(m.SDR.SrvStarted)
 		}
 		if m.SDR.AnyActive() {
 			return m, sdrTickCmd()
@@ -1653,7 +1670,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.Focus == FocusContent && m.ActiveView == ViewSDR {
 		m.SDR.Tab = SDRTab(m.ActiveTabs[ViewSDR])
 		if m.SDR.IsTextInput() {
-			return m.handleSDRTextKey(k, msg)
+			return m.sdrTextInput(k, msg)
 		}
 	}
 	if m.Focus == FocusContent && m.ActiveView == ViewBluetooth && m.ActiveTabs[ViewBluetooth] == BTTabEmu && m.BluetoothEmu.CapturesDirectKeys() {

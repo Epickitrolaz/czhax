@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,32 @@ func valueOrNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// parseRateOr parses an IQ rate like "2.048M" or "1024000", falling back to def.
+func parseRateOr(raw string, def int64) int64 {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	mult := 1.0
+	switch {
+	case strings.HasSuffix(s, "m"):
+		s = strings.TrimSuffix(s, "m")
+		mult = 1_000_000
+	case strings.HasSuffix(s, "k"):
+		s = strings.TrimSuffix(s, "k")
+		mult = 1_000
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v <= 0 {
+		return def
+	}
+	rate := int64(v * mult)
+	if rate < 225_000 {
+		rate = 225_000
+	}
+	if rate > 3_200_000 {
+		rate = 3_200_000
+	}
+	return rate
 }
 
 func main() {
@@ -282,6 +309,39 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "sdr" {
+		if len(os.Args) > 2 && os.Args[2] == "serve" {
+			fs := flag.NewFlagSet("sdr serve", flag.ExitOnError)
+			dev := fs.Int("device", 0, "RTL-SDR device index")
+			bind := fs.String("bind", "0.0.0.0", "Listen address")
+			port := fs.Int("port", 1234, "rtl_tcp port")
+			freq := fs.String("freq", "100M", "Initial center frequency")
+			rate := fs.String("rate", "2.048M", "IQ sample rate")
+			gain := fs.Int("gain", -1, "Tuner gain in dB (-1 = auto)")
+			_ = fs.Parse(os.Args[3:])
+
+			hz, err := sdr.ParseFreqMHz(*freq)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "sdr serve: %v\n", err)
+				os.Exit(1)
+			}
+			cfg := sdr.ServerConfig{
+				DeviceIndex: *dev,
+				ListenAddr:  *bind,
+				Port:        *port,
+				FreqHz:      hz,
+				SampleRate:  parseRateOr(*rate, 2_048_000),
+				GainDB:      *gain,
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			fmt.Printf("rtl_tcp on %s:%d · %s · %s IQ\n", cfg.ListenAddr, cfg.Port,
+				sdr.FormatFreqMHz(cfg.FreqHz), sdr.FormatSampleRate(cfg.SampleRate))
+			if err := sdr.RunServer(ctx, cfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "sdr serve error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		st := sdr.Probe(ctx, false)
@@ -290,9 +350,10 @@ func main() {
 			fmt.Printf("  #%d %s:%s %s (tuner=%s dvb=%v)\n",
 				d.Index, d.VendorID, d.ProductID, d.Label(), valueOrNone(d.Tuner), d.DVBDriver)
 		}
-		fmt.Printf("Tools: rtl_fm=%s rtl_sdr=%s rtl_power=%s rtl_433=%s player=%s\n",
+		fmt.Printf("Tools: rtl_fm=%s rtl_sdr=%s rtl_power=%s rtl_tcp=%s rtl_433=%s player=%s\n",
 			valueOrNone(st.Tools.RTLFM), valueOrNone(st.Tools.RTLSDR),
-			valueOrNone(st.Tools.RTLPower), valueOrNone(st.Tools.RTL433), valueOrNone(st.Tools.Player))
+			valueOrNone(st.Tools.RTLPower), valueOrNone(st.Tools.RTLTCP),
+			valueOrNone(st.Tools.RTL433), valueOrNone(st.Tools.Player))
 		if st.Err != "" {
 			fmt.Fprintln(os.Stderr, "SDR: "+st.Err)
 			os.Exit(1)
