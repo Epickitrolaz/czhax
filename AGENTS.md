@@ -38,6 +38,8 @@ internal/
   wifi/scan.go             # Network scan + connect via nmcli (iw scan fallback)
   wifi/pentest.go          # Monitor-mode handshake capture + raw deauth injection (AF_PACKET)
   wifi/oneshot.go          # OneShot-Extended discovery + WPS scan/vulnwsc DB + streaming runner
+  wifi/beacon.go           # Beacon-flood frame builder + injector (SSID file / numbered / single)
+  wifi/evil.go             # Evil-twin orchestrator (hostapd, dnsmasq, NAT, captive portal, PMKID, deauth)
   oneshot/                 # Embedded OneShot-Extended snapshot (GPL-2.0, extracted to cache)
   localscan/ifaces.go      # WiFi, Ethernet, and USB tethering interface discovery
   localscan/nmap.go        # Nmap scan options, runner, and XML stream parser
@@ -63,6 +65,9 @@ internal/
     wifi.go                # Status -> WiFi interface detail
     wifi_scan.go           # WiFi -> Scan list/detail/interface picker/connect flow
     wifi_wps.go            # WiFi -> WPS/OneShot menu, runner output, color modes
+    wifi_spam.go           # WiFi -> Spam: SSID source, channel/rate/BSSID options, live stats
+    wifi_evil.go           # WiFi -> Evil: twin setup (AP/uplink/NAT/portal/PMKID/deauth) + log
+    wifi_extra.go          # Spam/Evil key handling, privileged helper streaming
     local.go               # Local -> Scan interface picker, nmap options, live run, host details
     bluetooth.go           # Status -> Bluetooth view
     bluetooth_scan.go      # BT -> Scan list/actions/detail/live attack output (Carwhisperer, WhisperPair, l2ping)

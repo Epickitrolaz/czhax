@@ -317,6 +317,8 @@ type AppModel struct {
 	System        SystemView
 	Wifi          WifiView
 	WifiScan      WifiScanView
+	WifiSpam      WifiSpamView
+	WifiEvil      WifiEvilView
 	Local         LocalView
 	IR            IRView
 	Bluetooth     BluetoothView
@@ -355,6 +357,8 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		System:        NewSystemView(),
 		Wifi:          NewWifiView(),
 		WifiScan:      NewWifiScanView(),
+		WifiSpam:      NewWifiSpamView(),
+		WifiEvil:      NewWifiEvilView(),
 		Local:         NewLocalView(),
 		IR:            NewIRView(cfgPath),
 		Bluetooth:     NewBluetoothView(),
@@ -910,6 +914,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wifiRefreshedMsg:
 		m.Wifi.SetInterfaces(msg.ifaces)
 		m.WifiScan.SyncInterfaces(msg.ifaces)
+		m.WifiSpam.SyncInterfaces(msg.ifaces)
+		m.WifiEvil.SyncInterfaces(msg.ifaces)
 		return m, nil
 
 	case wifiNetworksScannedMsg:
@@ -1274,6 +1280,46 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, btEmuPlayTickCmd()
 
+	case wifiSpamLineMsg:
+		if msg.seq != m.WifiSpam.Seq || !m.WifiSpam.Active {
+			return m, nil
+		}
+		m.WifiSpam.AppendLine(msg.seq, msg.line)
+		return m, waitWifiSpamLineCmd(msg.seq, m.WifiSpam.Ch)
+
+	case wifiSpamDoneMsg:
+		m.WifiSpam.Finish(msg.seq, msg.err)
+		if msg.err != nil && !strings.Contains(strings.ToLower(msg.err.Error()), "canceled") {
+			return m, m.setStatus("Beacon spam failed")
+		}
+		return m, m.setStatus("Beacon spam stopped")
+
+	case wifiEvilLineMsg:
+		if msg.seq != m.WifiEvil.Seq || !m.WifiEvil.Active {
+			return m, nil
+		}
+		m.WifiEvil.AppendLine(msg.seq, msg.line)
+		return m, waitWifiEvilLineCmd(msg.seq, m.WifiEvil.Ch)
+
+	case wifiEvilDoneMsg:
+		m.WifiEvil.Finish(msg.seq, msg.err)
+		if msg.err != nil && !strings.Contains(strings.ToLower(msg.err.Error()), "canceled") {
+			return m, m.setStatus("Evil twin failed")
+		}
+		return m, m.setStatus("Evil twin stopped")
+
+	case wifiHelperTickMsg:
+		if m.WifiSpam.Active {
+			m.WifiSpam.Elapsed = time.Since(m.WifiSpam.Started)
+		}
+		if m.WifiEvil.Active {
+			m.WifiEvil.Elapsed = time.Since(m.WifiEvil.Started)
+		}
+		if m.WifiSpam.Active || m.WifiEvil.Active {
+			return m, wifiHelperTickCmd()
+		}
+		return m, nil
+
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
 		return m, nil
@@ -1530,7 +1576,14 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleBluetoothEmuDirectKey(msg)
 	}
 
-	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.WifiScan.IsTextInput() {
+	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.ActiveTabs[ViewWiFi] == WiFiTabSpam && m.WifiSpam.IsTextInput() {
+		return m.handleWifiSpamTextKey(k, msg)
+	}
+	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.ActiveTabs[ViewWiFi] == WiFiTabEvil && m.WifiEvil.IsTextInput() {
+		return m.handleWifiEvilTextKey(k, msg)
+	}
+
+	if m.Focus == FocusContent && m.ActiveView == ViewWiFi && m.ActiveTabs[ViewWiFi] == WiFiTabScan && m.WifiScan.IsTextInput() {
 		if k == "esc" {
 			m.WifiScan.HandleEsc()
 			return m, nil
@@ -2068,6 +2121,22 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	}
 
 	if k == "esc" {
+		if m.ActiveView == ViewWiFi && m.ActiveTabs[ViewWiFi] == WiFiTabSpam {
+			if m.WifiSpam.Mode == spamModeRunning {
+				m.WifiSpam.Stop()
+				return m, m.setStatus("Stopping beacon spam...")
+			}
+			m.Focus = FocusTabs
+			return m, nil
+		}
+		if m.ActiveView == ViewWiFi && m.ActiveTabs[ViewWiFi] == WiFiTabEvil {
+			if m.WifiEvil.Mode == evilModeRunning {
+				m.WifiEvil.Stop()
+				return m, m.setStatus("Stopping evil twin...")
+			}
+			m.Focus = FocusTabs
+			return m, nil
+		}
 		if m.ActiveView == ViewWiFi && m.WifiScan.HandleEsc() {
 			return m, nil
 		}
@@ -2095,6 +2164,12 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 
 	switch m.ActiveView {
 	case ViewWiFi:
+		switch m.ActiveTabs[ViewWiFi] {
+		case WiFiTabSpam:
+			return m.handleWifiSpamKey(k)
+		case WiFiTabEvil:
+			return m.handleWifiEvilKey(k)
+		}
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
 		switch m.WifiScan.Mode {
@@ -2165,6 +2240,10 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					return m.startWifiPentest(wifi.PentestHandshake)
 				case wifiActDeauth:
 					return m.startWifiPentest(wifi.PentestDeauth)
+				case wifiActEvilClone:
+					return m.startWifiEvilClone(false)
+				case wifiActEvilDeauth:
+					return m.startWifiEvilClone(true)
 				case wifiActWPS:
 					m.WifiScan.BeginWPSMenu(scanModeActions)
 					return m, tea.Batch(m.resetMarquee(), m.wpsScanForcedCmd())
@@ -3166,9 +3245,20 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 		helpView.Marquee = mq
 		mainLines = helpView.RenderLines(mainW, bodyH, pal)
 	case m.ActiveView == ViewWiFi:
-		scanView := m.WifiScan
-		scanView.Marquee = mq
-		mainLines = scanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		switch m.ActiveTabs[ViewWiFi] {
+		case WiFiTabSpam:
+			spamView := m.WifiSpam
+			spamView.Marquee = mq
+			mainLines = spamView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		case WiFiTabEvil:
+			evilView := m.WifiEvil
+			evilView.Marquee = mq
+			mainLines = evilView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		default:
+			scanView := m.WifiScan
+			scanView.Marquee = mq
+			mainLines = scanView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		}
 	case m.ActiveView == ViewLocal:
 		localView := m.Local
 		localView.Marquee = mq
@@ -3313,6 +3403,9 @@ func (m AppModel) currentHints() []Hint {
 		}
 	}
 	if m.ActiveView == ViewWiFi {
+		if h := m.wifiTabHints(); h != nil {
+			return h
+		}
 		switch m.WifiScan.Mode {
 		case scanModeActions:
 			return []Hint{

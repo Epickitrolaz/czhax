@@ -246,7 +246,7 @@ setup_packages() {
   need_root
   local want=(
     aircrack-ng hcxtools hcxdumptool mdk4 pixiewps reaver tshark nmap
-    macchanger iw wireless-tools rfkill hostapd dnsmasq bluez bluez-tools
+    macchanger iw wireless-tools rfkill hostapd dnsmasq iptables bluez bluez-tools
     bluez-deprecated-tools bettercap usbutils pciutils alsa-utils ffmpeg mpv
   )
   local avail=() p

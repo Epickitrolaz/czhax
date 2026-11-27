@@ -39,6 +39,8 @@ const (
 	wifiActHandshake
 	wifiActDeauth
 	wifiActWPS
+	wifiActEvilClone
+	wifiActEvilDeauth
 	wifiActDetail
 	wifiActCount
 )
@@ -60,6 +62,8 @@ var wifiActions = []wifiActionItem{
 	{act: wifiActHandshake, name: "Handshake Capture", val: "until HS"},
 	{act: wifiActDeauth, name: "Deauth AP", val: "manual", warn: true},
 	{act: wifiActWPS, name: "WPS Attack (OneShot)", val: "oneshot", warn: true},
+	{act: wifiActEvilClone, name: "Evil Twin (clone)", val: "twin", warn: true},
+	{act: wifiActEvilDeauth, name: "Twin + Deauth", val: "twin+ap", warn: true},
 	{act: wifiActDetail, name: "Network Details", val: "info"},
 }
 

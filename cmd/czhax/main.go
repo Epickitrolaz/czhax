@@ -174,7 +174,93 @@ func main() {
 			fmt.Println(string(out))
 			return
 		}
-		fmt.Fprintln(os.Stderr, "usage: czhax wifi pentest [flags]")
+		if len(os.Args) > 2 && os.Args[2] == "spam" {
+			fs := flag.NewFlagSet("wifi spam", flag.ExitOnError)
+			iface := fs.String("iface", "wlan0", "Managed interface used for the monitor")
+			monIface := fs.String("monitor", "", "Pre-existing monitor interface")
+			channel := fs.Int("channel", 6, "Channel to flood")
+			ssid := fs.String("ssid", "", "Single SSID to advertise")
+			prefix := fs.String("prefix", "", "SSID prefix for numbered names")
+			count := fs.Int("count", 0, "How many numbered SSIDs to generate")
+			file := fs.String("file", "", "File with one SSID per line")
+			randomMAC := fs.Bool("random-mac", false, "New random BSSID for every beacon")
+			interval := fs.Int("interval", 15, "Delay between beacons (ms)")
+			_ = fs.Parse(os.Args[3:])
+
+			var ssids []string
+			switch {
+			case strings.TrimSpace(*file) != "":
+				list, err := wifi.LoadSSIDFile(*file)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "wifi spam: %v\n", err)
+					os.Exit(1)
+				}
+				ssids = list
+			case strings.TrimSpace(*prefix) != "" && *count > 0:
+				ssids = wifi.NumberedSSIDs(*prefix, *count)
+			case strings.TrimSpace(*ssid) != "":
+				ssids = []string{*ssid}
+			default:
+				fmt.Fprintln(os.Stderr, "wifi spam: give --ssid, --file or --prefix with --count")
+				os.Exit(1)
+			}
+			bcfg := wifi.BeaconConfig{
+				Iface:        *iface,
+				MonitorIface: *monIface,
+				Channel:      *channel,
+				SSIDs:        ssids,
+				RandomMAC:    *randomMAC,
+				IntervalMS:   *interval,
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			wifi.WatchStdinCancel(os.Stdin, cancel)
+			if err := wifi.RunBeaconSpam(ctx, bcfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "wifi spam error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "evil" {
+			fs := flag.NewFlagSet("wifi evil", flag.ExitOnError)
+			iface := fs.String("iface", "wlan0", "AP interface")
+			uplink := fs.String("uplink", "", "Uplink interface for internet pass-through")
+			ssid := fs.String("ssid", "", "SSID to clone")
+			channel := fs.Int("channel", 6, "Channel")
+			nat := fs.Bool("nat", false, "NAT clients to the uplink")
+			portal := fs.Bool("portal", false, "Serve a captive portal")
+			pmkid := fs.Bool("pmkid", false, "Harvest PMKIDs with hcxdumptool")
+			deauth := fs.String("deauth", "", "Original BSSID to deauth")
+			workDir := fs.String("work-dir", "", "Directory for generated configs")
+			caps := fs.String("capture-dir", "", "Directory for captures")
+			uid := fs.Int("uid", -1, "Owner UID for captures")
+			gid := fs.Int("gid", -1, "Owner GID for captures")
+			_ = fs.Parse(os.Args[3:])
+
+			ecfg := wifi.EvilConfig{
+				Iface:       *iface,
+				UplinkIface: *uplink,
+				SSID:        *ssid,
+				Channel:     *channel,
+				NAT:         *nat,
+				Portal:      *portal,
+				PMKID:       *pmkid,
+				DeauthBSSID: *deauth,
+				WorkDir:     *workDir,
+				CaptureDir:  *caps,
+				UID:         *uid,
+				GID:         *gid,
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			wifi.WatchStdinCancel(os.Stdin, cancel)
+			if err := wifi.RunEvilTwin(ctx, ecfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "wifi evil error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		fmt.Fprintln(os.Stderr, "usage: czhax wifi pentest|spam|evil [flags]")
 		os.Exit(1)
 	}
 
