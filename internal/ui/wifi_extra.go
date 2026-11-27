@@ -60,6 +60,13 @@ func streamPrivileged(ctx context.Context, args []string, onLine func(string)) e
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 	}
 	cmd.WaitDelay = 3 * time.Second
+	// Hold stdin open: a helper that reads it must never see EOF and cancel
+	// itself the moment it starts.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer stdin.Close()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

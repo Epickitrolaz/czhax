@@ -214,7 +214,6 @@ func main() {
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
-			wifi.WatchStdinCancel(os.Stdin, cancel)
 			if err := wifi.RunBeaconSpam(ctx, bcfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "wifi spam error: %v\n", err)
 				os.Exit(1)
@@ -253,7 +252,6 @@ func main() {
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
-			wifi.WatchStdinCancel(os.Stdin, cancel)
 			if err := wifi.RunEvilTwin(ctx, ecfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "wifi evil error: %v\n", err)
 				os.Exit(1)
