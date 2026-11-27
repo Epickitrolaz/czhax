@@ -238,7 +238,10 @@ func (v *WifiEvilView) AppendLine(seq int, line string) {
 	if seq != v.Seq {
 		return
 	}
-	v.Lines = append(v.Lines, strings.TrimSpace(line))
+	if line = sanitizeLogLine(line); line == "" {
+		return
+	}
+	v.Lines = append(v.Lines, line)
 	if len(v.Lines) > 120 {
 		v.Lines = v.Lines[len(v.Lines)-120:]
 	}
