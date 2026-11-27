@@ -168,6 +168,55 @@ func TestResampleS16LE(t *testing.T) {
 	}
 }
 
+func TestZoomAndSampleRateHelpers(t *testing.T) {
+	if FreqSteps[0] != 1_000 {
+		t.Fatalf("minimum tuning step = %d, want 1000", FreqSteps[0])
+	}
+	if got := FormatStep(1_000); got != "1 kHz" {
+		t.Fatalf("FormatStep(1000) = %q, want \"1 kHz\"", got)
+	}
+	for i := 1; i < len(FreqSteps); i++ {
+		if FreqSteps[i] <= FreqSteps[i-1] {
+			t.Fatalf("steps not ascending at %d: %v", i, FreqSteps)
+		}
+	}
+
+	span := int64(20_500_000)
+	if got := ZoomSpan(span, 0); got != span {
+		t.Fatalf("zoom 0 span = %d, want %d", got, span)
+	}
+	if got := ZoomSpan(span, 3); got != span/8 {
+		t.Fatalf("zoom 3 span = %d, want %d", got, span/8)
+	}
+	if got := ZoomSpan(span, 30); got != MinZoomSpan {
+		t.Fatalf("extreme zoom = %d, want floor %d", got, MinZoomSpan)
+	}
+
+	if got := SampleRateForSpan(span); got != MaxSampleRate {
+		t.Fatalf("wide span rate = %d, want %d", got, MaxSampleRate)
+	}
+	if got := SampleRateForSpan(1_000_000); got < 1_000_000 || got > MaxSampleRate {
+		t.Fatalf("1 MHz span rate = %d, want >= 1 MHz", got)
+	}
+	if got := SampleRateForSpan(50_000); got != MinSampleRate {
+		t.Fatalf("narrow span rate = %d, want %d", got, MinSampleRate)
+	}
+	// Every chosen rate is (to within 0.1%) an exact RTL2832U divisor.
+	for _, s := range []int64{50_000, 400_000, 1_000_000, 2_562_500, 3_000_000, 20_500_000} {
+		rate := SampleRateForSpan(s)
+		if rate < MinSampleRate || rate > MaxSampleRate {
+			t.Fatalf("span %d -> rate %d outside RTL2832U limits", s, rate)
+		}
+		div := 28_800_000 / float64(rate)
+		if math.Abs(div-math.Round(div)) > 0.001 {
+			t.Fatalf("span %d -> rate %d is not a 28.8 MHz divisor (n=%.4f)", s, rate, div)
+		}
+		if rate < s && s <= MaxNarrowSpan {
+			t.Fatalf("span %d -> rate %d does not cover the span", s, rate)
+		}
+	}
+}
+
 func TestExtractTopSignalsAndServerArgs(t *testing.T) {
 	hi := make([]float64, 200)
 	for i := range hi {

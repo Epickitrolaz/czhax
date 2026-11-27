@@ -298,6 +298,19 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 			case k == "m":
 				v.ToggleSpecView()
 				return m, m.resetMarquee()
+			case k == "c":
+				v.CycleContrast(1)
+				return m, m.setStatus("Contrast " + v.ContrastName())
+			case k == "z" || k == "+" || k == "=":
+				if v.SetZoom(1) {
+					return m.startSDRSweep()
+				}
+				return m, nil
+			case k == "x" || k == "-" || k == "_":
+				if v.SetZoom(-1) {
+					return m.startSDRSweep()
+				}
+				return m, nil
 			case m.isLeft(k):
 				v.MoveSpecMarker(-1)
 			case m.isRight(k):
@@ -320,6 +333,19 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 				case k == "m":
 					v.ToggleSpecView()
 					return m, m.resetMarquee()
+				case k == "c":
+					v.CycleContrast(1)
+					return m, m.setStatus("Contrast " + v.ContrastName())
+				case k == "z" || k == "+" || k == "=":
+					if v.SetZoom(1) {
+						return m.startSDRSweep()
+					}
+					return m, nil
+				case k == "x" || k == "-" || k == "_":
+					if v.SetZoom(-1) {
+						return m.startSDRSweep()
+					}
+					return m, nil
 				case m.isLeft(k):
 					v.MoveSpecMarker(-1)
 				case m.isRight(k):
@@ -340,6 +366,9 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 		case k == "m":
 			v.ToggleSpecView()
 			return m, m.resetMarquee()
+		case k == "c":
+			v.CycleContrast(1)
+			return m, m.setStatus("Contrast " + v.ContrastName())
 		case m.isUp(k):
 			v.MoveSpecCursor(-1)
 		case m.isDown(k):
@@ -355,6 +384,10 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 				v.BeginEditSweep(sdrSpecEditStart)
 			case sdrSpecFEnd:
 				v.BeginEditSweep(sdrSpecEditEnd)
+			case sdrSpecFZoom:
+				v.SetZoom(1)
+			case sdrSpecFContrast:
+				v.CycleContrast(1)
 			case sdrSpecFPreset:
 				v.cycleSpecPreset(1)
 			case sdrSpecFView:
@@ -577,7 +610,7 @@ func (m AppModel) sdrHints() []Hint {
 			return []Hint{{Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "cancel"}}
 		}
 		if v.SpecActive || v.SpecHasFrame {
-			return []Hint{{Key: "←→", Desc: "sig"}, {Key: "⏎", Desc: "tune"}, {Key: "m", Desc: "view"}, {Key: "Esc", Desc: "stop"}}
+			return []Hint{{Key: "←→", Desc: "sig"}, {Key: "⏎", Desc: "tune"}, {Key: "z/x", Desc: "zoom"}, {Key: "c", Desc: "cont"}, {Key: "Esc", Desc: "stop"}}
 		}
 		return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
 

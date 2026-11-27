@@ -37,7 +37,7 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("IR Learn  ") + txt.Render(v.Marquee.Truncate("⏎:listen/remote/bind key", descW)),
 		" " + sec.Render("IR Browse ") + txt.Render(v.Marquee.Truncate("m:match u:univ /:find [/]:brand", descW)),
 		" " + sec.Render("SDR Radio ") + txt.Render(v.Marquee.Truncate("←→:tune p:presets m:mute ⏎:go", descW)),
-		" " + sec.Render("SDR Spec  ") + txt.Render(v.Marquee.Truncate("start/end ⏎:sweep m:bars/top50", descW)),
+		" " + sec.Render("SDR Spec  ") + txt.Render(v.Marquee.Truncate("start/end z/x:zoom c:cont m:top50", descW)),
 		" " + sec.Render("SDR 433   ") + txt.Render(v.Marquee.Truncate("rtl_433 ISM decoder + JSONL log", descW)),
 		" " + sec.Render("SDR Srv   ") + txt.Render(v.Marquee.Truncate("rtl_tcp IQ server for LAN clients", descW)),
 		" " + sec.Render("WiFi List ") + txt.Render(v.Marquee.Truncate("o:color ⏎:actions (WPS)", descW)),
