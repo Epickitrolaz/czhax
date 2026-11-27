@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -238,7 +239,11 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 
 	// Watch peer connections/disconnections. A disconnect re-arms advertising so
 	// the host can reconnect (BlueZ does not always resume it on its own).
-	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, adv.kickRearm, logf)
+	var gattServed func() int64
+	if hidApp != nil {
+		gattServed = hidApp.servedCount
+	}
+	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, adv.kickRearm, gattServed, logf)
 	defer stopPeerWatch()
 
 	// Set Class of Device after BlueZ profile/endpoint/advertisement registration
@@ -837,7 +842,7 @@ func (a *leAdvertiser) close() {
 
 // --- Peer connection watcher ---
 
-func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), onDisconnect func(), logf func(string, ...any)) func() {
+func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), onDisconnect func(), gattServed func() int64, logf func(string, ...any)) func() {
 	rules := [][]dbus.MatchOption{
 		{
 			dbus.WithMatchSender(bluezService),
@@ -868,6 +873,8 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 	prefix := string(adapterPath) + "/dev_"
 	state := make(map[dbus.ObjectPath]bool)
 	var active dbus.ObjectPath
+	var connectedAt time.Time
+	var servedAtConnect int64
 	done := make(chan struct{})
 
 	var resolvedMu sync.Mutex
@@ -913,6 +920,10 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 				return
 			}
 			active = path
+			connectedAt = time.Now()
+			if gattServed != nil {
+				servedAtConnect = gattServed()
+			}
 			if linkChanged {
 				// A BR/EDR connection never triggers GATT discovery, and that is
 				// the most common reason a PC appears to connect and then drops us.
@@ -970,6 +981,16 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 		}
 		if logf != nil {
 			logf("Disconnected: %s (%s)", name, addr)
+			// A host that connects and leaves within seconds without asking for a
+			// single attribute is almost always using a stale pairing/entry for
+			// this address (for example a Classic bond from an audio profile).
+			if !connectedAt.IsZero() && time.Since(connectedAt) < 8*time.Second {
+				silent := gattServed == nil || gattServed() == servedAtConnect
+				if silent {
+					logf("Host left without a GATT request: remove the device on the host and pair again")
+				}
+			}
+			connectedAt = time.Time{}
 		}
 		if onDisconnect != nil {
 			onDisconnect()
@@ -1155,6 +1176,7 @@ type hidGattApp struct {
 
 	objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
+	served     int64 // atomic: GATT requests served
 	kbChar     *gattChar
 	mouseChar  *gattChar
 	consChar   *gattChar
@@ -1341,6 +1363,9 @@ func (a *hidGattApp) addChar(c *gattChar) {
 	if c.trace == nil {
 		c.trace = a.trace
 	}
+	if c.onServe == nil {
+		c.onServe = func() { atomic.AddInt64(&a.served, 1) }
+	}
 	_ = a.conn.Export(c, c.path, "org.bluez.GattCharacteristic1")
 	props, _ := prop.Export(a.conn, c.path, prop.Map{
 		"org.bluez.GattCharacteristic1": {
@@ -1384,6 +1409,10 @@ func (a *hidGattApp) addDesc(charPath dbus.ObjectPath, suffix, uuid string, flag
 		},
 	}
 }
+
+// servedCount reports how many GATT requests the host has made, which
+// distinguishes "host never talked to us" from "host talked and left".
+func (a *hidGattApp) servedCount() int64 { return atomic.LoadInt64(&a.served) }
 
 func (a *hidGattApp) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
 	return a.objects, nil
@@ -1517,6 +1546,7 @@ type gattChar struct {
 	label   string
 	logf    func(string, ...any)
 	trace   func(string, ...any)
+	onServe func()
 
 	mu        sync.Mutex
 	value     []byte
@@ -1564,6 +1594,9 @@ func (c *gattChar) ReadValue(options map[string]dbus.Variant) ([]byte, *dbus.Err
 	cp := append([]byte(nil), c.value...)
 	c.mu.Unlock()
 	out := readChunk(cp, options)
+	if c.onServe != nil {
+		c.onServe()
+	}
 	if c.trace != nil && c.label != "" {
 		c.trace("READ %s off=%d -> %d bytes %x", c.label, attOffset(options), len(out), out)
 	}
@@ -1589,6 +1622,9 @@ func (c *gattChar) WriteValue(value []byte, options map[string]dbus.Variant) *db
 	snapshot := append([]byte(nil), c.value...)
 	cb := c.onWrite
 	c.mu.Unlock()
+	if c.onServe != nil {
+		c.onServe()
+	}
 	if c.trace != nil && c.label != "" {
 		c.trace("WRITE %s off=%d value=%x", c.label, attOffset(options), snapshot)
 	}
