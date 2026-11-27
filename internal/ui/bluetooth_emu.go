@@ -283,7 +283,8 @@ func (v BluetoothEmuView) BuildConfig() bluetooth.EmuConfig {
 			}
 		}
 	}
-	recDir := workdir.Captures(workdir.Resolve(v.WorkDir))
+	root := workdir.Resolve(v.WorkDir)
+	recDir := workdir.Captures(root)
 	return bluetooth.EmuConfig{
 		HCI:          v.EffectiveHCI(),
 		Profile:      p.Kind,
@@ -293,6 +294,7 @@ func (v BluetoothEmuView) BuildConfig() bluetooth.EmuConfig {
 		CustomMode:   v.currentCustomMode(),
 		CustomUUID:   strings.TrimSpace(v.CustomUUID),
 		RecordDir:    recDir,
+		TempDir:      workdir.Temp(root),
 		MonitorAudio: v.MonitorAudio,
 		RecordAudio:  v.RecordAudio,
 	}

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -42,8 +45,53 @@ const (
 	dbusObjMgrIface      = "org.freedesktop.DBus.ObjectManager"
 )
 
+// openEmuTrace opens the emulator debug log next to the captures. Every GATT
+// read/write/notify is recorded so a host that drops the link on a report can be
+// diagnosed from the device alone.
+func openEmuTrace(cfg EmuConfig) (*os.File, string, func(string, ...any)) {
+	dir := strings.TrimSpace(cfg.TempDir)
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "czhax")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", nil
+	}
+	path := filepath.Join(dir, "bt-emu-"+time.Now().Format("20060102-150405")+".log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, "", nil
+	}
+	ChownFile(path, cfg.UID, cfg.GID)
+	var mu sync.Mutex
+	tracef := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = fmt.Fprintf(f, time.Now().Format("15:04:05.000 ")+format+"\n", args...)
+	}
+	return f, path, tracef
+}
+
 // RunEmulatorDirect runs the BlueZ D-Bus emulator in the current (root) process.
-func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuCommand, emit func(EmuEvent)) error {
+func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuCommand, emit func(EmuEvent)) (err error) {
+	traceFile, tracePath, tracef := openEmuTrace(cfg)
+	if traceFile != nil {
+		defer traceFile.Close()
+	}
+	if tracef == nil {
+		tracef = func(string, ...any) {}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tracef("PANIC: %v\n%s", r, debug.Stack())
+			err = fmt.Errorf("emulator panic: %v", r)
+			if emit != nil {
+				emit(EmuEvent{Kind: "error", Text: err.Error()})
+			}
+		}
+	}()
+	tracef("=== emulator start: profile=%s hci=%s name=%q cod=0x%06x appearance=0x%04x ===",
+		cfg.Profile, cfg.HCI, cfg.Name, cfg.CoD, cfg.Appearance)
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -67,9 +115,13 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	adapterObj := conn.Object(bluezService, adapterPath)
 
 	logf := func(format string, args ...any) {
+		tracef(format, args...)
 		if emit != nil {
 			emit(EmuEvent{Kind: "log", Text: fmt.Sprintf(format, args...)})
 		}
+	}
+	if tracePath != "" {
+		logf("Debug log: %s", tracePath)
 	}
 
 	// Save & configure adapter properties so we restore them cleanly on stop.
@@ -93,10 +145,11 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	if spec.IsHID {
 		build := func(secure bool) *hidGattApp {
 			return newHIDGattApp(conn, spec, secure, func(leds uint8) {
+				tracef("LED report from host: 0x%02x", leds)
 				if emit != nil {
 					emit(EmuEvent{Kind: "led", LEDs: leds})
 				}
-			}, logf)
+			}, logf, tracef)
 		}
 		hidApp = build(true)
 		if err := hidApp.register(adapterObj); err != nil {
@@ -970,6 +1023,7 @@ type hidGattApp struct {
 	spec   EmuProfileSpec
 	secure bool
 	logf   func(string, ...any)
+	trace  func(string, ...any)
 
 	objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
@@ -1002,12 +1056,13 @@ func (a *hidGattApp) reportFlags(extras ...string) []string {
 	return flags
 }
 
-func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs func(uint8), logf func(string, ...any)) *hidGattApp {
+func newHIDGattApp(conn *dbus.Conn, spec EmuProfileSpec, secure bool, onLEDs func(uint8), logf func(string, ...any), trace func(string, ...any)) *hidGattApp {
 	app := &hidGattApp{
 		conn:    conn,
 		spec:    spec,
 		secure:  secure,
 		logf:    logf,
+		trace:   trace,
 		objects: make(map[dbus.ObjectPath]map[string]map[string]dbus.Variant),
 	}
 
@@ -1154,6 +1209,9 @@ func (a *hidGattApp) addChar(c *gattChar) {
 	}
 	if c.label == "" {
 		c.label = charLabel(c.uuid)
+	}
+	if c.trace == nil {
+		c.trace = a.trace
 	}
 	_ = a.conn.Export(c, c.path, "org.bluez.GattCharacteristic1")
 	props, _ := prop.Export(a.conn, c.path, prop.Map{
@@ -1330,6 +1388,7 @@ type gattChar struct {
 	onWrite func([]byte)
 	label   string
 	logf    func(string, ...any)
+	trace   func(string, ...any)
 
 	mu        sync.Mutex
 	value     []byte
@@ -1376,7 +1435,11 @@ func (c *gattChar) ReadValue(options map[string]dbus.Variant) ([]byte, *dbus.Err
 	c.mu.Lock()
 	cp := append([]byte(nil), c.value...)
 	c.mu.Unlock()
-	return readChunk(cp, options), nil
+	out := readChunk(cp, options)
+	if c.trace != nil && c.label != "" {
+		c.trace("READ %s off=%d -> %d bytes %x", c.label, attOffset(options), len(out), out)
+	}
+	return out, nil
 }
 
 func (c *gattChar) WriteValue(value []byte, options map[string]dbus.Variant) *dbus.Error {
@@ -1398,6 +1461,9 @@ func (c *gattChar) WriteValue(value []byte, options map[string]dbus.Variant) *db
 	snapshot := append([]byte(nil), c.value...)
 	cb := c.onWrite
 	c.mu.Unlock()
+	if c.trace != nil && c.label != "" {
+		c.trace("WRITE %s off=%d value=%x", c.label, attOffset(options), snapshot)
+	}
 	if cb != nil {
 		cb(snapshot)
 	}
@@ -1409,13 +1475,26 @@ func (c *gattChar) StartNotify() *dbus.Error {
 	c.notifying = true
 	logf := c.logf
 	label := c.label
+	uuid := c.uuid
+	size := len(c.value)
 	c.mu.Unlock()
 	if logf != nil && label != "" {
 		logf("%s notifications enabled", label)
 	}
+	if c.trace != nil && label != "" {
+		c.trace("CCCD enable on %s", label)
+	}
 	if c.props != nil {
 		// Set (not SetMust) so a peer that vanished mid-request cannot panic.
 		safePropSet(c.props, "org.bluez.GattCharacteristic1", "Notifying", true)
+	}
+	// Push a neutral report so the host starts from a known state (no stuck
+	// modifiers if the previous session died mid-key).
+	if uuid == uuidHIDReport && size > 0 {
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			_ = c.notify(make([]byte, size))
+		}()
 	}
 	return nil
 }
@@ -1438,7 +1517,11 @@ func (c *gattChar) StopNotify() *dbus.Error {
 func (c *gattChar) notify(val []byte) error {
 	c.mu.Lock()
 	c.value = append([]byte(nil), val...)
+	notifying := c.notifying
 	c.mu.Unlock()
+	if c.trace != nil && c.label != "" {
+		c.trace("NOTIFY %s (%d bytes, cccd=%v) %x", c.label, len(val), notifying, val)
+	}
 	if c.props != nil {
 		// Set (not SetMust): a disconnect races the emit and must not panic.
 		safePropSet(c.props, "org.bluez.GattCharacteristic1", "Value", append([]byte(nil), val...))
