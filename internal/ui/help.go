@@ -31,6 +31,7 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("s / ⏎     ") + txt.Render(v.Marquee.Truncate("WiFi scan / AP actions", descW)),
 		" " + sec.Render("pcap      ") + txt.Render(v.Marquee.Truncate("Saved ~/czhax/captures", descW)),
 		" " + sec.Render("BT Scan   ") + txt.Render(v.Marquee.Truncate("s:scan m:mode ⏎:actions", descW)),
+		" " + sec.Render("BT Emu    ") + txt.Render(v.Marquee.Truncate("emulate HID/speaker/custom", descW)),
 		" " + sec.Render("Files     ") + txt.Render(v.Marquee.Truncate("⏎:open n:file m:dir a:rec x:del r:ren", descW)),
 		" " + sec.Render("IR Remote ") + txt.Render(v.Marquee.Truncate("keys:send ←→:rem Tab:list =:remap", descW)),
 		" " + sec.Render("IR Learn  ") + txt.Render(v.Marquee.Truncate("⏎:listen/remote/bind key", descW)),

@@ -187,6 +187,7 @@ func (s *a2dpSinkService) openRecorderLocked(sampleRate, channels int) {
 	s.wav = w
 	s.recordPath = path
 	s.recordStarted = time.Now()
+	ChownFile(path, s.cfg.UID, s.cfg.GID)
 	if s.logf != nil {
 		s.logf("Recording audio to %s", path)
 	}

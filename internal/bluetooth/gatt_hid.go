@@ -73,7 +73,7 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	}
 
 	// Save & configure adapter properties so we restore them cleanly on stop.
-	restoreAdapter := configureAdapter(conn, adapterObj, hciName, spec.DefaultName, spec.CoD, logf)
+	restoreAdapter := configureAdapter(conn, adapterObj, hciName, spec.DefaultName, logf)
 	defer restoreAdapter()
 
 	// Register pairing agent (JustWorks auto-accept + trust).
@@ -140,6 +140,12 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	}
 	unregAdv := registerLEAdvertisement(conn, adapterObj, spec.DefaultName, spec.Appearance, uuids, logf)
 	defer unregAdv()
+
+	// Set Class of Device after BlueZ profile/endpoint/advertisement registration
+	// so BlueZ doesn't overwrite Major/Minor device class during service init.
+	if spec.CoD != 0 {
+		setHCIClass(hciName, fmt.Sprintf("0x%06x", spec.CoD), logf)
+	}
 
 	transportLabel := "BLE Adv"
 	switch {
@@ -270,7 +276,7 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	}
 }
 
-func configureAdapter(conn *dbus.Conn, adapter dbus.BusObject, hciName, alias string, cod uint32, logf func(string, ...any)) func() {
+func configureAdapter(conn *dbus.Conn, adapter dbus.BusObject, hciName, alias string, logf func(string, ...any)) func() {
 	getProp := func(name string) (dbus.Variant, bool) {
 		var v dbus.Variant
 		err := adapter.Call(dbusPropsIface+".Get", 0, bluezAdapterIface, name).Store(&v)
@@ -296,10 +302,6 @@ func configureAdapter(conn *dbus.Conn, adapter dbus.BusObject, hciName, alias st
 	_ = setProp("Pairable", true)
 	_ = setProp("DiscoverableTimeout", uint32(0))
 	_ = setProp("Discoverable", true)
-
-	if cod != 0 {
-		setHCIClass(hciName, fmt.Sprintf("0x%06x", cod), logf)
-	}
 
 	return func() {
 		if hasAlias {
