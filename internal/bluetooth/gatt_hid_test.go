@@ -244,3 +244,24 @@ func TestKeyboardReportIsNotIDPrefixed(t *testing.T) {
 		t.Fatalf("mouse report = % x, want 00 05 fb 00", m)
 	}
 }
+
+// TestParseBTMgmtSettings guards the adapter-flag preservation around the
+// BR/EDR power cycle: losing connectable/bondable breaks later Classic (A2DP)
+// emulation, so the parsed set must be exact.
+func TestParseBTMgmtSettings(t *testing.T) {
+	out := "hci0:\n\tcurrent settings: powered connectable bondable br/edr le secure-conn\r\n"
+	got := parseBTMgmtSettings(out)
+	for _, f := range []string{"powered", "connectable", "bondable", "br/edr", "le", "secure-conn"} {
+		if !got[f] {
+			t.Errorf("missing flag %q in %v", f, got)
+		}
+	}
+	for _, f := range []string{"discoverable", "fast-connectable"} {
+		if got[f] {
+			t.Errorf("unexpected flag %q in %v", f, got)
+		}
+	}
+	if len(parseBTMgmtSettings("no settings here")) != 0 {
+		t.Error("expected no flags from unrelated output")
+	}
+}
