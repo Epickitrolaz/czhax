@@ -1954,6 +1954,12 @@ func (m AppModel) startCW() (tea.Model, tea.Cmd) {
 	return m, m.setStatus("Select Tap or Play audio")
 }
 
+// startWifiConnect launches the connection request the view just prepared.
+func (m AppModel) startWifiConnect() tea.Cmd {
+	req := m.WifiScan.BuildConnectRequest()
+	return tea.Batch(m.setStatus("Connecting "+req.Iface+"..."), connectWifiNetworkCmd(req))
+}
+
 func (m AppModel) startWifiPentest(mode wifi.PentestMode) (tea.Model, tea.Cmd) {
 	if m.WifiScan.PentestActive {
 		return m, nil
@@ -2131,7 +2137,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					m.WifiScan.OpenActions()
 				}
 			case k == "c":
-				m.WifiScan.BeginConnect(scanModeList)
+				if m.WifiScan.BeginConnect(scanModeList) {
+					return m, m.startWifiConnect()
+				}
 			}
 			return m, nil
 
@@ -2148,7 +2156,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 				}
 				switch act {
 				case wifiActConnect:
-					m.WifiScan.BeginConnect(scanModeActions)
+					if m.WifiScan.BeginConnect(scanModeActions) {
+						return m, m.startWifiConnect()
+					}
 				case wifiActBoth:
 					return m.startWifiPentest(wifi.PentestBoth)
 				case wifiActHandshake:
@@ -2197,7 +2207,11 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			switch k {
 			case "c":
 				if m.WifiScan.BeginWPSConnect() {
-					return m, m.setStatus("Connect with PSK")
+					return m, m.startWifiConnect()
+				}
+				switch m.WifiScan.Mode {
+				case scanModePassword, scanModeSSID:
+					return m, m.setStatus("Enter the network details")
 				}
 				return m, m.setStatus("No PSK recovered")
 			case "p":
@@ -2215,7 +2229,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 			case m.isDown(k):
 				m.WifiScan.MoveDetailScroll(1, mainW, bodyH, pal)
 			case k == "enter" || k == "c":
-				m.WifiScan.BeginConnect(scanModeDetail)
+				if m.WifiScan.BeginConnect(scanModeDetail) {
+					return m, m.startWifiConnect()
+				}
 			}
 			return m, nil
 

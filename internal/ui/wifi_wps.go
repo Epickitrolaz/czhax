@@ -346,16 +346,14 @@ func (v WifiScanView) HasWPSCredentials() (pin, psk bool) {
 	return v.WPSFoundPIN != "", v.WPSFoundPSK != ""
 }
 
-// BeginWPSConnect opens the interface picker and connects with the recovered PSK.
+// BeginWPSConnect connects with the recovered PSK on the scan interface. It
+// returns true when the caller should start the connection immediately.
 func (v *WifiScanView) BeginWPSConnect() bool {
 	if strings.TrimSpace(v.WPSFoundPSK) == "" {
 		return false
 	}
-	if !v.BeginConnect(scanModeWPSRun) {
-		return false
-	}
 	v.UseWPSCreds = true
-	return true
+	return v.BeginConnect(scanModeWPSRun)
 }
 
 // RetryWithPIN relaunches OneShot using the PIN it recovered, to capture the PSK.

@@ -482,12 +482,17 @@ func (v *WifiScanView) MoveDetailScroll(delta, w, h int, pal theme.Palette) {
 	}
 }
 
+// BeginConnect prepares the connect flow for the selected network. The interface
+// was already chosen when the scan was started, so it is reused and the
+// interface picker is not shown again.
+//
+// It returns true when the caller should start the connection immediately
+// (open network, or WPS credentials already recovered).
 func (v *WifiScanView) BeginConnect(fromMode WifiScanMode) bool {
 	if _, ok := v.SelectedNetwork(); !ok || v.Connecting {
 		return false
 	}
 	v.PrevMode = fromMode
-	v.Mode = scanModePickIface
 	v.ConnectErr = ""
 	v.Password = ""
 	v.SSIDInput = ""
@@ -495,33 +500,37 @@ func (v *WifiScanView) BeginConnect(fromMode WifiScanMode) bool {
 	v.Note = ""
 	v.NoteIsErr = false
 
-	ifaces := v.AvailableIfaces()
-	v.IfaceCursor = 0
-	target := v.EffectiveScanIface()
-	for i, inf := range ifaces {
-		if inf.Name == target {
-			v.IfaceCursor = i
-			break
+	// Use the interface the user scanned with; only fall back when it is gone.
+	iface := strings.TrimSpace(v.EffectiveScanIface())
+	if iface == "" || !v.ifaceAvailable(iface) {
+		iface = strings.TrimSpace(v.ConnectIface)
+	}
+	if iface == "" || !v.ifaceAvailable(iface) {
+		if ifaces := v.AvailableIfaces(); len(ifaces) > 0 {
+			iface = ifaces[0].Name
 		}
 	}
-	return true
-}
-
-func (v *WifiScanView) MoveIfaceCursor(delta int) {
-	ifaces := v.AvailableIfaces()
-	if len(ifaces) == 0 {
-		v.IfaceCursor = 0
-		return
+	if iface == "" {
+		v.ConnectErr = "No WiFi interface"
+		return false
 	}
-	v.IfaceCursor = (v.IfaceCursor + delta + len(ifaces)) % len(ifaces)
+	v.ConnectIface = iface
+	return v.advanceConnect()
 }
 
-func (v *WifiScanView) ConfirmConnectIface() (startConnect bool) {
-	ifaces := v.AvailableIfaces()
-	idx := clampIndex(v.IfaceCursor, len(ifaces))
-	v.ConnectIface = ifaces[idx].Name
-	v.ConnectErr = ""
+// ifaceAvailable reports whether name is one of the discovered interfaces.
+func (v WifiScanView) ifaceAvailable(name string) bool {
+	for _, inf := range v.AvailableIfaces() {
+		if inf.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
+// advanceConnect moves the flow past the interface choice: SSID entry for a
+// hidden network, the passphrase prompt, or straight to connecting.
+func (v *WifiScanView) advanceConnect() (startConnect bool) {
 	net, ok := v.SelectedNetwork()
 	if !ok {
 		v.Mode = scanModeList
@@ -544,6 +553,25 @@ func (v *WifiScanView) ConfirmConnectIface() (startConnect bool) {
 	v.Mode = scanModePassword
 	v.Password = ""
 	return false
+}
+
+func (v *WifiScanView) MoveIfaceCursor(delta int) {
+	ifaces := v.AvailableIfaces()
+	if len(ifaces) == 0 {
+		v.IfaceCursor = 0
+		return
+	}
+	v.IfaceCursor = (v.IfaceCursor + delta + len(ifaces)) % len(ifaces)
+}
+
+// ConfirmConnectIface applies the interface chosen in the picker (kept for the
+// deliberate override path) and continues the connect flow.
+func (v *WifiScanView) ConfirmConnectIface() (startConnect bool) {
+	ifaces := v.AvailableIfaces()
+	idx := clampIndex(v.IfaceCursor, len(ifaces))
+	v.ConnectIface = ifaces[idx].Name
+	v.ConnectErr = ""
+	return v.advanceConnect()
 }
 
 func (v *WifiScanView) HandleTextKey(msg tea.KeyMsg) (submit bool, handled bool) {
@@ -733,14 +761,14 @@ func (v *WifiScanView) HandleEsc() bool {
 		if net, ok := v.SelectedNetwork(); ok && strings.TrimSpace(net.SSID) == "" {
 			v.Mode = scanModeSSID
 		} else {
-			v.Mode = scanModePickIface
+			v.Mode = v.PrevMode
 		}
 		return true
 	case scanModeSSID:
 		v.SSIDInput = ""
 		v.ConnectErr = ""
 		v.Connecting = false
-		v.Mode = scanModePickIface
+		v.Mode = v.PrevMode
 		return true
 	case scanModePickIface:
 		v.ConnectErr = ""
