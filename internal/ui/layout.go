@@ -28,6 +28,8 @@ const (
 
 const (
 	WiFiTabScan = iota
+	WiFiTabSpam
+	WiFiTabEvil
 )
 
 const (
@@ -53,7 +55,7 @@ func SidebarLabel(name string) string {
 
 var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
-	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan"}},
+	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan", "Spam", "Evil"}},
 	{ID: ViewBluetooth, Name: "BT", Short3: "BT", Tabs: []string{"Scan", "Emu"}},
 	{ID: ViewIR, Name: "IR", Short3: "IR", Tabs: []string{"Remote", "Learn", "Browse"}},
 	{ID: ViewLocal, Name: "Local", Short3: "Loc", Tabs: []string{"Scan"}},
