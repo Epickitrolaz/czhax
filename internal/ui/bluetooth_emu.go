@@ -719,16 +719,7 @@ func (v BluetoothEmuView) renderSetup(w, h int, pal theme.Palette, focused bool)
 	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
 
 	hci := v.EffectiveHCI()
-	headRight := ""
-	if a, okA := v.EffectiveAdapter(); okA {
-		if a.Bus != "" {
-			headRight = a.Bus
-		}
-	}
 	headText := "BT Emu · " + hci
-	if headRight != "" {
-		headText += " (" + headRight + ")"
-	}
 	lines := []string{hdr.Render(v.Marquee.FitLine(headText, w))}
 
 	fields := v.setupFields()
@@ -764,11 +755,12 @@ func (v BluetoothEmuView) renderSetup(w, h int, pal theme.Palette, focused bool)
 		case emuFieldAdapter:
 			lbl = "Radio"
 			if a, okA := v.EffectiveAdapter(); okA {
-				st := "DN"
-				if a.Up {
-					st = "UP"
+				// Just the interface name; the bus/type only adds noise on a
+				// 40-column screen. A down adapter is still flagged in red.
+				val = a.Name
+				if !a.Up {
+					valStyle = bad
 				}
-				val = fmt.Sprintf("%s %s %s", a.Name, a.Bus, st)
 			} else {
 				val = "none"
 				valStyle = bad
@@ -942,7 +934,8 @@ func (v BluetoothEmuView) renderActive(w, h int, pal theme.Palette, focused bool
 		lines = append(lines, hdr.Render(v.Marquee.FitLine(fmt.Sprintf("Mouse Pad · Spd:%s Drag:%s", v.MouseStepLabel(), drag), w)))
 		lines = append(lines, txt.Render(v.Marquee.FitLine("Arrows/WASD move · Enter/L LClick", w)))
 		lines = append(lines, txt.Render(v.Marquee.FitLine("R RClick · M Mid · U/J Wheel", w)))
-		lines = append(lines, mut.Render(v.Marquee.FitLine("+/- Spd · G Drag · Esc Menu", w)))
+		lines = append(lines, mut.Render(v.Marquee.FitLine("Shift 3x · Ctrl fine · +/- Spd", w)))
+		lines = append(lines, mut.Render(v.Marquee.FitLine("G Drag · Esc Menu", w)))
 		if v.LastSent != "" {
 			lines = append(lines, ok.Render(v.Marquee.FitLine("Last: "+v.LastSent, w)))
 		}

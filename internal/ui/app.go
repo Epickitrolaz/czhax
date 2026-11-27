@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -3243,6 +3244,44 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 	return lipgloss.Place(m.TermW, m.TermH, lipgloss.Center, lipgloss.Center, composed), overflow
 }
 
+// mouseStepScale maps the modifier state of a mouse-pad keypress onto the
+// movement multiplier: Ctrl = fine (1x), no modifier = 3x, Shift = 9x.
+func mouseStepScale(k string) int {
+	switch {
+	case strings.HasPrefix(k, "ctrl+"):
+		return 1
+	case strings.HasPrefix(k, "shift+"):
+		return 9
+	}
+	if rs := []rune(k); len(rs) == 1 && unicode.IsUpper(rs[0]) {
+		return 9 // shift+letter arrives as an uppercase rune
+	}
+	return 3
+}
+
+// unmodifiedKey lowercases and strips ctrl/shift/alt prefixes so one switch can
+// serve every modifier combination.
+func unmodifiedKey(k string) string {
+	for _, p := range []string{"ctrl+", "shift+", "alt+"} {
+		for strings.HasPrefix(k, p) {
+			k = strings.TrimPrefix(k, p)
+		}
+	}
+	// Bubble Tea keeps the shift case ("Right", "D"), so normalise the name too.
+	return strings.ToLower(k)
+}
+
+// clampMouseDelta keeps a scaled step inside the 8-bit HID relative range.
+func clampMouseDelta(v int) int8 {
+	if v > 127 {
+		return 127
+	}
+	if v < -127 {
+		return -127
+	}
+	return int8(v)
+}
+
 func (m AppModel) currentHints() []Hint {
 	if m.ShowHelp {
 		return []Hint{{Key: "↑↓", Desc: "scroll"}, {Key: "Esc", Desc: "close"}}
@@ -3612,12 +3651,15 @@ func (m AppModel) handleBluetoothEmuDirectKey(msg tea.KeyMsg) (tea.Model, tea.Cm
 		return m, nil
 
 	case btEmuCtrlMouse:
-		step := v.MouseStep()
+		// Ctrl keeps the fine step, a bare arrow/WASD press is 3x that, and
+		// Shift is 3x again so the cursor can cross a screen in a few presses.
+		step := clampMouseDelta(int(v.MouseStep()) * mouseStepScale(k))
+		key := unmodifiedKey(k)
 		var dragBtn uint8
 		if v.MouseDrag {
 			dragBtn = 0x01
 		}
-		switch k {
+		switch key {
 		case "up", "w":
 			v.SendCmd(bluetooth.EmuCommand{Op: "mouse", Buttons: dragBtn, DY: -step})
 			v.LastSent = fmt.Sprintf("move 0,-%d", step)

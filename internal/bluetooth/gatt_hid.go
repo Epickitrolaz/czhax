@@ -196,6 +196,7 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 		}
 		defer a2dpSink.close()
 		logf("A2DP Sink active (SBC)")
+		logf("Audio uses Classic pairing: accept the prompt on the host")
 
 		if spec.HasHFP {
 			hfpSrv = newHFPProfileService(conn, logf)
@@ -455,9 +456,24 @@ func setAdapterBredr(hciName string, enable bool) error {
 		c.WaitDelay = time.Second
 		return c.CombinedOutput()
 	}
+
+	// Powering the controller down/up loses the connectable/bondable/discoverable
+	// flags, which would leave the adapter unable to accept a Classic connection
+	// afterwards (breaking A2DP/HFP emulation started later). Remember them and
+	// put them back.
+	before := map[string]bool{}
+	if out, ierr := runBT("info"); ierr == nil {
+		before = parseBTMgmtSettings(string(out))
+	}
+
 	_, _ = runBT("power", "off")
 	out, err := runBT("bredr", val)
 	_, _ = runBT("power", "on")
+	for _, f := range []string{"connectable", "bondable", "discoverable"} {
+		if before[f] {
+			_, _ = runBT(f, "on")
+		}
+	}
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
@@ -466,6 +482,23 @@ func setAdapterBredr(hciName string, enable bool) error {
 		return err
 	}
 	return nil
+}
+
+// parseBTMgmtSettings extracts the enabled flags from `btmgmt info` output
+// ("current settings: powered connectable bondable br/edr le ...").
+func parseBTMgmtSettings(out string) map[string]bool {
+	flags := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		l := strings.ToLower(line)
+		idx := strings.Index(l, "current settings:")
+		if idx < 0 {
+			continue
+		}
+		for _, f := range strings.Fields(l[idx+len("current settings:"):]) {
+			flags[f] = true
+		}
+	}
+	return flags
 }
 
 func readHCIClass(hciName string) string {
