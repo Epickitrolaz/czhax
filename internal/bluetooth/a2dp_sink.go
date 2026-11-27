@@ -44,6 +44,9 @@ type a2dpSinkService struct {
 	recording     bool
 	activeTrans   dbus.ObjectPath
 	transCancel   context.CancelFunc
+	transActive   bool
+	transStarting bool
+	transGen      int
 	sampleRate    int
 	channels      int
 	rxPackets     int
@@ -268,6 +271,8 @@ func (s *a2dpSinkService) ClearConfiguration(transport dbus.ObjectPath) *dbus.Er
 			s.transCancel = nil
 		}
 		s.activeTrans = ""
+		s.transActive = false
+		s.transStarting = false
 		s.closePlayerLocked()
 	}
 	s.mu.Unlock()
@@ -319,6 +324,10 @@ func (s *a2dpSinkService) watchTransports() {
 					s.transCancel()
 					s.transCancel = nil
 				}
+				if s.activeTrans == sig.Path {
+					s.transActive = false
+					s.transStarting = false
+				}
 				s.closePlayerLocked()
 				s.mu.Unlock()
 			}
@@ -326,9 +335,23 @@ func (s *a2dpSinkService) watchTransports() {
 	}
 }
 
+// transportBusyLocked reports whether a reader is already attached to (or
+// acquiring) this transport. Callers must hold s.mu.
+func (s *a2dpSinkService) transportBusyLocked(transport dbus.ObjectPath) bool {
+	return s.activeTrans == transport && (s.transActive || s.transStarting)
+}
+
 func (s *a2dpSinkService) startTransport(transport dbus.ObjectPath) {
 	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	// SetConfiguration and the MediaTransport1 State change both land here, and
+	// a second Acquire is rejected by BlueZ with NotAuthorized. Restarting also
+	// cancelled the reader that had just acquired the stream, which is why
+	// nothing was ever decoded.
+	if s.transportBusyLocked(transport) {
 		s.mu.Unlock()
 		return
 	}
@@ -339,6 +362,10 @@ func (s *a2dpSinkService) startTransport(transport dbus.ObjectPath) {
 	tctx, tcancel := context.WithCancel(s.ctx)
 	s.transCancel = tcancel
 	s.activeTrans = transport
+	s.transActive = false
+	s.transStarting = true
+	s.transGen++
+	gen := s.transGen
 	s.mu.Unlock()
 
 	obj := s.conn.Object(bluezService, transport)
@@ -348,13 +375,35 @@ func (s *a2dpSinkService) startTransport(transport dbus.ObjectPath) {
 		writeMTU uint16
 	)
 	if err := obj.Call(bluezTransportIf+".Acquire", 0).Store(&ufd, &readMTU, &writeMTU); err != nil {
+		s.mu.Lock()
+		if s.activeTrans == transport && s.transGen == gen {
+			s.transStarting = false
+		}
+		s.mu.Unlock()
 		if s.logf != nil {
-			s.logf("A2DP acquire wait: %v", err)
+			s.logf("A2DP acquire failed: %v", err)
 		}
 		return
 	}
 	fd := int(ufd)
+	s.mu.Lock()
+	if s.activeTrans != transport || s.transGen != gen {
+		// A newer transport took over while we were acquiring.
+		s.mu.Unlock()
+		_ = unix.Close(fd)
+		_ = obj.Call(bluezTransportIf+".Release", 0).Err
+		return
+	}
+	s.transActive = true
+	s.transStarting = false
+	s.mu.Unlock()
 	defer func() {
+		s.mu.Lock()
+		if s.activeTrans == transport {
+			s.transActive = false
+			s.transStarting = false
+		}
+		s.mu.Unlock()
 		_ = unix.Close(fd)
 		_ = obj.Call(bluezTransportIf+".Release", 0).Err
 	}()

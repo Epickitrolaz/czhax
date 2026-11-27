@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"github.com/godbus/dbus/v5"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,5 +126,42 @@ func TestRunEmulatorCLICancelsOnStop(t *testing.T) {
 	err := RunEmulatorCLI(ctx, EmuConfig{HCI: "hci0", Profile: EmuKeyboard}, &in, &out)
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "canceled") && !strings.Contains(strings.ToLower(err.Error()), "dbus") && !strings.Contains(strings.ToLower(err.Error()), "org.bluez") {
 		t.Fatalf("unexpected RunEmulatorCLI error: %v", err)
+	}
+}
+
+// TestTransportStartIsIdempotent guards the A2DP sink regression where
+// SetConfiguration and the MediaTransport1 State change both started a reader:
+// the second Acquire was rejected by BlueZ (NotAuthorized) and it cancelled the
+// reader that had just acquired the stream, so nothing was ever decoded.
+func TestTransportStartIsIdempotent(t *testing.T) {
+	s := &a2dpSinkService{}
+	trans := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/fd0")
+
+	s.mu.Lock()
+	if s.transportBusyLocked(trans) {
+		s.mu.Unlock()
+		t.Fatal("fresh service reports the transport as busy")
+	}
+	// Simulate the first startTransports's state update.
+	s.activeTrans = trans
+	s.transStarting = true
+	busyDuringAcquire := s.transportBusyLocked(trans)
+	s.transStarting = false
+	s.transActive = true
+	busyWhileStreaming := s.transportBusyLocked(trans)
+	// An idle transport releases the slot.
+	s.transActive = false
+	s.activeTrans = ""
+	busyAfterIdle := s.transportBusyLocked(trans)
+	s.mu.Unlock()
+
+	if !busyDuringAcquire {
+		t.Error("a second call during Acquire must be ignored")
+	}
+	if !busyWhileStreaming {
+		t.Error("a second call while streaming must be ignored")
+	}
+	if busyAfterIdle {
+		t.Error("the transport must be startable again after it goes idle")
 	}
 }
