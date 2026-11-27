@@ -243,7 +243,37 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	if hidApp != nil {
 		gattServed = hidApp.servedCount
 	}
-	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, adv.kickRearm, gattServed, logf)
+	// A host that connects and leaves without asking for a single attribute is
+	// reusing a pairing this device no longer honours. Forget the device on our
+	// side so the next attempt starts from a clean slate (the host may still
+	// need to forget it too, but most stacks re-pair once the keys are gone).
+	var (
+		staleMu      sync.Mutex
+		staleRemoved int
+		staleLast    = make(map[string]time.Time)
+	)
+	dropStale := func(path dbus.ObjectPath, addr, name string) {
+		staleMu.Lock()
+		if staleRemoved >= 3 || time.Since(staleLast[addr]) < 30*time.Second {
+			staleMu.Unlock()
+			logf("Stale pairing for %s left in place (limit reached)", addr)
+			return
+		}
+		staleRemoved++
+		staleLast[addr] = time.Now()
+		staleMu.Unlock()
+
+		err := adapterObj.Call(bluezAdapterIface+".RemoveDevice", 0, path).Err
+		if err != nil {
+			logf("Could not forget %s: %v", addr, err)
+			return
+		}
+		logf("Forgot stale pairing for %s (%s); advertise again and reconnect", name, addr)
+		if adv != nil {
+			adv.kickRearm()
+		}
+	}
+	stopPeerWatch := watchPeerConnections(ctx, conn, adapterPath, emit, adv.kickRearm, gattServed, dropStale, logf)
 	defer stopPeerWatch()
 
 	// Set Class of Device after BlueZ profile/endpoint/advertisement registration
@@ -842,7 +872,7 @@ func (a *leAdvertiser) close() {
 
 // --- Peer connection watcher ---
 
-func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), onDisconnect func(), gattServed func() int64, logf func(string, ...any)) func() {
+func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus.ObjectPath, emit func(EmuEvent), onDisconnect func(), gattServed func() int64, onStale func(dbus.ObjectPath, string, string), logf func(string, ...any)) func() {
 	rules := [][]dbus.MatchOption{
 		{
 			dbus.WithMatchSender(bluezService),
@@ -987,7 +1017,10 @@ func watchPeerConnections(ctx context.Context, conn *dbus.Conn, adapterPath dbus
 			if !connectedAt.IsZero() && time.Since(connectedAt) < 8*time.Second {
 				silent := gattServed == nil || gattServed() == servedAtConnect
 				if silent {
-					logf("Host left without a GATT request: remove the device on the host and pair again")
+					logf("Host left without a GATT request (stale pairing on the host)")
+					if onStale != nil {
+						onStale(path, addr, name)
+					}
 				}
 			}
 			connectedAt = time.Time{}
