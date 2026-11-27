@@ -159,8 +159,8 @@ func RunBeaconSpam(ctx context.Context, cfg BeaconConfig, onLine func(string)) e
 		cfg.Channel = 6
 	}
 	interval := time.Duration(cfg.IntervalMS) * time.Millisecond
-	if interval <= 0 {
-		interval = 15 * time.Millisecond
+	if interval < 0 {
+		interval = 0
 	}
 
 	r := defaultPentestRunner()
@@ -203,9 +203,13 @@ func RunBeaconSpam(ctx context.Context, cfg BeaconConfig, onLine func(string)) e
 				bssid = randomBSSID()
 				stats.BSSIDs++
 			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(interval):
+			if interval > 0 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(interval):
+				}
+			} else if ctx.Err() != nil {
+				break
 			}
 		}
 		if time.Since(lastReport) >= time.Second {

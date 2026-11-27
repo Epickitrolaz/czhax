@@ -2240,10 +2240,8 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 					return m.startWifiPentest(wifi.PentestHandshake)
 				case wifiActDeauth:
 					return m.startWifiPentest(wifi.PentestDeauth)
-				case wifiActEvilClone:
-					return m.startWifiEvilClone(false)
-				case wifiActEvilDeauth:
-					return m.startWifiEvilClone(true)
+				case wifiActEvil:
+					return m.openWifiEvilFromScan()
 				case wifiActWPS:
 					m.WifiScan.BeginWPSMenu(scanModeActions)
 					return m, tea.Batch(m.resetMarquee(), m.wpsScanForcedCmd())

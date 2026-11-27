@@ -169,14 +169,15 @@ func (v *WifiSpamView) Adjust(delta int) {
 		n := len(spamSourceLabels)
 		v.Source = WifiSpamSource((int(v.Source) + delta + n) % n)
 	case spamFieldCount:
-		v.Count = clampInt(v.Count+delta*5, 1, 250)
+		v.Count = clampInt(v.Count+delta*25, 1, 1000)
 	case spamFieldChannel:
 		v.Channel = (v.Channel + delta + 14) % 14
 		if v.Channel == 0 {
 			v.Channel = 1
 		}
 	case spamFieldInterval:
-		v.IntervalMS = clampInt(v.IntervalMS+delta*5, 2, 200)
+		// Always a multiple of 5 ms, from "as fast as the radio allows" (0).
+		v.IntervalMS = clampInt(v.IntervalMS+delta*5, 0, 200)
 	case spamFieldRandomMAC:
 		v.RandomMAC = !v.RandomMAC
 	case spamFieldRadio:
@@ -225,6 +226,10 @@ func (v *WifiSpamView) Start(workDir string) (context.Context, int, []string, ch
 	v.Err = ""
 	v.Lines = nil
 	v.Channel = clampInt(v.Channel, 1, 14)
+	// Keep the delay on the 5 ms grid the UI advertises (0 = no delay).
+	v.IntervalMS = clampInt(v.IntervalMS, 0, 200)
+	v.IntervalMS -= v.IntervalMS % 5
+	v.Count = clampInt(v.Count, 1, 1000)
 	v.Stats = fmt.Sprintf("%d SSIDs", len(ssids))
 	v.Started = time.Now()
 	v.Elapsed = 0
@@ -245,7 +250,10 @@ func (v *WifiSpamView) AppendLine(seq int, line string) {
 	if seq != v.Seq {
 		return
 	}
-	v.Lines = append(v.Lines, strings.TrimSpace(line))
+	if line = sanitizeLogLine(line); line == "" {
+		return
+	}
+	v.Lines = append(v.Lines, line)
 	if len(v.Lines) > 120 {
 		v.Lines = v.Lines[len(v.Lines)-120:]
 	}
@@ -320,7 +328,12 @@ func (v WifiSpamView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 		case spamFieldChannel:
 			lbl, val = "Channel", fmt.Sprintf("%d", v.Channel)
 		case spamFieldInterval:
-			lbl, val = "Delay", fmt.Sprintf("%d ms", v.IntervalMS)
+			lbl = "Delay"
+			if v.IntervalMS == 0 {
+				val, style = "0 ms (max rate)", ok
+			} else {
+				val = fmt.Sprintf("%d ms", v.IntervalMS)
+			}
 		case spamFieldRandomMAC:
 			lbl = "BSSID"
 			if v.RandomMAC {

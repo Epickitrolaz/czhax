@@ -237,12 +237,12 @@ func (m AppModel) handleWifiSpamTextKey(k string, msg tea.KeyMsg) (tea.Model, te
 
 // startWifiEvil launches the twin from the Evil tab.
 func (m AppModel) startWifiEvil() (tea.Model, tea.Cmd) {
-	return m.launchWifiEvil(false)
+	return m.launchWifiEvil()
 }
 
-// startWifiEvilClone launches a clone of the network selected in the Scan tab,
-// optionally deauthing the original at the same time.
-func (m AppModel) startWifiEvilClone(deauth bool) (tea.Model, tea.Cmd) {
+// openWifiEvilFromScan carries the selected network over to the Evil tab with
+// everything else left at its default, so the user starts it themselves.
+func (m AppModel) openWifiEvilFromScan() (tea.Model, tea.Cmd) {
 	net, ok := m.WifiScan.SelectedNetwork()
 	if !ok {
 		return m, m.setStatus("Select a network first")
@@ -251,18 +251,14 @@ func (m AppModel) startWifiEvilClone(deauth bool) (tea.Model, tea.Cmd) {
 		return m, m.setStatus("Hidden network: no SSID to clone")
 	}
 	m.WifiEvil.Prefill(net)
-	m.WifiEvil.Deauth = deauth
 	m.ActiveTabs[ViewWiFi] = WiFiTabEvil
-	return m.launchWifiEvil(deauth)
+	m.Focus = FocusContent
+	m.WifiEvil.Cursor = 0
+	return m, m.setStatus("Twin ready: " + net.SSID)
 }
 
-func (m AppModel) launchWifiEvil(deauth bool) (tea.Model, tea.Cmd) {
+func (m AppModel) launchWifiEvil() (tea.Model, tea.Cmd) {
 	cfg := m.WifiEvil.Config()
-	if deauth {
-		if strings.TrimSpace(cfg.DeauthBSSID) == "" {
-			return m, m.setStatus("No target BSSID for deauth")
-		}
-	}
 	tmp := workdir.Temp(workdir.Resolve(m.Cfg.WorkDir))
 	caps := workdir.Captures(workdir.Resolve(m.Cfg.WorkDir))
 	ctx, seq, cfg, ch, err := m.WifiEvil.Start(tmp, caps)

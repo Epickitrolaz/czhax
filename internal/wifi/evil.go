@@ -292,6 +292,26 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	return ctx.Err()
 }
 
+// lastToolReason picks the most useful line out of a tool's captured output for
+// a one-line error report (their status screens are far too noisy to show).
+func lastToolReason(raw []byte) string {
+	reason := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(strings.ReplaceAll(line, "\r", " "))
+		if line == "" {
+			continue
+		}
+		low := strings.ToLower(line)
+		if strings.Contains(low, "error") || strings.Contains(low, "failed") || strings.Contains(low, "driver is broken") {
+			reason = line
+		}
+	}
+	if reason == "" {
+		reason = "capture unavailable on this driver (needs nexmon/patched firmware)"
+	}
+	return reason
+}
+
 // ensureManaged makes sure the interface exists and is a managed, up link.
 // Some drivers drop the primary interface while it is being switched between
 // monitor and AP mode, so it may have to be re-created from the phy.
@@ -383,18 +403,11 @@ func runPMKID(ctx context.Context, mon string, cfg EvilConfig, emit *evilStreame
 	emit.line("Harvesting PMKIDs for %s", pmkidWindow)
 	cmd := exec.CommandContext(pctx, "hcxdumptool", "-i", mon, "-w", out)
 	raw, runErr := cmd.CombinedOutput()
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "$ hcxdumptool") {
-			continue
-		}
-		emit.line("hcxdumptool: %s", line)
-	}
 	ChownCapture(capDir, out, cfg.UID, cfg.GID)
 	if st, serr := os.Stat(out); serr == nil && st.Size() > 0 {
 		emit.line("Saved %s (%d bytes)", filepath.Base(out), st.Size())
 	} else if runErr != nil {
-		emit.line("pmkid: capture unavailable on this driver (needs nexmon/patched firmware)")
+		emit.line("pmkid: %s", lastToolReason(raw))
 		return
 	}
 	if _, err := exec.LookPath("hcxpcapngtool"); err == nil {
