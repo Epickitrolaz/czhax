@@ -132,7 +132,23 @@ func (s *evilStreamer) line(format string, args ...any) {
 	}
 }
 
-func (s *evilStreamer) run(ctx context.Context, bin string, args ...string) *exec.Cmd {
+// evilProc is a helper process plus a channel closed when it exits.
+type evilProc struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+
+	mu   sync.Mutex
+	last string
+}
+
+// lastLine returns the final line this process printed.
+func (p *evilProc) lastLine() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.last
+}
+
+func (s *evilStreamer) run(ctx context.Context, bin string, args ...string) *evilProc {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -143,16 +159,22 @@ func (s *evilStreamer) run(ctx context.Context, bin string, args ...string) *exe
 		s.line("%s failed: %v", bin, err)
 		return nil
 	}
+	p := &evilProc{cmd: cmd, done: make(chan struct{})}
 	go func() {
+		defer close(p.done)
 		sc := bufio.NewScanner(out)
 		sc.Buffer(make([]byte, 0, 4096), 64*1024)
 		for sc.Scan() {
 			if txt := strings.TrimSpace(sc.Text()); txt != "" {
+				p.mu.Lock()
+				p.last = txt
+				p.mu.Unlock()
 				s.line("%s: %s", bin, txt)
 			}
 		}
+		_ = cmd.Wait()
 	}()
-	return cmd
+	return p
 }
 
 func toolMissing(names ...string) []string {
@@ -271,13 +293,48 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 
 	// dnsmasq: DHCP + catch-all DNS.
 	if cmd := emit.run(ctx, "dnsmasq", "-C", dnsmasqConf, "-d", "--log-facility=-"); cmd != nil {
-		cleanups = append(cleanups, func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+		cleanups = append(cleanups, func() { _ = cmd.cmd.Process.Kill(); _, _ = cmd.cmd.Process.Wait() })
 	}
-	// hostapd: the open twin.
-	time.Sleep(300 * time.Millisecond)
-	if cmd := emit.run(ctx, "hostapd", hostapdConf); cmd != nil {
-		cleanups = append(cleanups, func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+
+	// hostapd control socket directory must exist, otherwise hostapd bails out
+	// during interface setup.
+	_ = os.MkdirAll("/var/run/hostapd", 0o755)
+
+	startAP := func() *evilProc {
+		return emit.run(ctx, "hostapd", hostapdConf)
 	}
+	ap := startAP()
+	if ap != nil {
+		select {
+		case <-ap.done:
+			// hostapd usually dies here with "Unable to setup interface" when
+			// wpa_supplicant / NetworkManager still holds the interface, or when
+			// the radio was left in monitor mode by the harvest phase. Reset the
+			// interface and try once more.
+			emit.line("AP setup failed (%s); resetting %s and retrying", ap.lastLine(), cfg.Iface)
+			_, _ = r.priv("nmcli", "device", "disconnect", cfg.Iface)
+			_ = r.ensureManaged(cfg.Iface)
+			time.Sleep(500 * time.Millisecond)
+			_, _ = r.priv("ip", "link", "set", cfg.Iface, "down")
+			_, _ = r.priv("ip", "addr", "flush", "dev", cfg.Iface)
+			_, _ = r.priv("ip", "addr", "add", EvilGateway+"/24", "dev", cfg.Iface)
+			_, _ = r.priv("ip", "link", "set", cfg.Iface, "up")
+			time.Sleep(400 * time.Millisecond)
+			ap = startAP()
+			if ap != nil {
+				select {
+				case <-ap.done:
+					return fmt.Errorf("hostapd could not set up %s: %s", cfg.Iface, ap.lastLine())
+				case <-time.After(1200 * time.Millisecond):
+				}
+			}
+		case <-time.After(1200 * time.Millisecond):
+		}
+	}
+	if ap == nil {
+		return errors.New("hostapd could not start")
+	}
+	cleanups = append(cleanups, func() { _ = ap.cmd.Process.Kill(); _, _ = ap.cmd.Process.Wait() })
 	emit.line("Twin AP %q up on %s (channel %d)", cfg.SSID, cfg.Iface, cfg.Channel)
 
 	if cfg.Portal {
