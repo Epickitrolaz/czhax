@@ -1221,7 +1221,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{waitBluetoothEmuEventCmd(msg.seq, m.BluetoothEmu.EventCh)}
 		if msg.ev.Kind == "peer" && msg.ev.Connected != prevConn {
 			if msg.ev.Connected {
-				cmds = append(cmds, m.setStatus("BT connected: "+msg.ev.PeerName))
+				label := "BT connected: " + msg.ev.PeerName
+				if msg.ev.PeerPaired {
+					label = "BT paired: " + msg.ev.PeerName
+				}
+				cmds = append(cmds, m.setStatus(label))
 			} else {
 				cmds = append(cmds, m.setStatus("BT disconnected"))
 			}

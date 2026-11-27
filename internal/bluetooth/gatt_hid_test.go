@@ -66,9 +66,10 @@ func parseInputReportSizes(t *testing.T, desc []byte) map[uint8]int {
 	return sizes
 }
 
-// TestReportPayloadsMatchReportMap guards the notification framing: every
-// report must start with the Report ID declared in the descriptor, otherwise
-// hosts discard the input while the link itself still looks healthy.
+// TestReportPayloadsMatchReportMap guards the notification framing. HOGP 1.0
+// §4.8.1: the report ID is NOT sent over the air - the host prepends it from the
+// Report Reference descriptor. A payload that already carries the ID makes every
+// field shift by one byte (keys gain a phantom Ctrl, mouse X lands in Y).
 func TestReportPayloadsMatchReportMap(t *testing.T) {
 	sizes := parseInputReportSizes(t, BuildHIDReportMap(true, true, true, true))
 
@@ -87,11 +88,15 @@ func TestReportPayloadsMatchReportMap(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: report ID %d is not in the report map", c.name, c.id)
 		}
-		if len(c.payload) != want+1 {
-			t.Errorf("%s: payload is %d bytes, report map declares %d + 1 ID byte", c.name, len(c.payload), want)
+		if len(c.payload) != want {
+			t.Errorf("%s: payload is %d bytes, report map declares %d", c.name, len(c.payload), want)
 		}
-		if c.payload[0] != c.id {
-			t.Errorf("%s: payload starts with %#x, want report ID %#x", c.name, c.payload[0], c.id)
+		if c.id != 0 && c.payload[0] == c.id && want > 1 {
+			// Report ID 1 collides with a modifier byte of 1, so only flag the
+			// unambiguous cases (mouse/consumer/gamepad).
+			if c.id != HIDReportIDKeyboard {
+				t.Errorf("%s: payload starts with the report ID (%#x); HOGP hosts prepend it themselves", c.name, c.payload[0])
+			}
 		}
 	}
 
@@ -100,8 +105,8 @@ func TestReportPayloadsMatchReportMap(t *testing.T) {
 	if len(kbSizes) != 1 {
 		t.Fatalf("keyboard-only map declares %d reports, want 1", len(kbSizes))
 	}
-	if got := len(keyboardReport(0, 0)); got != kbSizes[HIDReportIDKeyboard]+1 {
-		t.Fatalf("keyboard payload %d bytes, want %d", got, kbSizes[HIDReportIDKeyboard]+1)
+	if got := len(keyboardReport(0, 0)); got != kbSizes[HIDReportIDKeyboard] {
+		t.Fatalf("keyboard payload %d bytes, want %d", got, kbSizes[HIDReportIDKeyboard])
 	}
 }
 
@@ -192,18 +197,50 @@ func TestReportMapReadChunksReassemble(t *testing.T) {
 	}
 }
 
-func TestKeyboardLEDWriteUsesReportID(t *testing.T) {
+func TestKeyboardLEDWriteHandlesBothFramings(t *testing.T) {
 	var leds uint8
 	c := &gattChar{}
 	c.onWrite = func(v []byte) {
+		if len(v) == 0 {
+			return
+		}
 		if len(v) >= 2 && v[0] == HIDReportIDKeyboard {
 			leds = v[1]
+			return
 		}
+		leds = v[0]
 	}
-	if err := c.WriteValue([]byte{HIDReportIDKeyboard, 0x02}, nil); err != nil {
+
+	// HOGP: the host strips the report ID, so the value is just the LED byte.
+	if err := c.WriteValue([]byte{0x02}, nil); err != nil {
 		t.Fatalf("WriteValue: %v", err)
 	}
 	if leds != 0x02 {
-		t.Fatalf("LED byte = %#x, want 0x02 (caps lock)", leds)
+		t.Fatalf("HOGP LED byte = %#x, want 0x02 (caps lock)", leds)
+	}
+
+	// Raw HID framing (report ID still in the value) must work too.
+	if err := c.WriteValue([]byte{HIDReportIDKeyboard, 0x01}, nil); err != nil {
+		t.Fatalf("WriteValue: %v", err)
+	}
+	if leds != 0x01 {
+		t.Fatalf("raw LED byte = %#x, want 0x01 (num lock)", leds)
+	}
+}
+
+func TestKeyboardReportIsNotIDPrefixed(t *testing.T) {
+	// 'a' (usage 0x04) with no modifiers must arrive as [0,0,4,0,0,0,0,0]: a
+	// leading 0x01 would be read as LCtrl and shift every key slot.
+	rep := keyboardReport(0, 0x04)
+	if len(rep) != 8 {
+		t.Fatalf("keyboard report is %d bytes, want 8", len(rep))
+	}
+	if rep[0] != 0 || rep[1] != 0 || rep[2] != 0x04 {
+		t.Fatalf("keyboard report = % x, want 00 00 04 00 00 00 00 00", rep)
+	}
+
+	m := mouseReport(0, 5, -5, 0)
+	if m[0] != 0 || m[1] != 5 || m[2] != 0xFB {
+		t.Fatalf("mouse report = % x, want 00 05 fb 00", m)
 	}
 }
