@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -435,6 +436,143 @@ func TestSDRServerTab(t *testing.T) {
 	}
 }
 
+// TestSDRSpectrumZoom pins the zoom feature: the window shrinks around the
+// cursor, stays inside the configured range, and never inverts.
+func TestSDRSpectrumZoom(t *testing.T) {
+	m := newTestSDRApp(t, 53, 14)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabSpec)
+	m.SDR.Tab = SDRTabSpec
+	m.Focus = FocusContent
+
+	m.SDR.SpecStartHz = 87_500_000
+	m.SDR.SpecEndHz = 108_000_000
+
+	if got := m.SDR.ZoomedSpanHz(); got != 20_500_000 {
+		t.Fatalf("zoom 0 span = %d, want 20500000", got)
+	}
+
+	// Zoom in twice from the config screen: 20.5M -> 5.125M, centred on the range.
+	m.SDR.SpecCursor = int(sdrSpecFZoom)
+	m = sendKey(m, "right")
+	m = sendKey(m, "right")
+	if m.SDR.SpecZoom != 2 {
+		t.Fatalf("zoom = %d, want 2", m.SDR.SpecZoom)
+	}
+	lo, hi := m.SDR.EffectiveSweepRange()
+	if span := hi - lo; span != 20_500_000/4 {
+		t.Fatalf("zoomed span = %d, want %d", span, 20_500_000/4)
+	}
+	if lo < m.SDR.SpecStartHz || hi > m.SDR.SpecEndHz {
+		t.Fatalf("zoomed window %d-%d escaped %d-%d", lo, hi, m.SDR.SpecStartHz, m.SDR.SpecEndHz)
+	}
+	if mid := (lo + hi) / 2; mid < 97_000_000 || mid > 98_000_000 {
+		t.Fatalf("zoomed centre = %d, want near 97.75M", mid)
+	}
+	assertFitsBounds(t, m.View(), 53, 14, "Spec/ZoomConfig")
+
+	// The zoom row and header must show the factor.
+	if !strings.Contains(m.View(), "4x") {
+		t.Fatalf("expected 4x in zoom row:\n%s", m.View())
+	}
+
+	// Zooming out returns to the full range and does not go negative.
+	for i := 0; i < 6; i++ {
+		m = sendKey(m, "left")
+	}
+	if m.SDR.SpecZoom != 0 {
+		t.Fatalf("zoom = %d, want 0 after zooming out", m.SDR.SpecZoom)
+	}
+
+	// Zoom anchored on the marker: with a live sweep, zoom uses the peak.
+	m.SDR.SpecSeq = 4
+	m.SDR.SpecActive = true
+	m.SDR.SpecHasFrame = true
+	hiBins := make([]float64, 128)
+	for i := range hiBins {
+		hiBins[i] = -70
+	}
+	hiBins[100] = -10 // near the top of the band
+	m.SDR.ApplySpecFrame(4, sdr.BuildSpectrumFrame(87_500_000, 108_000_000, hiBins))
+	m.SDR.SpecMarker = 100
+	peak := m.SDR.SpecFrame.BinFreqHz(100)
+
+	m = sendKey(m, "z")
+	if m.SDR.SpecZoom != 1 {
+		t.Fatalf("z: zoom = %d, want 1", m.SDR.SpecZoom)
+	}
+	lo, hi = m.SDR.EffectiveSweepRange()
+	if peak < lo || peak > hi {
+		t.Fatalf("zoomed window %d-%d does not contain marker %d", lo, hi, peak)
+	}
+	if span := hi - lo; span != 20_500_000/2 {
+		t.Fatalf("zoomed span = %d, want %d", span, 20_500_000/2)
+	}
+	assertFitsBounds(t, m.View(), 53, 14, "Spec/ZoomLive")
+}
+
+// TestSDRContrastAutoscale verifies the contrast stretch lifts the strongest
+// signal to full height and pushes weak signals down further at higher levels.
+func TestSDRContrastAutoscale(t *testing.T) {
+	bins := []float64{-72, -70, -69, -68, -66, -60, -12}
+	lo, hi, g := contrastWindow(bins, 0)
+	if lo != -70 || hi != -5 || g != 1 {
+		t.Fatalf("level 0 window = %v/%v/%v, want -70/-5/1", lo, hi, g)
+	}
+
+	norm := func(level int, db float64) float64 {
+		wl, wh, wg := contrastWindow(bins, level)
+		v := (db - wl) / (wh - wl)
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		return math.Pow(v, wg)
+	}
+
+	for level := 1; level <= len(sdrContrastNames)-1; level++ {
+		strong := norm(level, -12)
+		weak := norm(level, -68)
+		if strong < 0.9 {
+			t.Fatalf("level %d: strongest maps to %.2f, want ~1.0", level, strong)
+		}
+		if weak > 0.35 {
+			t.Fatalf("level %d: weak signal maps to %.2f, want near 0", level, weak)
+		}
+		if weak >= norm(level, -60) {
+			t.Fatalf("level %d: ordering broken (weak >= mid)", level)
+		}
+	}
+	// A higher contrast level must push the same weak signal lower.
+	if norm(4, -66) >= norm(1, -66) {
+		t.Fatalf("max contrast did not lower the noise floor")
+	}
+
+	// Cycling wraps and is reflected in the label.
+	m := newTestSDRApp(t, 40, 10)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabSpec)
+	m.SDR.Tab = SDRTabSpec
+	m.Focus = FocusContent
+	for i := 1; i < len(sdrContrastNames); i++ {
+		m = sendKey(m, "c")
+		if m.SDR.SpecContrast != i {
+			t.Fatalf("contrast = %d, want %d", m.SDR.SpecContrast, i)
+		}
+	}
+	if m.SDR.ContrastName() != "Max" {
+		t.Fatalf("contrast name = %q, want Max", m.SDR.ContrastName())
+	}
+	m = sendKey(m, "c")
+	if m.SDR.SpecContrast != 0 {
+		t.Fatalf("contrast did not wrap to 0: %d", m.SDR.SpecContrast)
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "Spec/Contrast")
+}
+
+// TestSDRNoDongleAndDVBStatus runs the probe status paths.
 func TestSDRNoDongleAndDVBStatus(t *testing.T) {
 	m := newTestSDRApp(t, 40, 10)
 	m.SDR.SetProbeResult(sdr.ProbeStatus{})

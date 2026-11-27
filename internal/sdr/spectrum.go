@@ -399,15 +399,67 @@ func RunSweep(ctx context.Context, cfg SweepConfig, onFrame func(SpectrumFrame))
 		outBins = 34
 	}
 	span := endHz - startHz
-	if span <= 2_400_000 {
-		rate := int64(2_048_000)
-		if span > 2_048_000 {
-			rate = 2_400_000
-		}
+	if span <= MaxNarrowSpan {
+		// One rtl_sdr stream at (roughly) the requested span: finest bins, no hop latency.
+		rate := SampleRateForSpan(span)
 		return runNarrowFFTSweep(ctx, cfg.DeviceIndex, startHz, endHz, rate, cfg.GainDB, outBins, DefaultFFTSize, interval, onFrame)
 	}
 	return runWidePowerSweep(ctx, cfg.DeviceIndex, startHz, endHz, cfg.GainDB, outBins, interval, onFrame)
 }
+
+// MaxNarrowSpan is the widest span a single RTL2832U stream can cover.
+const MaxNarrowSpan int64 = 3_000_000
+
+// MinSampleRate is the lowest sample rate the RTL2832U accepts.
+const MinSampleRate int64 = 225_000
+
+// MaxSampleRate is the highest sample rate the RTL2832U accepts.
+const MaxSampleRate int64 = 3_200_000
+
+// SampleRateForSpan picks the rtl_sdr sample rate that just covers span, so
+// zooming in narrows the hardware bandwidth and sharpens every FFT bin.
+// The RTL2832U only delivers 28.8 MHz / n, so pick an exact divisor rate:
+// that keeps the frequency axis accurate instead of drifting on an
+// approximate rate.
+func SampleRateForSpan(spanHz int64) int64 {
+	if spanHz <= 0 {
+		return DefaultSpecRate
+	}
+	div := int64(28_800_000 / spanHz) // floor: rate must still cover the span
+	if div < rtlMinDivisor {
+		div = rtlMinDivisor // 3.2 MS/s
+	}
+	if div > rtlMaxDivisor {
+		div = rtlMaxDivisor // 225 kS/s
+	}
+	return 28_800_000 / div
+}
+
+const (
+	rtlMinDivisor = 9   // 28.8 MHz / 9  = 3.2 MS/s
+	rtlMaxDivisor = 128 // 28.8 MHz / 128 = 225 kS/s
+)
+
+// ZoomSpan returns the span shown at a zoom level (0 = full span).
+func ZoomSpan(spanHz int64, zoom int) int64 {
+	if zoom <= 0 || spanHz <= 0 {
+		return spanHz
+	}
+	if zoom > 12 {
+		zoom = 12
+	}
+	eff := spanHz >> uint(zoom)
+	if eff < MinZoomSpan {
+		eff = MinZoomSpan
+	}
+	if eff > spanHz {
+		eff = spanHz
+	}
+	return eff
+}
+
+// MinZoomSpan keeps zoomed views wide enough to still resolve a few bins.
+const MinZoomSpan int64 = 25_000
 
 func runNarrowFFTSweep(ctx context.Context, devIdx int, startHz, endHz, rate int64, gainDB, outBins, fftSize int, interval time.Duration, onFrame func(SpectrumFrame)) error {
 	rtlsdr := FindTool("rtl_sdr")

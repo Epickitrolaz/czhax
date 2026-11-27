@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,11 +80,21 @@ type sdrSpecField int
 const (
 	sdrSpecFStart sdrSpecField = iota
 	sdrSpecFEnd
+	sdrSpecFZoom
+	sdrSpecFContrast
 	sdrSpecFPreset
 	sdrSpecFView
 	sdrSpecFGain
 	sdrSpecFAction
 )
+
+// SDRSpecMaxZoom caps the spectrum zoom (2^8 = 256x on the configured span).
+const SDRSpecMaxZoom = 8
+
+// sdrContrastNames maps the contrast level to its label. This is the autoscale
+// stretch that lifts the strongest carriers to the top of the plot and pushes
+// the noise floor down.
+var sdrContrastNames = []string{"Off", "Low", "Med", "High", "Max"}
 
 type sdrSpecEdit int
 
@@ -178,24 +190,28 @@ type SDRView struct {
 	RadioErr     string
 
 	// Spectrum / custom sweep state
-	SpecStartHz   int64
-	SpecEndHz     int64
-	SpecPresetIdx int
-	SpecView      sdrSpecView
-	SpecCursor    int
-	SpecEdit      sdrSpecEdit
-	SpecActive    bool
-	SpecSeq       int
-	SpecCancel    context.CancelFunc
-	SpecFrameCh   chan sdr.SpectrumFrame
-	SpecFrame     sdr.SpectrumFrame
-	SpecHasFrame  bool
-	SpecMarker    int
-	SpecListCur   int
-	SpecStarted   time.Time
-	SpecElapsed   time.Duration
-	SpecErr       string
-	SpecLastWidth int
+	SpecStartHz  int64
+	SpecEndHz    int64
+	SpecZoom     int
+	SpecContrast int
+	// SpecPendingFocusHz keeps the zoom anchor across a re-capture.
+	SpecPendingFocusHz int64
+	SpecPresetIdx      int
+	SpecView           sdrSpecView
+	SpecCursor         int
+	SpecEdit           sdrSpecEdit
+	SpecActive         bool
+	SpecSeq            int
+	SpecCancel         context.CancelFunc
+	SpecFrameCh        chan sdr.SpectrumFrame
+	SpecFrame          sdr.SpectrumFrame
+	SpecHasFrame       bool
+	SpecMarker         int
+	SpecListCur        int
+	SpecStarted        time.Time
+	SpecElapsed        time.Duration
+	SpecErr            string
+	SpecLastWidth      int
 
 	// 433 / ISM decoder state
 	ISMMode         sdrISMMode
@@ -244,7 +260,7 @@ func NewSDRView(workDir, captureDir, bookmarksPath string) SDRView {
 		CaptureDir:    captureDir,
 		BookmarksPath: bookmarksPath,
 		RadioFreqHz:   98_500_000,
-		RadioStepIdx:  3, // 100 kHz
+		RadioStepIdx:  4, // 100 kHz
 		RadioMod:      sdr.ModeWBFM,
 		RadioBwHz:     sdr.DefaultBandwidth(sdr.ModeWBFM),
 		RadioGainIdx:  0, // Auto
@@ -735,7 +751,100 @@ func (v *SDRView) FinishRadio(seq int, err error) {
 // --- Spec Tab state transitions ---
 
 func (v SDRView) specFields() []sdrSpecField {
-	return []sdrSpecField{sdrSpecFStart, sdrSpecFEnd, sdrSpecFPreset, sdrSpecFView, sdrSpecFGain, sdrSpecFAction}
+	return []sdrSpecField{
+		sdrSpecFStart, sdrSpecFEnd, sdrSpecFZoom, sdrSpecFContrast,
+		sdrSpecFPreset, sdrSpecFView, sdrSpecFGain, sdrSpecFAction,
+	}
+}
+
+// SpecSpanHz is the span the user configured (before zoom).
+func (v SDRView) SpecSpanHz() int64 {
+	if v.SpecEndHz <= v.SpecStartHz {
+		return 0
+	}
+	return v.SpecEndHz - v.SpecStartHz
+}
+
+// ZoomedSpanHz is the span actually captured and displayed at the current zoom.
+func (v SDRView) ZoomedSpanHz() int64 {
+	return sdr.ZoomSpan(v.SpecSpanHz(), v.SpecZoom)
+}
+
+// SpecZoomLabel renders the zoom factor ("1x" at full span).
+func (v SDRView) SpecZoomLabel() string {
+	return fmt.Sprintf("%dx", 1<<uint(clampInt(v.SpecZoom, 0, SDRSpecMaxZoom)))
+}
+
+// specFocusHz is the frequency the view is centered on when zooming.
+func (v SDRView) specFocusHz() int64 {
+	if v.SpecPendingFocusHz > 0 {
+		return v.SpecPendingFocusHz
+	}
+	if v.SpecHasFrame && len(v.SpecFrame.Bins) > 0 {
+		if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
+			return v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))].FreqHz
+		}
+		return v.SpecFrame.BinFreqHz(v.SpecMarker)
+	}
+	return (v.SpecStartHz + v.SpecEndHz) / 2
+}
+
+// EffectiveSweepRange returns the start/end that the sweep actually covers,
+// narrowed around the cursor for the current zoom and kept inside the
+// user-configured range.
+func (v SDRView) EffectiveSweepRange() (int64, int64) {
+	span := v.SpecSpanHz()
+	if span <= 0 {
+		return v.SpecStartHz, v.SpecEndHz
+	}
+	eff := sdr.ZoomSpan(span, v.SpecZoom)
+	if eff >= span {
+		return v.SpecStartHz, v.SpecEndHz
+	}
+	lo := v.specFocusHz() - eff/2
+	if lo < v.SpecStartHz {
+		lo = v.SpecStartHz
+	}
+	if lo+eff > v.SpecEndHz {
+		lo = v.SpecEndHz - eff
+	}
+	return lo, lo + eff
+}
+
+// EffectiveSpanLabel is a compact "start-end" label for headers.
+func (v SDRView) EffectiveSpanLabel() string {
+	lo, hi := v.EffectiveSweepRange()
+	return sdr.FormatFreqShort(lo) + "-" + sdr.FormatFreqShort(hi)
+}
+
+// SetZoom applies a zoom delta and reports whether the sweep must restart.
+func (v *SDRView) SetZoom(delta int) (restart bool) {
+	next := clampInt(v.SpecZoom+delta, 0, SDRSpecMaxZoom)
+	if next == v.SpecZoom {
+		return false
+	}
+	// Keep zooming around whatever the cursor points at, even after the
+	// current frame is dropped for the re-capture.
+	v.SpecPendingFocusHz = v.specFocusHz()
+	v.SpecZoom = next
+	if v.SpecActive {
+		return true
+	}
+	if v.SpecHasFrame {
+		v.SpecHasFrame = false
+		v.SpecFrame = sdr.SpectrumFrame{}
+		return true
+	}
+	return false
+}
+
+func (v *SDRView) CycleContrast(delta int) {
+	n := len(sdrContrastNames)
+	v.SpecContrast = (v.SpecContrast + delta + n) % n
+}
+
+func (v SDRView) ContrastName() string {
+	return sdrContrastNames[clampIndex(v.SpecContrast, len(sdrContrastNames))]
 }
 
 func (v *SDRView) MoveSpecCursor(delta int) {
@@ -756,6 +865,10 @@ func (v *SDRView) AdjustSpec(delta int) (restart bool) {
 	switch f[clampIndex(v.SpecCursor, len(f))] {
 	case sdrSpecFStart, sdrSpecFEnd:
 		v.nudgeSweepEdge(f[clampIndex(v.SpecCursor, len(f))], delta)
+	case sdrSpecFZoom:
+		return v.SetZoom(delta)
+	case sdrSpecFContrast:
+		v.CycleContrast(delta)
 	case sdrSpecFPreset:
 		v.cycleSpecPreset(delta)
 	case sdrSpecFView:
@@ -893,10 +1006,11 @@ func (v *SDRView) StartSweep(width int) (context.Context, int, sdr.SweepConfig, 
 	v.SpecStarted = time.Now()
 	v.SpecElapsed = 0
 	v.SpecFrameCh = make(chan sdr.SpectrumFrame, 4)
+	lo, hi := v.EffectiveSweepRange()
 	cfg := sdr.SweepConfig{
 		DeviceIndex: v.EffectiveDevice(),
-		StartHz:     v.SpecStartHz,
-		EndHz:       v.SpecEndHz,
+		StartHz:     lo,
+		EndHz:       hi,
 		GainDB:      v.CurrentGainDB(),
 		OutBins:     width,
 		Interval:    sdr.SweepRefresh,
@@ -911,6 +1025,7 @@ func (v *SDRView) ApplySpecFrame(seq int, frame sdr.SpectrumFrame) {
 	first := !v.SpecHasFrame
 	v.SpecFrame = frame
 	v.SpecHasFrame = true
+	v.SpecPendingFocusHz = 0
 	if len(frame.Bins) > 0 {
 		if first {
 			peakIdx := 0
@@ -1414,7 +1529,7 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 		return v.Marquee.SplitLinesPadded(lines, w, h)
 	}
 
-	spanTxt := sdr.FormatFreqShort(v.SpecStartHz) + "-" + sdr.FormatFreqShort(v.SpecEndHz)
+	spanTxt := v.EffectiveSpanLabel()
 
 	// Idle: sweep configuration.
 	if !v.SpecActive && !v.SpecHasFrame {
@@ -1433,6 +1548,11 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 				lbl, val = "Start", sdr.FormatFreqMHz(v.SpecStartHz)
 			case sdrSpecFEnd:
 				lbl, val = "End", sdr.FormatFreqMHz(v.SpecEndHz)
+			case sdrSpecFZoom:
+				lbl = "Zoom"
+				val = v.SpecZoomLabel() + " · " + sdr.FormatBandwidth(int(v.ZoomedSpanHz()))
+			case sdrSpecFContrast:
+				lbl, val = "Contrast", v.ContrastName()
 			case sdrSpecFPreset:
 				lbl, val = "Preset", v.SpecPresetName()
 			case sdrSpecFView:
@@ -1449,7 +1569,7 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 
 	if !v.SpecHasFrame {
 		lines := []string{
-			ok.Render(v.Marquee.FitLine("● Sweeping "+spanTxt, w)),
+			ok.Render(v.Marquee.FitLine("● Sweeping "+spanTxt+" "+v.SpecZoomLabel(), w)),
 			warn.Render(v.Marquee.FitLine("Capturing first sweep...", w)),
 		}
 		if v.SpecErr != "" {
@@ -1463,9 +1583,13 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 	if v.SpecView == sdrSpecViewList {
 		viewTag = "Top"
 	}
-	head := fmt.Sprintf("%s %s %s %s",
+	zoomTag := ""
+	if v.SpecZoom > 0 {
+		zoomTag = " " + v.SpecZoomLabel()
+	}
+	head := fmt.Sprintf("%s %s%s %s %s",
 		map[bool]string{true: "●", false: "■"}[v.SpecActive],
-		spanTxt, viewTag, formatClock(int(v.SpecElapsed.Seconds())))
+		spanTxt, zoomTag, viewTag, formatClock(int(v.SpecElapsed.Seconds())))
 	headStyle := ok
 	if !v.SpecActive {
 		headStyle = hdr
@@ -1514,19 +1638,25 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 		blocks = []string{" ", ".", ".", ":", ":", "|", "|", "#", "#"}
 	}
 
-	const minDB = -70.0
-	const maxDB = -5.0
+	loDB, hiDB, gamma := contrastWindow(bins, v.SpecContrast)
+	levelFor := func(db float64) float64 {
+		norm := (db - loDB) / (hiDB - loDB)
+		if norm < 0 {
+			norm = 0
+		}
+		if norm > 1 {
+			norm = 1
+		}
+		if gamma != 1 {
+			norm = math.Pow(norm, gamma)
+		}
+		return norm
+	}
+
 	for row := barH - 1; row >= 0; row-- {
 		var sb strings.Builder
 		for col := 0; col < w; col++ {
-			norm := (bins[col] - minDB) / (maxDB - minDB)
-			if norm < 0 {
-				norm = 0
-			}
-			if norm > 1 {
-				norm = 1
-			}
-			totalSteps := norm * float64(barH*8)
+			totalSteps := levelFor(bins[col]) * float64(barH*8)
 			rowStart := float64(row * 8)
 			level := int(totalSteps - rowStart + 0.5)
 			if level < 0 {
@@ -1567,6 +1697,33 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 		}
 	}
 	return v.Marquee.SplitLinesPadded(lines, w, h)
+}
+
+// contrastWindow computes the dB window and gamma used to draw the spectrum.
+//
+// level 0 keeps the fixed -70..-5 dB reference; higher levels autoscale to the
+// frame (25th percentile floor, strongest carrier on top) and apply a gamma so
+// the strongest signals climb to the top while weak ones sink, which is what
+// makes peaks stand out on a tiny screen.
+func contrastWindow(bins []float64, level int) (lo, hi, gamma float64) {
+	if level <= 0 || len(bins) == 0 {
+		return -70, -5, 1
+	}
+	sorted := append([]float64(nil), bins...)
+	sort.Float64s(sorted)
+	floor := sorted[len(sorted)/4]
+	peak := sorted[len(sorted)-1]
+	lo = floor - 2
+	hi = peak
+	if hi-lo < 8 {
+		lo = hi - 8
+	}
+	if lo < -90 {
+		lo = -90
+	}
+	gammas := []float64{1.35, 1.8, 2.4, 3.2}
+	g := gammas[clampIndex(level-1, len(gammas))]
+	return lo, hi, g
 }
 
 func resampleBins(bins []float64, w int) []float64 {

@@ -72,8 +72,9 @@ func CycleDemodMode(cur DemodMode, delta int) DemodMode {
 	return DemodMode((int(cur) + delta + int(modeCount)*4) % int(modeCount))
 }
 
-// FreqSteps are the tuning step sizes in Hz.
+// FreqSteps are the tuning step sizes in Hz (1 kHz minimum).
 var FreqSteps = []int64{
+	1_000,     // 1 kHz
 	5_000,     // 5 kHz
 	12_500,    // 12.5 kHz
 	25_000,    // 25 kHz
@@ -255,10 +256,17 @@ func CycleBandwidth(m DemodMode, curHz, delta int) int {
 	return opts[next]
 }
 
-// FormatBandwidth formats a channel bandwidth cleanly (e.g. "170 kHz", "3 kHz").
+// FormatBandwidth formats a channel bandwidth or span (e.g. "170 kHz", "5.125 MHz").
 func FormatBandwidth(hz int) string {
 	if hz <= 0 {
 		return "auto"
+	}
+	if hz >= 1_000_000 {
+		mhz := float64(hz) / 1_000_000
+		s := fmt.Sprintf("%.3f", mhz)
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+		return s + " MHz"
 	}
 	if hz%1000 == 0 {
 		return fmt.Sprintf("%d kHz", hz/1000)
