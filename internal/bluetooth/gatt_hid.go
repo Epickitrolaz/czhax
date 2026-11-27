@@ -106,20 +106,24 @@ func RunEmulatorDirect(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuComma
 	}
 	_ = prepareCarwhispererAdapter(hciName)
 
+	// Remember the controller state before touching it; the deferred restore is
+	// registered first so it runs last, after every other cleanup.
+	initialFlags := captureAdapterFlags(hciName)
+	defer func() {
+		if rerr := restoreAdapterState(hciName, initialFlags); rerr != nil {
+			tracef("adapter restore failed: %v", rerr)
+		}
+	}()
+
 	// LE-only profiles must not be reachable over Classic BR/EDR, otherwise
 	// dual-mode hosts try a legacy PIN pairing instead of LE Just Works.
 	if !spec.IsAudio {
-		if berr := setAdapterBredr(hciName, false); berr != nil {
+		if berr := cycleAdapterBredr(hciName, false, initialFlags); berr != nil {
 			tracef("BR/EDR disable failed: %v", berr)
 			if emit != nil {
 				emit(EmuEvent{Kind: "log", Text: "BR/EDR still on: the host may ask for a Classic PIN"})
 			}
 		} else {
-			defer func() {
-				if rerr := setAdapterBredr(hciName, true); rerr != nil {
-					tracef("BR/EDR restore failed: %v", rerr)
-				}
-			}()
 			tracef("BR/EDR disabled on %s (LE-only device, no Classic PIN pairing)", hciName)
 		}
 	}
@@ -426,62 +430,83 @@ func configureAdapter(conn *dbus.Conn, adapter dbus.BusObject, hciName, alias st
 // Supported" and hosts use LE (Just Works, no code).
 //
 // btmgmt only accepts the change while the controller is powered down.
-func setAdapterBredr(hciName string, enable bool) error {
+// btmgmtRun runs one btmgmt command. btmgmt only works when stdin is a
+// terminal (without one it waits on its shell loop forever), so it is executed
+// under a pty via script(1), with a deadline so a wedged controller cannot
+// delay emulator start-up.
+func btmgmtRun(hciName string, args ...string) ([]byte, error) {
+	n, _, err := hciNumber(hciName)
+	if err != nil {
+		return nil, err
+	}
+	full := append([]string{"btmgmt", "--index", strconv.Itoa(n)}, args...)
+	cctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	var c *exec.Cmd
+	if _, serr := exec.LookPath("script"); serr == nil {
+		c = exec.CommandContext(cctx, "script", "-q", "-c", strings.Join(full, " "), "/dev/null")
+	} else {
+		c = exec.CommandContext(cctx, full[0], full[1:]...)
+	}
+	c.Stdin = nil
+	c.WaitDelay = time.Second
+	return c.CombinedOutput()
+}
+
+// captureAdapterFlags reads the controller's current mgmt settings.
+func captureAdapterFlags(hciName string) map[string]bool {
+	if _, err := exec.LookPath("btmgmt"); err != nil {
+		return nil
+	}
+	out, err := btmgmtRun(hciName, "info")
+	if err != nil {
+		return nil
+	}
+	return parseBTMgmtSettings(string(out))
+}
+
+// cycleAdapterBredr sets BR/EDR support (which requires the controller powered
+// down) and restores the connectable/bondable/discoverable flags the power cycle
+// drops. Without that the adapter is left unable to accept a Classic connection,
+// which breaks A2DP/HFP emulation started later.
+func cycleAdapterBredr(hciName string, enable bool, flags map[string]bool) error {
 	if _, err := exec.LookPath("btmgmt"); err != nil {
 		return err
 	}
-	n, _, err := hciNumber(hciName)
-	if err != nil {
-		return err
-	}
-	idx := strconv.Itoa(n)
 	val := "off"
 	if enable {
 		val = "on"
 	}
-	// btmgmt only works when stdin is a terminal (without one it waits on its
-	// shell loop forever), so run it under a pty via script(1). Each call is also
-	// bounded: a wedged controller must not delay emulator start-up.
-	runBT := func(args ...string) ([]byte, error) {
-		cctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		full := append([]string{"btmgmt", "--index", idx}, args...)
-		var c *exec.Cmd
-		if _, serr := exec.LookPath("script"); serr == nil {
-			c = exec.CommandContext(cctx, "script", "-q", "-c", strings.Join(full, " "), "/dev/null")
-		} else {
-			c = exec.CommandContext(cctx, full[0], full[1:]...)
-		}
-		c.Stdin = nil
-		c.WaitDelay = time.Second
-		return c.CombinedOutput()
+	if flags == nil {
+		flags = captureAdapterFlags(hciName)
 	}
 
-	// Powering the controller down/up loses the connectable/bondable/discoverable
-	// flags, which would leave the adapter unable to accept a Classic connection
-	// afterwards (breaking A2DP/HFP emulation started later). Remember them and
-	// put them back.
-	before := map[string]bool{}
-	if out, ierr := runBT("info"); ierr == nil {
-		before = parseBTMgmtSettings(string(out))
-	}
+	_, _ = btmgmtRun(hciName, "power", "off")
+	out, err := btmgmtRun(hciName, "bredr", val)
+	_, _ = btmgmtRun(hciName, "power", "on")
 
-	_, _ = runBT("power", "off")
-	out, err := runBT("bredr", val)
-	_, _ = runBT("power", "on")
+	// Re-apply in dependency order: connectable/bondable before discoverable.
 	for _, f := range []string{"connectable", "bondable", "discoverable"} {
-		if before[f] {
-			_, _ = runBT(f, "on")
+		if flags[f] {
+			_, _ = btmgmtRun(hciName, f, "on")
 		}
 	}
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return fmt.Errorf("%s", msg)
 		}
 		return err
 	}
 	return nil
+}
+
+// restoreAdapterState puts BR/EDR and the connection flags back the way they
+// were before emulation touched the controller.
+func restoreAdapterState(hciName string, flags map[string]bool) error {
+	if flags == nil {
+		return nil
+	}
+	return cycleAdapterBredr(hciName, flags["br/edr"], flags)
 }
 
 // parseBTMgmtSettings extracts the enabled flags from `btmgmt info` output
