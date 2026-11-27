@@ -442,11 +442,14 @@ func (v *BluetoothEmuView) ApplyEvent(seq int, ev bluetooth.EmuEvent) {
 		if ev.Transport != "" {
 			v.Transport = ev.Transport
 		}
-		if ev.LEDs != 0 || ev.Ready {
-			v.LEDs = ev.LEDs
+		if ev.Ready {
+			// Only a real state (re)announcement carries the audio toggles; LED
+			// updates arrive as their own event kind so they cannot clobber them.
+			v.MonitorAudio = ev.MonitorOn
+			v.RecordAudio = ev.Recording
 		}
-		v.MonitorAudio = ev.MonitorOn
-		v.RecordAudio = ev.Recording
+	case "led":
+		v.LEDs = ev.LEDs
 	case "peer":
 		v.Connected = ev.Connected
 		v.PeerAddr = ev.PeerAddr
@@ -874,7 +877,7 @@ func (v BluetoothEmuView) renderActive(w, h int, pal theme.Palette, focused bool
 		}
 		sub = ok.Render(v.Marquee.FitLine(fmt.Sprintf("Peer: %s  TX:%d", peer, v.TXCount), w))
 	} else if v.Ready {
-		sub = warn.Render(v.Marquee.FitLine(fmt.Sprintf("Advertising (%s)...", v.EffectiveHCI()), w))
+		sub = warn.Render(v.Marquee.FitLine(fmt.Sprintf("Advertising (%s) · pair from host", v.EffectiveHCI()), w))
 	} else {
 		sub = mut.Render(v.Marquee.FitLine("Initializing BlueZ D-Bus...", w))
 	}
