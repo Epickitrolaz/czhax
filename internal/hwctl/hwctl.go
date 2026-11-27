@@ -280,7 +280,7 @@ func StartWatcher() *Watcher {
 		events: make(chan Event, 16),
 		stopCh: make(chan struct{}),
 		blKey:  make(chan int, 16),
-		vol:    NewVolumeController(),
+		vol:    SharedVolume(),
 	}
 	if st, ok := ReadBacklight("/sys"); ok {
 		w.lastRaw = st.Raw

@@ -142,6 +142,7 @@ func TestLegacyDaemonClampSnappedToZero(t *testing.T) {
 func TestVolumeControllerES8389AndMute(t *testing.T) {
 	daclPct := 75
 	dacrPct := 75
+	speakerOn := true
 	var calls []string
 
 	vc := &VolumeController{
@@ -151,21 +152,38 @@ func TestVolumeControllerES8389AndMute(t *testing.T) {
 				return "", errors.New("missing")
 			}
 			calls = append(calls, strings.Join(args, " "))
+			if args[0] == "scontrols" {
+				return "Simple mixer control 'Speaker',0\nSimple mixer control 'DACL',0\nSimple mixer control 'DACR',0\n", nil
+			}
+			if args[0] == "contents" {
+				return "numid=16,iface=MIXER,name='DACL Playback Volume'\n  ; type=INTEGER,access=rw---R--,values=1,min=0,max=255,step=0\n  | dBscale-min=-95.50dB,step=0.50dB,mute=0\n" +
+					"numid=17,iface=MIXER,name='DACR Playback Volume'\n  ; type=INTEGER,access=rw---R--,values=1,min=0,max=255,step=0\n  | dBscale-min=-95.50dB,step=0.50dB,mute=0\n", nil
+			}
 			if args[0] == "sget" {
 				switch args[1] {
-				case "DACL Playback":
-					return "Simple mixer control 'DACL Playback',0\n  Capabilities: volume volume-joined\n  Mono: Playback 191 [" + itoa(daclPct) + "%]\n", nil
-				case "DACR Playback":
-					return "Simple mixer control 'DACR Playback',0\n  Capabilities: volume volume-joined\n  Mono: Playback 191 [" + itoa(dacrPct) + "%]\n", nil
+				case "DACL":
+					return "Simple mixer control 'DACL',0\n  Capabilities: pvolume pvolume-joined\n  Playback channels: Mono\n  Limits: Playback 0 - 255\n  Mono: Playback 191 [" + itoa(daclPct) + "%] [0.00dB]\n", nil
+				case "DACR":
+					return "Simple mixer control 'DACR',0\n  Capabilities: pvolume pvolume-joined\n  Playback channels: Mono\n  Limits: Playback 0 - 255\n  Mono: Playback 191 [" + itoa(dacrPct) + "%] [0.00dB]\n", nil
+				case "Speaker":
+					state := "[on]"
+					if !speakerOn {
+						state = "[off]"
+					}
+					return "Simple mixer control 'Speaker',0\n  Capabilities: pswitch pswitch-joined\n  Playback channels: Mono\n  Mono: Playback " + state + "\n", nil
 				default:
 					return "", errors.New("no control")
 				}
 			}
 			if args[0] == "-q" && args[1] == "sset" {
+				if args[2] == "Speaker" {
+					speakerOn = args[3] != "mute"
+					return "", nil
+				}
 				pct := parsePctArg(args[3])
-				if args[2] == "DACL Playback" {
+				if args[2] == "DACL" {
 					daclPct = pct
-				} else if args[2] == "DACR Playback" {
+				} else if args[2] == "DACR" {
 					dacrPct = pct
 				}
 				return "", nil
@@ -175,24 +193,137 @@ func TestVolumeControllerES8389AndMute(t *testing.T) {
 	}
 
 	st := vc.State()
-	if st.Backend != "amixer" || st.Level != 15 || st.MaxLevel != 20 || st.Percent != 75 || st.Muted {
+	if st.Backend != "amixer" || st.Level != 20 || st.MaxLevel != 20 || st.Percent != 100 || st.Muted {
 		t.Fatalf("unexpected initial ES8389 state: %+v", st)
 	}
-
-	// Step up once: 15 -> 16 (80%) on both DACL and DACR.
-	st = vc.Step(1)
-	if st.Level != 16 || st.Percent != 80 || daclPct != 80 || dacrPct != 80 {
-		t.Fatalf("expected 16/20 (80%%) on both channels, got st=%+v L=%d R=%d", st, daclPct, dacrPct)
+	if len(vc.controls) != 2 || vc.controls[0].name != "DACL" || vc.controls[1].name != "DACR" {
+		t.Fatalf("expected DACL+DACR controls, got %+v", vc.controls)
+	}
+	if vc.swCtrl != "Speaker" {
+		t.Fatalf("expected Speaker mute switch, got %q", vc.swCtrl)
+	}
+	if !vc.controls[0].hasDB {
+		t.Fatal("expected dB scale detected for DACL")
 	}
 
-	// Mute remembers 16/20 while setting hardware to 0%, then unmute restores 80%.
+	// Hardware mute uses the dedicated speaker switch.
 	st = vc.ToggleMute()
-	if !st.Muted || st.Level != 16 || daclPct != 0 || dacrPct != 0 {
-		t.Fatalf("expected muted with saved level 16 and hw 0%%, got st=%+v L=%d R=%d", st, daclPct, dacrPct)
+	if !st.Muted || st.Level != 20 {
+		t.Fatalf("expected muted while keeping level 20, got %+v", st)
+	}
+	seenSwitch := false
+	for _, c := range calls {
+		if c == "-q sset Speaker mute" {
+			seenSwitch = true
+		}
+	}
+	if !seenSwitch {
+		t.Fatalf("expected Speaker mute switch in %v", calls)
 	}
 	st = vc.ToggleMute()
-	if st.Muted || st.Level != 16 || daclPct != 80 || dacrPct != 80 {
-		t.Fatalf("expected unmuted back to 16/20 (80%%), got st=%+v L=%d R=%d", st, daclPct, dacrPct)
+	if st.Muted {
+		t.Fatalf("expected unmuted, got %+v", st)
+	}
+
+	// Stepping down writes both DAC channels with perceptual raw values.
+	calls = nil
+	st = vc.Step(-10)
+	if st.Level != 10 || st.Percent != 50 {
+		t.Fatalf("expected 10/20 (50%%), got %+v", st)
+	}
+	wroteL, wroteR := false, false
+	for _, c := range calls {
+		if strings.HasPrefix(c, "-q sset DACL ") {
+			wroteL = true
+			if strings.Contains(c, "%") {
+				t.Fatalf("expected raw dB value for DACL, got %q", c)
+			}
+		}
+		if strings.HasPrefix(c, "-q sset DACR ") {
+			wroteR = true
+		}
+	}
+	if !wroteL || !wroteR {
+		t.Fatalf("expected both DACL and DACR writes, got %v", calls)
+	}
+}
+
+func TestVolumeLevelRawTaper(t *testing.T) {
+	ctrl := mixerControl{name: "DACL", rawMax: 255, dbMin: -95.5, dbStep: 0.5, hasDB: true}
+	if raw := volumeLevelToRaw(20, ctrl); raw != 191 {
+		t.Fatalf("level 20 raw = %d, want 191 (0 dB)", raw)
+	}
+	if raw := volumeLevelToRaw(0, ctrl); raw != 0 {
+		t.Fatalf("level 0 raw = %d, want 0", raw)
+	}
+	prev := 0
+	for lvl := 0; lvl <= 20; lvl++ {
+		raw := volumeLevelToRaw(lvl, ctrl)
+		if raw < prev {
+			t.Fatalf("taper not monotonic at level %d: %d < %d", lvl, raw, prev)
+		}
+		if lvl > 0 && volumeRawToLevel(raw, ctrl) != lvl {
+			t.Fatalf("round trip failed at level %d: raw %d -> %d", lvl, raw, volumeRawToLevel(raw, ctrl))
+		}
+		prev = raw
+	}
+	// Mid steps should be clearly quieter than max but not silent.
+	if raw := volumeLevelToRaw(10, ctrl); raw >= 191 || raw < 20 {
+		t.Fatalf("level 10 raw = %d, want a mid-range attenuation", raw)
+	}
+}
+
+func TestVolumeControllerSkipsCaptureControls(t *testing.T) {
+	// Regression: the ES8389 exposes capture volumes (ADC OSR / ADCL / ADCR)
+	// before DACL/DACR in scontrols order. They must never be selected.
+	sets := map[string]string{}
+	vc := &VolumeController{
+		hasBin: func(name string) bool { return name == "amixer" },
+		runCmd: func(_ context.Context, name string, args ...string) (string, error) {
+			if name != "amixer" {
+				return "", errors.New("missing")
+			}
+			switch args[0] {
+			case "scontrols":
+				return "Simple mixer control 'Speaker',0\nSimple mixer control 'ADC OSR',0\nSimple mixer control 'ADCL',0\nSimple mixer control 'DACL',0\nSimple mixer control 'DACR',0\n", nil
+			case "contents":
+				return "numid=16,iface=MIXER,name='DACL Playback Volume'\n  | dBscale-min=-95.50dB,step=0.50dB,mute=0\n", nil
+			case "sget":
+				switch args[1] {
+				case "ADC OSR":
+					return "Simple mixer control 'ADC OSR',0\n  Capabilities: cvolume cvolume-joined\n  Capture channels: Mono\n  Limits: Capture 0 - 255\n  Mono: Capture 178 [70%]\n", nil
+				case "ADCL":
+					return "Simple mixer control 'ADCL',0\n  Capabilities: cvolume cvolume-joined\n  Capture channels: Mono\n  Limits: Capture 0 - 255\n  Mono: Capture 191 [75%]\n", nil
+				case "DACL":
+					return "Simple mixer control 'DACL',0\n  Capabilities: pvolume pvolume-joined\n  Playback channels: Mono\n  Limits: Playback 0 - 255\n  Mono: Playback 191 [75%] [0.00dB]\n", nil
+				case "DACR":
+					return "Simple mixer control 'DACR',0\n  Capabilities: pvolume pvolume-joined\n  Playback channels: Mono\n  Limits: Playback 0 - 255\n  Mono: Playback 191 [75%] [0.00dB]\n", nil
+				case "Speaker":
+					return "Simple mixer control 'Speaker',0\n  Capabilities: pswitch pswitch-joined\n  Mono: Playback [on]\n", nil
+				}
+				return "", errors.New("no control")
+			case "-q":
+				sets[args[2]] = args[3]
+				return "", nil
+			}
+			return "", errors.New("unsupported")
+		},
+	}
+	st := vc.State()
+	if st.Backend != "amixer" || st.Level != 20 {
+		t.Fatalf("unexpected state: %+v", st)
+	}
+	for _, c := range vc.controls {
+		if c.name == "ADC OSR" || c.name == "ADCL" {
+			t.Fatalf("capture control selected: %+v", vc.controls)
+		}
+	}
+	vc.Step(-5)
+	if _, bad := sets["ADC OSR"]; bad {
+		t.Fatal("volume step wrote to capture control ADC OSR")
+	}
+	if sets["DACL"] == "" || sets["DACR"] == "" {
+		t.Fatalf("expected DACL+DACR writes, got %v", sets)
 	}
 }
 

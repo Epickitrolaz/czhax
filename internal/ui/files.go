@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -15,6 +16,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/czhax/czhax/internal/audio"
 	"github.com/czhax/czhax/internal/files"
 	"github.com/czhax/czhax/internal/theme"
 	"github.com/czhax/czhax/internal/workdir"
@@ -85,6 +88,13 @@ type FilesView struct {
 	PlayName    string
 	PlayErr     string
 	PlayCancel  context.CancelFunc
+
+	// Controllable player state (mpv IPC): live pause/seek/progress.
+	Player     *audio.Player
+	PlayPaused bool
+	PlayPos    float64
+	PlayDur    float64
+	PlayHasPos bool
 }
 
 func NewFilesView(root string) FilesView {
@@ -395,6 +405,20 @@ func (v *FilesView) StartPlayback(path string) (context.Context, int, string, bo
 		return nil, 0, "", false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	if v.Player != nil {
+		v.Player.Close()
+		v.Player = nil
+	}
+	// The CZHax hardware mixer is the single volume authority; the player keeps
+	// its own software volume at 100% so Fn+volume keys stay live mid-playback.
+	player, err := audio.StartPlayer(ctx, path, -1)
+	if err != nil {
+		cancel()
+		v.PlayErr = err.Error()
+		v.Note = err.Error()
+		v.NoteIsErr = true
+		return nil, 0, "", false
+	}
 	v.PlaySeq++
 	v.PlayPath = path
 	v.PlayName = filepath.Base(path)
@@ -403,6 +427,11 @@ func (v *FilesView) StartPlayback(path string) (context.Context, int, string, bo
 	v.PlayElapsed = 0
 	v.PlayErr = ""
 	v.PlayCancel = cancel
+	v.Player = player
+	v.PlayPaused = false
+	v.PlayPos = 0
+	v.PlayDur = 0
+	v.PlayHasPos = false
 	v.Mode = filesModePlay
 	v.Note = ""
 	v.NoteIsErr = false
@@ -410,8 +439,51 @@ func (v *FilesView) StartPlayback(path string) (context.Context, int, string, bo
 }
 
 func (v *FilesView) StopPlayback() {
+	if v.Player != nil {
+		v.Player.Close()
+	}
 	if v.PlayCancel != nil {
 		v.PlayCancel()
+	}
+}
+
+// TogglePause flips playback pause when the player supports it.
+func (v *FilesView) TogglePause() (bool, error) {
+	if v.Player == nil || !v.Player.Controllable() {
+		return false, errors.New("pause not supported by this player")
+	}
+	paused, err := v.Player.TogglePause()
+	if err != nil {
+		return v.PlayPaused, err
+	}
+	v.PlayPaused = paused
+	return paused, nil
+}
+
+// Seek moves playback by delta seconds.
+func (v *FilesView) Seek(delta float64) error {
+	if v.Player == nil || !v.Player.Controllable() {
+		return errors.New("seeking not supported by this player")
+	}
+	return v.Player.Seek(delta)
+}
+
+// ApplyPlayStatus updates the progress display from the player.
+func (v *FilesView) ApplyPlayStatus(seq int, pos, dur float64, paused bool, err error) {
+	if seq != v.PlaySeq || !v.Playing {
+		return
+	}
+	if err == nil && (dur > 0 || pos > 0) {
+		v.PlayPos = pos
+		if dur > 0 {
+			v.PlayDur = dur
+		}
+		v.PlayPaused = paused
+		v.PlayHasPos = true
+		return
+	}
+	if !v.PlayHasPos && !v.PlayStarted.IsZero() {
+		v.PlayElapsed = time.Since(v.PlayStarted)
 	}
 }
 
@@ -421,6 +493,9 @@ func (v *FilesView) FinishPlayback(seq int, err error) {
 	}
 	v.Playing = false
 	v.PlayCancel = nil
+	v.Player = nil
+	v.PlayPaused = false
+	v.PlayHasPos = false
 	if !v.PlayStarted.IsZero() {
 		v.PlayElapsed = time.Since(v.PlayStarted)
 	}
@@ -558,7 +633,7 @@ func (v FilesView) RenderLines(w, h int, pal theme.Palette, focused bool) []stri
 	case filesModeRecord:
 		return v.renderRecord(w, h, pal)
 	case filesModePlay:
-		return v.renderPlay(w, h, pal)
+		return v.renderPlay(w, h, pal, focused)
 	default:
 		return v.renderList(w, h, pal, focused)
 	}
@@ -787,23 +862,129 @@ func (v FilesView) renderRecord(w, h int, pal theme.Palette) []string {
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
-func (v FilesView) renderPlay(w, h int, pal theme.Palette) []string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
-	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
-	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
-	muted := lipgloss.NewStyle().Foreground(pal.Muted)
-	txt := lipgloss.NewStyle().Foreground(pal.Text)
-	lines := []string{" " + accent.Render("Playing audio")}
-	lines = append(lines, " "+sec.Render("File  ")+txt.Render(v.Marquee.Truncate(v.PlayName, max(6, w-8))))
-	lines = append(lines, " "+ok.Render(fmt.Sprintf("▶ %ds", int(v.PlayElapsed.Seconds()))))
+func (v FilesView) renderPlay(w, h int, pal theme.Palette, focused bool) []string {
+	// Base layer: the file list stays visible behind the popup.
+	base := v.renderList(w, h, pal, false)
+
+	accent := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent).Background(pal.HeaderBg)
+	sec := lipgloss.NewStyle().Foreground(pal.Secondary).Background(pal.HeaderBg)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success).Background(pal.HeaderBg)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning).Background(pal.HeaderBg)
+	muted := lipgloss.NewStyle().Foreground(pal.Muted).Background(pal.HeaderBg)
+	txt := lipgloss.NewStyle().Bold(true).Foreground(pal.Text).Background(pal.HeaderBg)
+	keySty := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Background(pal.HeaderBg)
+
+	boxW := min(max(24, w-6), 34)
+	if boxW > w-2 {
+		boxW = w - 2
+	}
+	innerW := max(10, boxW-4)
+
+	state := "▶ Playing"
+	stateSty := ok
+	if v.PlayPaused {
+		state = "❚❚ Paused"
+		stateSty = warn
+	}
+	if !v.Player.Controllable() && v.Player != nil {
+		state = "▶ Playing"
+	}
+
+	boxLines := []string{
+		" " + stateSty.Render(state) + accent.Render(" · "+v.Marquee.Truncate(v.PlayName, max(6, innerW-lipgloss.Width(state)-4))),
+	}
+
+	// Progress: real position when the player reports it, otherwise elapsed.
+	var pos, dur float64
+	if v.PlayHasPos {
+		pos, dur = v.PlayPos, v.PlayDur
+	} else {
+		pos = v.PlayElapsed.Seconds()
+	}
+	clock := formatClock(int(pos))
+	if dur > 0 {
+		clock += "/" + formatClock(int(dur))
+	}
+	barW := max(4, innerW-len(clock)-1)
+	ratio := 0.0
+	if dur > 0 {
+		ratio = pos / dur
+	}
+	boxLines = append(boxLines, " "+sec.Render(fmt.Sprintf("%s %s", MiniBar(ratio, barW, false), clock)))
+
+	controls := "⏎ Pause   ← -5s   → +5s"
+	if !v.Player.Controllable() {
+		controls = "Esc Stop"
+	}
 	if v.PlayErr != "" {
-		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.PlayErr, max(6, w-2))))
+		boxLines = append(boxLines, " "+muted.Render(v.Marquee.Truncate(v.PlayErr, innerW)))
 	}
-	for len(lines) < h-1 {
-		lines = append(lines, "")
+	boxLines = append(boxLines, " "+keySty.Render(v.Marquee.Truncate(controls, innerW)))
+	if v.Player.Controllable() {
+		boxLines = append(boxLines, " "+muted.Render("Esc Stop"))
 	}
-	lines = append(lines, " "+muted.Render("Esc/⏎:stop"))
-	return v.Marquee.SplitLinesPadded(lines, w, h)
+
+	rows := overlayBox(base, boxLines, w, h, pal)
+	_ = txt
+	return v.Marquee.SplitLinesPadded(rows, w, h)
+}
+
+// overlayBox composites boxLines (already styled) centered over base lines,
+// keeping exactly len(base) rows and width w.
+func overlayBox(base []string, boxLines []string, w, h int, pal theme.Palette) []string {
+	if len(boxLines) == 0 || w < 12 || h < len(boxLines)+2 {
+		return base
+	}
+	boxW := 0
+	for _, l := range boxLines {
+		if lw := lipgloss.Width(l); lw > boxW {
+			boxW = lw
+		}
+	}
+	contentW := boxW
+	boxW += 4 // one space pad plus border on each side
+	if boxW > w {
+		boxW = w
+		contentW = max(1, boxW-4)
+	}
+	if boxW < 12 {
+		return base
+	}
+	bg := pal.HeaderBg
+	bdr := lipgloss.NewStyle().Foreground(pal.Accent).Background(bg)
+	pad := lipgloss.NewStyle().Background(bg)
+	tl, tr, bl, br, hz, vt := "╭", "╮", "╰", "╯", "─", "│"
+
+	lines := make([]string, 0, len(boxLines)+2)
+	lines = append(lines, bdr.Render(tl+strings.Repeat(hz, boxW-2)+tr))
+	for _, l := range boxLines {
+		lines = append(lines, bdr.Render(vt)+pad.Render(" ")+FitLineWithBg(l, contentW, bg)+pad.Render(" ")+bdr.Render(vt))
+	}
+	lines = append(lines, bdr.Render(bl+strings.Repeat(hz, boxW-2)+br))
+
+	rows := make([]string, len(base))
+	copy(rows, base)
+	if len(rows) < h {
+		for len(rows) < h {
+			rows = append(rows, strings.Repeat(" ", w))
+		}
+	}
+	boxX := max(0, (w-boxW)/2)
+	boxY := max(0, (h-len(lines))/2)
+	for i, bLine := range lines {
+		row := boxY + i
+		if row >= len(rows) || row >= h {
+			break
+		}
+		bgLine := rows[row]
+		left := ansi.Cut(bgLine, 0, boxX)
+		if lw := lipgloss.Width(left); lw < boxX {
+			left += strings.Repeat(" ", boxX-lw)
+		}
+		right := ansi.Cut(bgLine, boxX+boxW, w)
+		rows[row] = Truncate(left+"\x1b[0m"+bLine+"\x1b[0m"+right, w)
+	}
+	return rows[:h]
 }
 
 func renderImageHalfBlocks(img image.Image, w, h int) []string {

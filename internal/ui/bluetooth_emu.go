@@ -124,31 +124,31 @@ type BluetoothEmuView struct {
 	InputBuf string
 
 	// Active emulation runtime state
-	Active       bool
-	Stopping     bool
-	Seq          int
-	Spec         bluetooth.EmuProfileSpec
-	Ready        bool
-	Connected    bool
-	PeerAddr     string
-	PeerName     string
-	Transport    string
-	SampleRate   int
-	Channels     int
-	AudioLevel   int
-	RecordPath   string
-	RecordBytes  int64
-	RecordSec    int
-	TXCount      int
-	RXCount      int
-	LEDs         uint8
-	AVRCPPaused  bool
-	LastSent     string
-	Logs         []string
-	ErrMsg       string
-	CmdCh        chan bluetooth.EmuCommand
-	EventCh      chan bluetooth.EmuEvent
-	Cancel       context.CancelFunc
+	Active      bool
+	Stopping    bool
+	Seq         int
+	Spec        bluetooth.EmuProfileSpec
+	Ready       bool
+	Connected   bool
+	PeerAddr    string
+	PeerName    string
+	Transport   string
+	SampleRate  int
+	Channels    int
+	AudioLevel  int
+	RecordPath  string
+	RecordBytes int64
+	RecordSec   int
+	TXCount     int
+	RXCount     int
+	LEDs        uint8
+	AVRCPPaused bool
+	LastSent    string
+	Logs        []string
+	ErrMsg      string
+	CmdCh       chan bluetooth.EmuCommand
+	EventCh     chan bluetooth.EmuEvent
+	Cancel      context.CancelFunc
 
 	// Mouse state
 	MouseStepIdx int

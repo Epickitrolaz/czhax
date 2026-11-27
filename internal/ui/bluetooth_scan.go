@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,7 +70,7 @@ type cwActionItem struct {
 var cwActions = []cwActionItem{
 	{kind: cwTap, name: "Tap (record mic)", val: "toggle"},
 	{kind: cwPlayAudio, name: "Play audio", val: "select"},
-	{kind: cwRecordMessage, name: "Record message", val: "toggle", warn: true},
+	{kind: cwRecordMessage, name: "Record message", val: "temp+send", warn: true},
 	{kind: cwTarget, name: "Target", val: "edit"},
 	{kind: cwStart, name: "Start", val: "run", ok: true},
 	{kind: cwBack, name: "Back", val: "esc"},
@@ -132,6 +133,7 @@ type BluetoothScanView struct {
 	CWRecordPath   string
 	CWRecordCancel context.CancelFunc
 	CWRecordErr    string
+	CWDiscardMsg   bool
 
 	RunKind       BTActionKind
 	RunDevice     bluetooth.Device
@@ -445,23 +447,42 @@ func (v *BluetoothScanView) ConfirmCWTarget() bool {
 }
 
 func (v *BluetoothScanView) OpenCWAudio() bool {
+	root := v.workRoot()
+	_ = workdir.Ensure(root)
+	out := []files.Entry{}
+	// user/audio first (on top), then user/recordings.
+	if entries, err := files.ListAudio(workdir.Audio(root)); err == nil {
+		for _, e := range entries {
+			e.Rel = "audio/" + e.Rel
+			out = append(out, e)
+		}
+	}
+	if entries, err := files.ListAudio(workdir.Recordings(root)); err == nil {
+		for _, e := range entries {
+			e.Rel = "rec/" + e.Rel
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		v.Note = "No audio in user/audio or user/recordings"
+		v.NoteIsErr = true
+	}
+	v.CWAudio = out
+	v.CWAudioCur = 0
+	v.Mode = btModeCWAudio
+	if len(out) > 0 {
+		v.Note = ""
+		v.NoteIsErr = false
+	}
+	return true
+}
+
+func (v BluetoothScanView) workRoot() string {
 	root := v.WorkDir
 	if strings.TrimSpace(root) == "" {
 		root = workdir.Resolve("")
 	}
-	_ = workdir.Ensure(root)
-	entries, err := files.ListAudio(workdir.Audio(root))
-	if err != nil {
-		v.Note = err.Error()
-		v.NoteIsErr = true
-		return false
-	}
-	v.CWAudio = entries
-	v.CWAudioCur = 0
-	v.Mode = btModeCWAudio
-	v.Note = ""
-	v.NoteIsErr = false
-	return true
+	return root
 }
 
 func (v *BluetoothScanView) MoveCWAudio(delta int) {
@@ -521,21 +542,40 @@ func (v *BluetoothScanView) StartCWRecord() (context.Context, int, string, bool)
 	if v.CWRecord {
 		return nil, 0, "", false
 	}
-	root := v.WorkDir
-	if strings.TrimSpace(root) == "" {
-		root = workdir.Resolve("")
-	}
+	root := v.workRoot()
 	ctx, cancel := context.WithCancel(context.Background())
 	v.CWRecordSeq++
 	v.CWStartTap = v.CWTap
-	v.CWRecordPath = filepath.Join(workdir.Recordings(root), fmt.Sprintf("message-%s.wav", time.Now().Format("20060102-150405")))
+	// Recorded messages are throwaway payloads for the SCO link: keep them in
+	// temp/ so nothing is left behind in the user's library.
+	v.CWRecordPath = filepath.Join(workdir.Temp(root), "cw-message.wav")
+	_ = os.MkdirAll(workdir.Temp(root), 0o755)
+	_ = os.Remove(v.CWRecordPath)
 	v.CWRecord = true
 	v.CWRecordAt = time.Now()
 	v.CWRecordFor = 0
 	v.CWRecordErr = ""
+	v.CWDiscardMsg = false
 	v.CWRecordCancel = cancel
 	v.Mode = btModeCWRecord
 	return ctx, v.CWRecordSeq, v.CWRecordPath, true
+}
+
+// CleanupCWMessage removes the temporary recorded message and converted PCM so
+// no artifacts are left on disk.
+func (v *BluetoothScanView) CleanupCWMessage() {
+	root := v.workRoot()
+	paths := []string{
+		v.CWRecordPath,
+		filepath.Join(workdir.Temp(root), "cw-message.wav"),
+		v.ConvertPath(),
+	}
+	for _, p := range paths {
+		if strings.TrimSpace(p) != "" {
+			_ = os.Remove(p)
+		}
+	}
+	v.CWRecordPath = ""
 }
 
 func (v *BluetoothScanView) StopCWRecord() {
@@ -564,11 +604,7 @@ func (v *BluetoothScanView) FinishCWRecord(seq int, err error) {
 }
 
 func (v *BluetoothScanView) ConvertPath() string {
-	root := v.WorkDir
-	if strings.TrimSpace(root) == "" {
-		root = workdir.Resolve("")
-	}
-	return filepath.Join(workdir.Temp(root), "playback.raw")
+	return filepath.Join(workdir.Temp(v.workRoot()), "playback.raw")
 }
 
 func (v *BluetoothScanView) OpenDetail(fromMode BTViewMode) bool {
@@ -800,6 +836,8 @@ func (v *BluetoothScanView) HandleEsc() bool {
 		return true
 	case btModeCWRecord:
 		if v.CWRecord {
+			// Esc discards the take instead of sending it.
+			v.CWDiscardMsg = true
 			v.StopCWRecord()
 			return true
 		}
@@ -1346,17 +1384,17 @@ func (v BluetoothScanView) renderCWRecord(w, h int, pal theme.Palette) []string 
 	sec := lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary)
 	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
 	muted := lipgloss.NewStyle().Foreground(pal.Muted)
-	txt := lipgloss.NewStyle().Foreground(pal.Text)
 	lines := []string{" " + accent.Render("Record message")}
-	lines = append(lines, " "+sec.Render("File  ")+txt.Render(v.Marquee.Truncate(filepath.Base(v.CWRecordPath), max(6, w-8))))
-	lines = append(lines, " "+warn.Render(fmt.Sprintf("● %ds", int(v.CWRecordFor.Seconds()))))
+	lines = append(lines, " "+sec.Render("Target ")+muted.Render(v.Marquee.Truncate(v.CWTarget, max(6, w-8))))
+	lines = append(lines, " "+warn.Render(fmt.Sprintf("● REC %s", formatClock(int(v.CWRecordFor.Seconds())))))
+	lines = append(lines, " "+muted.Render(v.Marquee.Truncate("Temp only · not saved", max(6, w-2))))
 	if v.CWRecordErr != "" {
 		lines = append(lines, " "+muted.Render(v.Marquee.Truncate(v.CWRecordErr, max(6, w-2))))
 	}
 	for len(lines) < h-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, " "+muted.Render("Esc/⏎:stop"))
+	lines = append(lines, " "+muted.Render("⏎:stop & send  Esc:cancel"))
 	return v.Marquee.SplitLinesPadded(lines, w, h)
 }
 
