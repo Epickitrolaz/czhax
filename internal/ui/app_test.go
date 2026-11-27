@@ -378,22 +378,7 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc from WiFi List")
 		}
 
-		// Down moves to Local view, then IR view, then System view
-		m = sendKey(m, "down")
-		if m.ActiveView != ViewLocal {
-			t.Fatalf("expected ViewLocal on down, got %v", m.ActiveView)
-		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Tabs")
-		m = sendKey(m, "enter")
-		if m.Focus != FocusContent {
-			t.Fatalf("expected FocusContent on Local enter")
-		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Content")
-		m = sendKey(m, "esc")
-		if m.Focus != FocusTabs {
-			t.Fatalf("expected FocusTabs on esc from Local")
-		}
-
+		// Down walks the sidebar: WiFi -> BT -> IR -> Local -> Files -> System
 		m = sendKey(m, "down")
 		if m.ActiveView != ViewBluetooth {
 			t.Fatalf("expected ViewBluetooth on down, got %v", m.ActiveView)
@@ -407,6 +392,36 @@ func TestAllViewsAndSizes(t *testing.T) {
 		m = sendKey(m, "esc")
 		if m.Focus != FocusTabs {
 			t.Fatalf("expected FocusTabs on esc from Bluetooth")
+		}
+
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewIR {
+			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on IR enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteEmpty")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from IR")
+		}
+
+		m = sendKey(m, "down")
+		if m.ActiveView != ViewLocal {
+			t.Fatalf("expected ViewLocal on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on Local enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/Local/Content")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from Local")
 		}
 
 		m = sendKey(m, "down")
@@ -424,20 +439,6 @@ func TestAllViewsAndSizes(t *testing.T) {
 			t.Fatalf("expected FocusTabs on esc from Files")
 		}
 
-		m = sendKey(m, "down")
-		if m.ActiveView != ViewIR {
-			t.Fatalf("expected ViewIR on down, got %v", m.ActiveView)
-		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/Tabs")
-		m = sendKey(m, "enter")
-		if m.Focus != FocusContent {
-			t.Fatalf("expected FocusContent on IR enter")
-		}
-		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/IR/RemoteEmpty")
-		m = sendKey(m, "esc")
-		if m.Focus != FocusTabs {
-			t.Fatalf("expected FocusTabs on esc from IR")
-		}
 		m = sendKey(m, "down")
 		if m.ActiveView != ViewSystem {
 			t.Fatalf("expected ViewSystem on down, got %v", m.ActiveView)
@@ -706,5 +707,28 @@ func TestWifiStatusBareState(t *testing.T) {
 	view1 := m.View()
 	if strings.Contains(view1, "(dormant)") {
 		t.Fatalf("expected bare DOWN state without braces, got:\n%s", view1)
+	}
+}
+
+// TestTopViewsOrder pins the sidebar order and the ViewID/index invariant that
+// shell.go relies on (TopViews[activeView] must be the active view).
+func TestTopViewsOrder(t *testing.T) {
+	want := []string{"Status", "WiFi", "BT", "IR", "Local", "Files", "System"}
+	if len(TopViews) != len(want) {
+		t.Fatalf("TopViews has %d entries, want %d", len(TopViews), len(want))
+	}
+	for i, name := range want {
+		if TopViews[i].Name != name {
+			t.Errorf("TopViews[%d] = %q, want %q", i, TopViews[i].Name, name)
+		}
+		if TopViews[i].ID != ViewID(i) {
+			t.Errorf("TopViews[%d].ID = %d, want %d (index invariant)", i, TopViews[i].ID, i)
+		}
+		if TopViews[i].Short3 == "" || len([]rune(TopViews[i].Short3)) > 3 {
+			t.Errorf("TopViews[%d] needs a 3-char Short3, got %q", i, TopViews[i].Short3)
+		}
+	}
+	if viewCount != ViewID(len(want)) {
+		t.Fatalf("viewCount = %d, want %d", viewCount, len(want))
 	}
 }
