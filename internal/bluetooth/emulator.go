@@ -153,6 +153,7 @@ type EmuConfig struct {
 	CustomMode   EmuCustomMode  `json:"custom_mode,omitempty"`
 	CustomUUID   string         `json:"custom_uuid,omitempty"`
 	RecordDir    string         `json:"record_dir,omitempty"`
+	TempDir      string         `json:"temp_dir,omitempty"`
 	MonitorAudio bool           `json:"monitor_audio,omitempty"`
 	RecordAudio  bool           `json:"record_audio,omitempty"`
 	UID          int            `json:"uid,omitempty"`
@@ -263,6 +264,7 @@ func RunEmulator(ctx context.Context, cfg EmuConfig, cmdCh <-chan EmuCommand, em
 		"--custom-mode", string(cfg.CustomMode),
 		"--custom-uuid", cfg.CustomUUID,
 		"--record-dir", cfg.RecordDir,
+		"--temp-dir", cfg.TempDir,
 		"--uid", strconv.Itoa(os.Getuid()),
 		"--gid", strconv.Itoa(os.Getgid()),
 	}

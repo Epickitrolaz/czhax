@@ -312,6 +312,7 @@ func main() {
 			customMode := fs.String("custom-mode", "hid", "Custom mode: hid|speaker|advertise")
 			customUUID := fs.String("custom-uuid", "", "Custom BLE service UUID")
 			recordDir := fs.String("record-dir", "", "Directory for speaker WAV captures")
+			tempDir := fs.String("temp-dir", "", "Directory for the emulator debug log")
 			monitor := fs.Bool("monitor", false, "Play received speaker audio locally")
 			record := fs.Bool("record", false, "Record received speaker audio to WAV")
 			uid := fs.Int("uid", -1, "Owner UID for capture files")
@@ -344,6 +345,7 @@ func main() {
 				CustomMode:   bluetooth.EmuCustomMode(*customMode),
 				CustomUUID:   *customUUID,
 				RecordDir:    *recordDir,
+				TempDir:      *tempDir,
 				MonitorAudio: *monitor,
 				RecordAudio:  *record,
 				UID:          *uid,
