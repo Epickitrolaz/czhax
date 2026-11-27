@@ -30,6 +30,11 @@ const (
 	WiFiTabScan = iota
 )
 
+const (
+	BTTabScan = iota
+	BTTabEmu
+)
+
 // SidebarLabelMax is the widest label a left sidebar entry may render.
 // Full names are truncated to this width; compact widths use Short3.
 const SidebarLabelMax = 6
@@ -50,7 +55,7 @@ var TopViews = []ViewDef{
 	{ID: ViewStatus, Name: "Status", Short3: "Sts", Tabs: []string{"Device", "WiFi", "BT"}},
 	{ID: ViewWiFi, Name: "WiFi", Short3: "WiF", Tabs: []string{"Scan"}},
 	{ID: ViewLocal, Name: "Local", Short3: "Loc", Tabs: []string{"Scan"}},
-	{ID: ViewBluetooth, Name: "BT", Short3: "BT", Tabs: []string{"Scan"}},
+	{ID: ViewBluetooth, Name: "BT", Short3: "BT", Tabs: []string{"Scan", "Emu"}},
 	{ID: ViewFiles, Name: "Files", Short3: "Fil", Tabs: []string{"Files"}},
 	{ID: ViewIR, Name: "IR", Short3: "IR", Tabs: []string{"Remote", "Learn", "Browse"}},
 	{ID: ViewSystem, Name: "System", Short3: "Sys", Tabs: []string{"Tools"}},
