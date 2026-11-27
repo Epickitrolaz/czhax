@@ -402,6 +402,21 @@ func TestAllViewsAndSizes(t *testing.T) {
 		}
 
 		m = sendKey(m, "down")
+		if m.ActiveView != ViewSDR {
+			t.Fatalf("expected ViewSDR on down, got %v", m.ActiveView)
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/SDR/Tabs")
+		m = sendKey(m, "enter")
+		if m.Focus != FocusContent {
+			t.Fatalf("expected FocusContent on SDR enter")
+		}
+		assertFitsBounds(t, m.View(), sz.w, sz.h, sz.name+"/SDR/Radio")
+		m = sendKey(m, "esc")
+		if m.Focus != FocusTabs {
+			t.Fatalf("expected FocusTabs on esc from SDR")
+		}
+
+		m = sendKey(m, "down")
 		if m.ActiveView != ViewLocal {
 			t.Fatalf("expected ViewLocal on down, got %v", m.ActiveView)
 		}
@@ -701,7 +716,7 @@ func TestWifiStatusBareState(t *testing.T) {
 // TestTopViewsOrder pins the sidebar order and the ViewID/index invariant that
 // shell.go relies on (TopViews[activeView] must be the active view).
 func TestTopViewsOrder(t *testing.T) {
-	want := []string{"Status", "WiFi", "BT", "IR", "Local", "Files", "System"}
+	want := []string{"Status", "WiFi", "BT", "IR", "SDR", "Local", "Files", "System"}
 	if len(TopViews) != len(want) {
 		t.Fatalf("TopViews has %d entries, want %d", len(TopViews), len(want))
 	}
