@@ -494,8 +494,8 @@ func TestSDRSpectrumZoom(t *testing.T) {
 	}
 	hiBins[100] = -10 // near the top of the band
 	m.SDR.ApplySpecFrame(4, sdr.BuildSpectrumFrame(87_500_000, 108_000_000, hiBins))
-	m.SDR.SpecMarker = 100
 	peak := m.SDR.SpecFrame.BinFreqHz(100)
+	m.SDR.SpecCursorHz = peak
 
 	m = sendKey(m, "z")
 	if m.SDR.SpecZoom != 1 {
@@ -570,6 +570,119 @@ func TestSDRContrastAutoscale(t *testing.T) {
 		t.Fatalf("contrast did not wrap to 0: %d", m.SDR.SpecContrast)
 	}
 	assertFitsBounds(t, m.View(), 40, 10, "Spec/Contrast")
+}
+
+// TestSDRSpectrumCursorMovesImmediately is the "selector only updates when the
+// spectrum updates" fix: the cursor is a frequency in the model, so every key
+// press moves it right away - no waiting for the next 0.5s frame (and it works
+// even before the first frame arrives).
+func TestSDRSpectrumCursorMovesImmediately(t *testing.T) {
+	m := newTestSDRApp(t, 53, 14)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabSpec)
+	m.SDR.Tab = SDRTabSpec
+	m.Focus = FocusContent
+
+	// Before any frame: the cursor must still move.
+	m.SDR.SpecSeq = 1
+	m.SDR.SpecActive = true
+	startHz := m.SDR.SpecCursorHz
+	m = sendKey(m, "right")
+	m = sendKey(m, "right")
+	if m.SDR.SpecCursorHz <= startHz {
+		t.Fatalf("cursor did not move before the first frame: %d -> %d", startHz, m.SDR.SpecCursorHz)
+	}
+	noFrameHz := m.SDR.SpecCursorHz
+
+	// With a frame, the rendered marker column tracks the cursor immediately.
+	bins := make([]float64, 44)
+	for i := range bins {
+		bins[i] = -55
+	}
+	bins[20] = -15
+	m.SDR.ApplySpecFrame(1, sdr.BuildSpectrumFrame(98_000_000, 99_000_000, bins))
+	m.SDR.SpecCursorHz = 98_100_000
+	before := markerColumn(m.View())
+	beforeHz := m.SDR.SpecCursorHz
+
+	for i := 0; i < 4; i++ {
+		m = sendKey(m, "right")
+	}
+	if m.SDR.SpecCursorHz <= beforeHz {
+		t.Fatalf("cursor did not advance: %d -> %d", beforeHz, m.SDR.SpecCursorHz)
+	}
+	after := markerColumn(m.View())
+	if after <= before {
+		t.Fatalf("marker column did not move right: %d -> %d\n%s", before, after, m.View())
+	}
+	// Jump keys move further per press.
+	m.SDR.SpecCursorHz = 98_500_000
+	upHz := m.SDR.SpecCursorHz
+	m = sendKey(m, "down")
+	if m.SDR.SpecCursorHz <= upHz+int64(m.SDR.specBinWidthHz()) {
+		t.Fatalf("jump did not move ~5 bins: %d -> %d", upHz, m.SDR.SpecCursorHz)
+	}
+	// The cursor never leaves the displayed window.
+	m.SDR.SpecCursorHz = 99_000_000
+	for i := 0; i < 10; i++ {
+		m = sendKey(m, "right")
+	}
+	if m.SDR.SpecCursorHz > m.SDR.SpecFrame.EndHz {
+		t.Fatalf("cursor escaped the window: %d > %d", m.SDR.SpecCursorHz, m.SDR.SpecFrame.EndHz)
+	}
+	_ = noFrameHz
+}
+
+// markerColumn returns the 0-based column of the "▲" cursor row, or -1.
+func markerColumn(view string) int {
+	for _, line := range strings.Split(view, "\n") {
+		if idx := strings.Index(line, "▲"); idx >= 0 {
+			// Strip the gutter ("│") and sidebar so the column is comparable.
+			return idx
+		}
+	}
+	return -1
+}
+
+// TestSDRRadioRunningHasSquelchNotMute pins the requested control swap.
+func TestSDRRadioRunningHasSquelchNotMute(t *testing.T) {
+	m := newTestSDRApp(t, 40, 10)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
+	m.SDR.Tab = SDRTabRadio
+	m.SDR.RadioMode = sdrRadioRunning
+	m.SDR.RadioActive = true
+	m.Focus = FocusContent
+
+	fields := m.SDR.runFields()
+	hasSquelch := false
+	for _, f := range fields {
+		if f == sdrRunSquelch {
+			hasSquelch = true
+		}
+	}
+	if !hasSquelch {
+		t.Fatalf("running radio fields have no squelch: %v", fields)
+	}
+	view := m.View()
+	if !strings.Contains(view, "Squelch") {
+		t.Fatalf("squelch row missing:\n%s", view)
+	}
+	if strings.Contains(view, "Mute") || strings.Contains(view, "MUTED") {
+		t.Fatalf("mute row still present:\n%s", view)
+	}
+
+	// Squelch is adjustable while running and survives the restart.
+	m.SDR.RunCursor = int(sdrRunSquelch)
+	before := m.SDR.RadioSquelch
+	m = sendKey(m, "right")
+	if m.SDR.RadioSquelch <= before {
+		t.Fatalf("squelch did not increase: %d -> %d", before, m.SDR.RadioSquelch)
+	}
+	if got := m.SDR.RadioSquelch; got > 100 {
+		t.Fatalf("squelch out of range: %d", got)
+	}
+	assertFitsBounds(t, m.View(), 40, 10, "Radio/Squelch")
 }
 
 // TestSDRNoDongleAndDVBStatus runs the probe status paths.

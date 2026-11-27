@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -426,14 +425,12 @@ func AudioPlayerCommand(rate int) (string, []string, error) {
 type RadioUpdate struct {
 	Level     float64 // 0..1 normalized meter
 	DBFS      float64 // -60..0
-	Muted     bool
 	RecPath   string
 	BytesRead int64
 }
 
-// RadioController allows toggling mute and WAV recording while RunRadio is running.
+// RadioController allows toggling WAV recording while RunRadio is running.
 type RadioController struct {
-	muted   atomic.Bool
 	mu      sync.Mutex
 	recFile *os.File
 	recPath string
@@ -444,19 +441,6 @@ type RadioController struct {
 // NewRadioController creates a live session controller for audioRate Hz mono S16_LE.
 func NewRadioController(audioRate int) *RadioController {
 	return &RadioController{rate: audioRate}
-}
-
-func (c *RadioController) SetMuted(m bool) {
-	if c != nil {
-		c.muted.Store(m)
-	}
-}
-
-func (c *RadioController) Muted() bool {
-	if c == nil {
-		return false
-	}
-	return c.muted.Load()
 }
 
 func (c *RadioController) RecordingPath() string {
@@ -700,11 +684,7 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 				peakRMS = rms
 			}
 
-			outChunk := chunk
-			if ctrl.Muted() {
-				outChunk = make([]byte, len(chunk))
-			}
-			if _, werr := playIn.Write(outChunk); werr != nil && rctx.Err() == nil {
+			if _, werr := playIn.Write(chunk); werr != nil && rctx.Err() == nil {
 				cancel()
 				break
 			}
@@ -724,7 +704,6 @@ func RunRadio(ctx context.Context, cfg RadioConfig, ctrl *RadioController, onUpd
 				onUpdate(RadioUpdate{
 					Level:     lvl,
 					DBFS:      dbfs,
-					Muted:     ctrl.Muted(),
 					RecPath:   ctrl.RecordingPath(),
 					BytesRead: totalBytes,
 				})

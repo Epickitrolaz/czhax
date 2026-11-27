@@ -54,7 +54,7 @@ const (
 	sdrRunFreq sdrRunField = iota
 	sdrRunStep
 	sdrRunBW
-	sdrRunMute
+	sdrRunSquelch
 	sdrRunRecord
 	sdrRunStop
 )
@@ -183,7 +183,6 @@ type SDRView struct {
 	RadioUpdate  chan sdr.RadioUpdate
 	RadioLevel   float64
 	RadioDBFS    float64
-	RadioMuted   bool
 	RadioRecPath string
 	RadioStarted time.Time
 	RadioElapsed time.Duration
@@ -196,22 +195,25 @@ type SDRView struct {
 	SpecContrast int
 	// SpecPendingFocusHz keeps the zoom anchor across a re-capture.
 	SpecPendingFocusHz int64
-	SpecPresetIdx      int
-	SpecView           sdrSpecView
-	SpecCursor         int
-	SpecEdit           sdrSpecEdit
-	SpecActive         bool
-	SpecSeq            int
-	SpecCancel         context.CancelFunc
-	SpecFrameCh        chan sdr.SpectrumFrame
-	SpecFrame          sdr.SpectrumFrame
-	SpecHasFrame       bool
-	SpecMarker         int
-	SpecListCur        int
-	SpecStarted        time.Time
-	SpecElapsed        time.Duration
-	SpecErr            string
-	SpecLastWidth      int
+	// SpecCursorHz is the chart cursor frequency. Keeping it in the model (not
+	// as an index into a frame) is what makes the selector move on every key
+	// press instead of only when a new sweep frame arrives.
+	SpecCursorHz  int64
+	SpecPresetIdx int
+	SpecView      sdrSpecView
+	SpecCursor    int
+	SpecEdit      sdrSpecEdit
+	SpecActive    bool
+	SpecSeq       int
+	SpecCancel    context.CancelFunc
+	SpecFrameCh   chan sdr.SpectrumFrame
+	SpecFrame     sdr.SpectrumFrame
+	SpecHasFrame  bool
+	SpecListCur   int
+	SpecStarted   time.Time
+	SpecElapsed   time.Duration
+	SpecErr       string
+	SpecLastWidth int
 
 	// 433 / ISM decoder state
 	ISMMode         sdrISMMode
@@ -477,7 +479,7 @@ func (v SDRView) radioFields() []sdrRadioField {
 }
 
 func (v SDRView) runFields() []sdrRunField {
-	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunBW, sdrRunMute, sdrRunRecord, sdrRunStop}
+	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunBW, sdrRunSquelch, sdrRunRecord, sdrRunStop}
 }
 
 func (v *SDRView) MoveRadioCursor(delta int) {
@@ -509,8 +511,9 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 		case sdrRunBW:
 			v.setBandwidth(sdr.CycleBandwidth(v.RadioMod, v.RadioBwHz, delta))
 			return true
-		case sdrRunMute:
-			v.ToggleMute()
+		case sdrRunSquelch:
+			v.RadioSquelch = clampInt(v.RadioSquelch+delta*5, 0, 100)
+			return true
 		case sdrRunRecord:
 			v.ToggleRecord()
 		}
@@ -665,14 +668,6 @@ func (v *SDRView) SelectPresetFromList() {
 	v.RadioMode = sdrRadioSetup
 }
 
-func (v *SDRView) ToggleMute() bool {
-	v.RadioMuted = !v.RadioMuted
-	if v.RadioCtrl != nil {
-		v.RadioCtrl.SetMuted(v.RadioMuted)
-	}
-	return v.RadioMuted
-}
-
 func (v *SDRView) ToggleRecord() (string, error) {
 	if v.RadioCtrl == nil {
 		return "", fmt.Errorf("radio not running")
@@ -708,7 +703,6 @@ func (v *SDRView) StartRadio() (context.Context, int, sdr.RadioConfig, *sdr.Radi
 	}
 	_, _, rate := sdr.BuildRTLFMArgs(cfg)
 	ctrl := sdr.NewRadioController(rate)
-	ctrl.SetMuted(v.RadioMuted)
 	v.RadioCtrl = ctrl
 	v.RadioUpdate = make(chan sdr.RadioUpdate, 16)
 	v.RadioLevel = 0
@@ -727,7 +721,6 @@ func (v *SDRView) ApplyRadioUpdate(seq int, u sdr.RadioUpdate) {
 	}
 	v.RadioLevel = u.Level
 	v.RadioDBFS = u.DBFS
-	v.RadioMuted = u.Muted
 	v.RadioRecPath = u.RecPath
 }
 
@@ -780,11 +773,11 @@ func (v SDRView) specFocusHz() int64 {
 	if v.SpecPendingFocusHz > 0 {
 		return v.SpecPendingFocusHz
 	}
-	if v.SpecHasFrame && len(v.SpecFrame.Bins) > 0 {
-		if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
-			return v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))].FreqHz
-		}
-		return v.SpecFrame.BinFreqHz(v.SpecMarker)
+	if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
+		return v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))].FreqHz
+	}
+	if v.SpecCursorHz > 0 {
+		return v.SpecCursorHz
 	}
 	return (v.SpecStartHz + v.SpecEndHz) / 2
 }
@@ -964,6 +957,29 @@ func (v *SDRView) ToggleSpecView() {
 	v.SpecView = sdrSpecView((int(v.SpecView) + 1) % int(sdrSpecViewCount))
 }
 
+// specBinWidthHz is the frequency covered by one chart column.
+func (v SDRView) specBinWidthHz() int64 {
+	span := v.ZoomedSpanHz()
+	if span <= 0 {
+		span = v.SpecSpanHz()
+	}
+	bins := v.SpecLastWidth
+	if len(v.SpecFrame.Bins) > 0 {
+		bins = len(v.SpecFrame.Bins)
+	}
+	if bins <= 0 {
+		bins = 34
+	}
+	step := span / int64(bins)
+	if step < 1 {
+		step = 1
+	}
+	return step
+}
+
+// MoveSpecMarker moves the selection one step. The chart cursor is a frequency
+// in the model, so it moves immediately on every key press - it never waits
+// for the next sweep frame.
 func (v *SDRView) MoveSpecMarker(delta int) {
 	if v.SpecView == sdrSpecViewList {
 		n := len(v.SpecFrame.TopSignals)
@@ -972,24 +988,43 @@ func (v *SDRView) MoveSpecMarker(delta int) {
 		}
 		return
 	}
-	n := len(v.SpecFrame.Bins)
-	if n <= 0 {
-		return
-	}
-	v.SpecMarker = (v.SpecMarker + delta + n) % n
+	v.moveCursorHz(int64(delta) * v.specBinWidthHz())
 }
 
-// SpeedUpSpecMarker jumps the chart cursor for faster navigation on small keypads.
+// JumpSpecMarker jumps the chart cursor for faster navigation on small keypads.
 func (v *SDRView) JumpSpecMarker(delta int) {
 	if v.SpecView == sdrSpecViewList {
 		v.MoveSpecMarker(delta)
 		return
 	}
-	n := len(v.SpecFrame.Bins)
-	if n <= 0 {
+	v.moveCursorHz(int64(delta) * 5 * v.specBinWidthHz())
+}
+
+func (v *SDRView) moveCursorHz(delta int64) {
+	lo, hi := v.sweepWindow()
+	if hi <= lo {
 		return
 	}
-	v.SpecMarker = (v.SpecMarker + delta*5 + n*5) % n
+	cur := v.SpecCursorHz
+	if cur <= 0 || cur < lo || cur > hi {
+		cur = (lo + hi) / 2
+	}
+	cur += delta
+	if cur < lo {
+		cur = lo
+	}
+	if cur > hi {
+		cur = hi
+	}
+	v.SpecCursorHz = cur
+}
+
+// sweepWindow is the frequency window currently on screen.
+func (v SDRView) sweepWindow() (int64, int64) {
+	if v.SpecHasFrame && v.SpecFrame.EndHz > v.SpecFrame.StartHz {
+		return v.SpecFrame.StartHz, v.SpecFrame.EndHz
+	}
+	return v.EffectiveSweepRange()
 }
 
 func (v *SDRView) StartSweep(width int) (context.Context, int, sdr.SweepConfig, chan sdr.SpectrumFrame) {
@@ -1007,6 +1042,14 @@ func (v *SDRView) StartSweep(width int) (context.Context, int, sdr.SweepConfig, 
 	v.SpecElapsed = 0
 	v.SpecFrameCh = make(chan sdr.SpectrumFrame, 4)
 	lo, hi := v.EffectiveSweepRange()
+	// Drop the old frame so the bar chart starts clean in the new window, but
+	// keep the cursor frequency (clamped into the window) so it stays where the
+	// user left it.
+	v.SpecFrame = sdr.SpectrumFrame{}
+	v.SpecHasFrame = false
+	if v.SpecCursorHz < lo || v.SpecCursorHz > hi {
+		v.SpecCursorHz = (lo + hi) / 2
+	}
 	cfg := sdr.SweepConfig{
 		DeviceIndex: v.EffectiveDevice(),
 		StartHz:     lo,
@@ -1026,18 +1069,25 @@ func (v *SDRView) ApplySpecFrame(seq int, frame sdr.SpectrumFrame) {
 	v.SpecFrame = frame
 	v.SpecHasFrame = true
 	v.SpecPendingFocusHz = 0
-	if len(frame.Bins) > 0 {
-		if first {
-			peakIdx := 0
-			for i, b := range frame.Bins {
-				if b > frame.Bins[peakIdx] {
-					peakIdx = i
-				}
-			}
-			v.SpecMarker = peakIdx
-			v.SpecListCur = 0
+	if first {
+		// Snap the cursor to the strongest carrier on the first frame only;
+		// afterwards the user owns it.
+		if frame.PeakHz > 0 {
+			v.SpecCursorHz = frame.PeakHz
 		} else {
-			v.SpecMarker = clampIndex(v.SpecMarker, len(frame.Bins))
+			v.SpecCursorHz = frame.CenterHz
+		}
+		v.SpecListCur = 0
+	}
+	if v.SpecCursorHz <= 0 {
+		v.SpecCursorHz = frame.CenterHz
+	}
+	if frame.EndHz > frame.StartHz {
+		if v.SpecCursorHz < frame.StartHz {
+			v.SpecCursorHz = frame.StartHz
+		}
+		if v.SpecCursorHz > frame.EndHz {
+			v.SpecCursorHz = frame.EndHz
 		}
 	}
 	v.SpecListCur = clampIndex(v.SpecListCur, max(1, len(frame.TopSignals)))
@@ -1063,16 +1113,15 @@ func (v *SDRView) MarkerFreqHz() (int64, sdr.DemodMode) {
 	if v.ExplicitPreset() {
 		mode = sdr.BandPresets[clampIndex(v.SpecPresetIdx-1, len(sdr.BandPresets))].DefaultMode
 	}
-	if v.SpecHasFrame {
-		if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
-			p := v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))]
-			return p.FreqHz, mode
-		}
-		if len(v.SpecFrame.Bins) > 0 {
-			return v.SpecFrame.BinFreqHz(v.SpecMarker), mode
-		}
+	if v.SpecView == sdrSpecViewList && len(v.SpecFrame.TopSignals) > 0 {
+		p := v.SpecFrame.TopSignals[clampIndex(v.SpecListCur, len(v.SpecFrame.TopSignals))]
+		return p.FreqHz, mode
 	}
-	return (v.SpecStartHz + v.SpecEndHz) / 2, mode
+	if v.SpecCursorHz > 0 {
+		return sdr.ClampFreq(v.SpecCursorHz), mode
+	}
+	lo, hi := v.EffectiveSweepRange()
+	return (lo + hi) / 2, mode
 }
 
 // --- 433 / ISM Tab state transitions ---
@@ -1400,11 +1449,11 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 
 	if v.RadioMode == sdrRadioRunning {
 		flags := v.RadioMod.String() + " " + sdr.FormatBandwidth(v.RadioBwHz)
+		if v.RadioSquelch > 0 {
+			flags += fmt.Sprintf(" SQ%d", v.RadioSquelch)
+		}
 		if v.RadioRecPath != "" {
 			flags += " REC"
-		}
-		if v.RadioMuted {
-			flags += " MUTE"
 		}
 		head := fmt.Sprintf("● %s %s %s", sdr.FormatFreqShort(v.RadioFreqHz), flags, formatClock(int(v.RadioElapsed.Seconds())))
 		barW := max(6, w-12)
@@ -1426,13 +1475,8 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 				lbl, val = "Step", sdr.FormatStep(v.CurrentStepHz())
 			case sdrRunBW:
 				lbl, val = "BW", sdr.FormatBandwidth(v.RadioBwHz)
-			case sdrRunMute:
-				lbl = "Mute"
-				if v.RadioMuted {
-					val, style = "[MUTED]", warn
-				} else {
-					val = "[OFF]"
-				}
+			case sdrRunSquelch:
+				lbl, val = "Squelch", fmt.Sprintf("%d", v.RadioSquelch)
 			case sdrRunRecord:
 				lbl = "Record"
 				if v.RadioRecPath != "" {
@@ -1626,7 +1670,7 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 
 	barH := max(2, h-3)
 	bins := resampleBins(v.SpecFrame.Bins, w)
-	marker := clampIndex(v.SpecMarker, len(bins))
+	marker := v.cursorColumn(w)
 	peakCol := 0
 	for i, b := range bins {
 		if b > bins[peakCol] {
@@ -1653,6 +1697,15 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 		return norm
 	}
 
+	// The cursor is a continuous vertical line, not just a recolored bar, so it
+	// stays visible over the noise floor and moves on every key press instead of
+	// only when a new frame arrives.
+	curCh := "│"
+	if v.ASCII {
+		curCh = "|"
+	}
+	cursorStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+
 	for row := barH - 1; row >= 0; row-- {
 		var sb strings.Builder
 		for col := 0; col < w; col++ {
@@ -1667,10 +1720,20 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 			}
 			ch := blocks[level]
 			switch {
-			case col == marker && focused:
-				sb.WriteString(sel.Render(ch))
 			case col == marker:
-				sb.WriteString(hdr.Render(ch))
+				// Always draw something for the cursor column.
+				if level == 0 {
+					ch = curCh
+					style := cursorStyle
+					if focused {
+						style = sel
+					}
+					sb.WriteString(style.Render(ch))
+				} else if focused {
+					sb.WriteString(sel.Render(ch))
+				} else {
+					sb.WriteString(cursorStyle.Render(ch))
+				}
 			case col == peakCol:
 				sb.WriteString(warn.Render(ch))
 			default:
@@ -1686,10 +1749,9 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 	}
 	lines = append(lines, FitLine(strings.Repeat(" ", marker)+hdr.Render(markChar), w))
 
-	mf := v.SpecFrame.BinFreqHz(marker)
-	mdb := bins[marker]
+	mf, mdb := v.cursorReadout()
 	if v.SpecHasFrame && len(v.SpecFrame.TopSignals) > 0 {
-		readout := fmt.Sprintf("%s %.0fdB · pk %d", sdr.FormatFreqMHz(mf), mdb, len(v.SpecFrame.TopSignals))
+		readout := fmt.Sprintf("%s %.0fdB · pk %d", mf, mdb, len(v.SpecFrame.TopSignals))
 		if v.SpecErr != "" {
 			lines = append(lines, bad.Render(v.Marquee.FitLine(v.SpecErr, w)))
 		} else {
@@ -1724,6 +1786,37 @@ func contrastWindow(bins []float64, level int) (lo, hi, gamma float64) {
 	gammas := []float64{1.35, 1.8, 2.4, 3.2}
 	g := gammas[clampIndex(level-1, len(gammas))]
 	return lo, hi, g
+}
+
+// cursorColumn maps the model cursor frequency onto a chart column.
+func (v SDRView) cursorColumn(w int) int {
+	if w <= 0 {
+		return 0
+	}
+	lo, hi := v.sweepWindow()
+	if hi <= lo {
+		return 0
+	}
+	col := int(math.Round(float64(v.SpecCursorHz-lo) / float64(hi-lo) * float64(w-1)))
+	return clampIndex(col, w)
+}
+
+// cursorReadout describes the cursor position for the status row.
+func (v SDRView) cursorReadout() (string, float64) {
+	freq := v.SpecCursorHz
+	if freq <= 0 {
+		lo, hi := v.sweepWindow()
+		freq = (lo + hi) / 2
+	}
+	db := v.SpecFrame.PeakDB
+	if bins := resampleBins(v.SpecFrame.Bins, max(1, len(v.SpecFrame.Bins))); len(bins) > 0 {
+		lo, hi := v.sweepWindow()
+		if hi > lo {
+			idx := int(float64(freq-lo) / float64(hi-lo) * float64(len(bins)))
+			db = bins[clampIndex(idx, len(bins))]
+		}
+	}
+	return sdr.FormatFreqMHz(freq), db
 }
 
 func resampleBins(bins []float64, w int) []float64 {

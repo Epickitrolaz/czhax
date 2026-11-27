@@ -517,11 +517,6 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 				if v.AdjustRadio(1) {
 					return m.startSDRRadio()
 				}
-			case k == "m":
-				if v.ToggleMute() {
-					return m, m.setStatus("Muted")
-				}
-				return m, m.setStatus("Unmuted")
 			case k == "enter" || k == " ":
 				f := v.runFields()
 				switch f[clampIndex(v.RunCursor, len(f))] {
@@ -532,11 +527,9 @@ func (m AppModel) handleSDRKey(k string) (tea.Model, tea.Cmd) {
 				case sdrRunBW:
 					v.AdjustRadio(1)
 					return m.startSDRRadio()
-				case sdrRunMute:
-					if v.ToggleMute() {
-						return m, m.setStatus("Muted")
-					}
-					return m, m.setStatus("Unmuted")
+				case sdrRunSquelch:
+					v.AdjustRadio(1)
+					return m.startSDRRadio()
 				case sdrRunRecord:
 					wasRec := v.RadioRecPath != ""
 					path, err := v.ToggleRecord()
@@ -643,7 +636,7 @@ func (m AppModel) sdrHints() []Hint {
 		case sdrRadioPresets:
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "⏎", Desc: "use"}, {Key: "x", Desc: "del"}, {Key: "Esc", Desc: "back"}}
 		case sdrRadioRunning:
-			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "tune"}, {Key: "m", Desc: "mute"}, {Key: "Esc", Desc: "stop"}}
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "tune"}, {Key: "Esc", Desc: "stop"}}
 		default:
 			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "←→", Desc: "chg"}, {Key: "p", Desc: "pre"}, {Key: "⏎", Desc: "ok"}, {Key: "Esc", Desc: "tabs"}}
 		}
