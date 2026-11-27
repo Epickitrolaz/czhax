@@ -139,10 +139,12 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - **Probe mode**: repeat `p` (power), `v` (volume) or `m` (mute) to send the next candidate; press `a` to accept and generate a profile for that device.
   - **Grid mode**: press `g`, then each mapped key sends and cycles that button's candidates, so you can walk every combination before accepting.
   - Hardware bindings: `dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up` (receiver) and `dtoverlay=gpio-ir-tx,gpio_pin=12` (transmitter); devices appear as `/dev/lirc*` and require membership in the `video` group. Run `czhax ir` to print discovered LIRC devices, capabilities and binding errors.
-- **RTL-SDR (`SDR → Radio`, `SDR → Spec`, `SDR → 433`)**:
+- **RTL-SDR (`SDR → Radio`, `SDR → Spec`, `SDR → 433`, `SDR → Srv`)**:
   - **Radio**: USB RTL2832U dongle detection (`czhax sdr` to inspect), live `WBFM`/`NFM`/`AM`/`USB`/`LSB` demodulation (`rtl_fm` → `aplay`/`pw-play`/`ffplay`/`mpv`), live audio/S-meter level bar, instant mute (`m`), live WAV recording to `~/czhax/captures`, built-in frequency presets (FM, NOAA WX, Airband, Marine, PMR446, FRS, 2m/70cm, ISM), and persistent bookmarks in `~/.config/czhax/sdr.json`.
-  - **Spec**: real-time 2.048 MHz FFT spectrum bargraph (`rtl_sdr` + pure-Go FFT) and wideband sweeps (`rtl_power` across FM, Airband, 2m, NOAA, ISM 433, 70cm); move the cursor marker with `←→` and press `Enter` to tune the Radio tab straight to any signal peak.
-  - **433**: Sub-GHz ISM packet decoder (`rtl_433`) at 433.92 / 315 / 868.3 / 915 MHz with packet detail view and optional JSONL capture logging to `~/czhax/captures`. Requires `rtl-sdr` (and `rtl-433` for the 433 tab).
+  - **Channel bandwidth** is adjustable in **every** demodulation mode (`BW` row): WBFM 120–240 kHz, NFM 8–48 kHz, AM 6–24 kHz, USB/LSB 3–12 kHz. Narrow settings are upsampled in Go so they play cleanly on any audio backend, and AM/SSB get matching gain compensation.
+  - **Spec**: pick an exact **Start** and **End** frequency (typed in MHz or stepped with `←/↕`), optionally from band presets (FM, Airband, 2m, NOAA, ISM 433, 70cm), then sweep continuously, refreshing **every 0.5 s**. Show it either as a live **bargraph spectrum** or as a **Top 50** list of the strongest signals (`m` toggles), scroll to a peak and press `Enter` to tune the Radio tab straight to it. Spans up to ~2.4 MHz use a local FFT for noise averaging; wider spans stream `rtl_power` hop data.
+  - **433**: Sub-GHz ISM packet decoder (`rtl_433`) at 433.92 / 315 / 868.3 / 915 MHz with packet detail view and optional JSONL capture logging to `~/czhax/captures`.
+  - **Srv**: built-in **rtl_tcp** IQ server. Choose bind address (`0.0.0.0` for LAN or `127.0.0.1`), port, start frequency, IQ rate (1.024M / 2.048M / 2.4M) and gain; the tab shows the client connect string and live rtl_tcp log. Headless: `czhax sdr serve --bind 0.0.0.0 --port 1234 --freq 100M --rate 2.048M`. Requires `rtl-sdr` (and `rtl-433` for the 433 tab).
 - **System Tools (`System → Tools`)**:
   - **Update CZHax**: Built-in GitHub release updater with SHA256 verification
   - **Restart CZHax**: In-place relaunch (`exec`) to load newly installed updates

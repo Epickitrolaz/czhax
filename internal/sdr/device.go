@@ -107,6 +107,7 @@ type Tools struct {
 	RTLSDR   string
 	RTLPower string
 	RTLTest  string
+	RTLTCP   string
 	RTL433   string
 	Player   string
 }
@@ -145,6 +146,7 @@ func DiscoverTools() Tools {
 		RTLSDR:   FindTool("rtl_sdr"),
 		RTLPower: FindTool("rtl_power"),
 		RTLTest:  FindTool("rtl_test"),
+		RTLTCP:   FindTool("rtl_tcp"),
 		RTL433:   FindTool("rtl_433"),
 	}
 	for _, p := range []string{"aplay", "pw-play", "ffplay", "mpv"} {

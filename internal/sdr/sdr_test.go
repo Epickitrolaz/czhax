@@ -111,34 +111,96 @@ func TestParseFreqMHz(t *testing.T) {
 }
 
 func TestBuildRTLFMArgs(t *testing.T) {
-	args, rate := BuildRTLFMArgs(RadioConfig{
+	args, rtlRate, playRate := BuildRTLFMArgs(RadioConfig{
 		DeviceIndex: 0,
 		FreqHz:      98_500_000,
 		Mode:        ModeWBFM,
+		BandwidthHz: 200_000,
 		GainDB:      -1,
 		Squelch:     0,
 	})
-	if rate != 32000 {
-		t.Fatalf("WBFM rate = %d, want 32000", rate)
+	if rtlRate != 32000 || playRate != 32000 {
+		t.Fatalf("WBFM rates = %d/%d, want 32000/32000", rtlRate, playRate)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-M wbfm") || !strings.Contains(joined, "-E deemp") {
+	if !strings.Contains(joined, "-M wbfm") || !strings.Contains(joined, "-s 200000") || !strings.Contains(joined, "-E deemp") {
 		t.Fatalf("unexpected WBFM args: %s", joined)
 	}
 
-	args2, rate2 := BuildRTLFMArgs(RadioConfig{
+	args2, rtlRate2, playRate2 := BuildRTLFMArgs(RadioConfig{
 		DeviceIndex: 1,
 		FreqHz:      121_500_000,
 		Mode:        ModeAM,
+		BandwidthHz: 8_000,
 		GainDB:      28,
 		Squelch:     15,
 	})
-	if rate2 != 24000 {
-		t.Fatalf("AM rate = %d, want 24000", rate2)
+	if rtlRate2 != 8000 || playRate2 != 24000 {
+		t.Fatalf("AM rates = %d/%d, want 8000/24000", rtlRate2, playRate2)
 	}
 	joined2 := strings.Join(args2, " ")
-	if !strings.Contains(joined2, "-d 1") || !strings.Contains(joined2, "-M am") || !strings.Contains(joined2, "-g 28") || !strings.Contains(joined2, "-l 15") {
+	if !strings.Contains(joined2, "-d 1") || !strings.Contains(joined2, "-M am") || !strings.Contains(joined2, "-s 8000") || !strings.Contains(joined2, "-g 28") || !strings.Contains(joined2, "-l 15") {
 		t.Fatalf("unexpected AM args: %s", joined2)
+	}
+
+	// Verify bandwidth options exist for every demod mode.
+	for _, mode := range []DemodMode{ModeWBFM, ModeNFM, ModeAM, ModeUSB, ModeLSB} {
+		opts := BandwidthsForMode(mode)
+		if len(opts) < 3 {
+			t.Fatalf("mode %v has too few bandwidth options: %v", mode, opts)
+		}
+		def := DefaultBandwidth(mode)
+		next := CycleBandwidth(mode, def, 1)
+		if next == def {
+			t.Fatalf("CycleBandwidth(%v, %d, 1) did not advance", mode, def)
+		}
+	}
+}
+
+func TestResampleS16LE(t *testing.T) {
+	in := make([]byte, 16) // 8 samples at 8000 Hz
+	for i := 0; i < 8; i++ {
+		binary.LittleEndian.PutUint16(in[i*2:i*2+2], uint16(int16(i*1000)))
+	}
+	out := resampleS16LE(in, 8000, 24000)
+	if len(out) != 24*2 {
+		t.Fatalf("upsampled byte len = %d, want 48", len(out))
+	}
+}
+
+func TestExtractTopSignalsAndServerArgs(t *testing.T) {
+	hi := make([]float64, 200)
+	for i := range hi {
+		hi[i] = -70
+	}
+	// Inject 60 isolated spikes so we can confirm the 50-signal cap and ordering.
+	for k := 0; k < 60; k++ {
+		idx := k*3 + 1
+		if idx < len(hi) {
+			hi[idx] = -60 + float64(k)*0.5
+		}
+	}
+	top := ExtractTopSignals(87_500_000, 108_000_000, hi, MaxTopSignals)
+	if len(top) != 50 {
+		t.Fatalf("top len = %d, want 50", len(top))
+	}
+	for i := 1; i < len(top); i++ {
+		if top[i].PowerDB > top[i-1].PowerDB {
+			t.Fatalf("top signals not sorted descending at %d: %.1f > %.1f", i, top[i].PowerDB, top[i-1].PowerDB)
+		}
+	}
+
+	tcpArgs := BuildRTLTCPArgs(ServerConfig{
+		DeviceIndex: 0,
+		ListenAddr:  "0.0.0.0",
+		Port:        1234,
+		FreqHz:      100_000_000,
+		SampleRate:  1_024_000,
+		GainDB:      28,
+	})
+	s := strings.Join(tcpArgs, " ")
+	if !strings.Contains(s, "-a 0.0.0.0") || !strings.Contains(s, "-p 1234") || !strings.Contains(s, "-s 1024000") || !strings.Contains(s, "-g 28") {
+		t.Fatalf("unexpected rtl_tcp args: %s", s)
 	}
 }
 
