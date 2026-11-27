@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -159,6 +160,9 @@ func (s *evilStreamer) run(ctx context.Context, bin string, args ...string) *evi
 		s.line("%s failed: %v", bin, err)
 		return nil
 	}
+	// Pdeathsig: if the helper is killed (SIGPIPE, SIGKILL, TUI crash) its
+	// children must not be left running and holding the AP address or port 80.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 	p := &evilProc{cmd: cmd, done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
@@ -180,7 +184,7 @@ func (s *evilStreamer) run(ctx context.Context, bin string, args ...string) *evi
 func toolMissing(names ...string) []string {
 	var missing []string
 	for _, n := range names {
-		if _, err := exec.LookPath(n); err != nil {
+		if findTool(n) == "" {
 			missing = append(missing, n)
 		}
 	}
@@ -193,15 +197,20 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	if strings.TrimSpace(cfg.SSID) == "" {
 		return errors.New("no SSID to clone")
 	}
-	need := []string{"hostapd", "dnsmasq"}
+	need := []string{"hostapd", "dnsmasq", "iw"}
 	if cfg.NAT {
 		need = append(need, "iptables")
 	}
 	if missing := toolMissing(need...); len(missing) > 0 {
 		return fmt.Errorf("missing %s — sudo apt install %s", strings.Join(missing, ", "), strings.Join(missing, " "))
 	}
-	if cfg.Channel <= 0 {
+	if cfg.Channel <= 0 || cfg.Channel > 13 {
+		// hw_mode=g only covers 1..13; channel 14 needs 802.11b and is usually
+		// disabled by the regulatory domain anyway.
 		cfg.Channel = 6
+	}
+	if !APCapable(cfg.Iface) {
+		return fmt.Errorf("%s does not support AP mode - pick an adapter that can host a hotspot", cfg.Iface)
 	}
 
 	dir := strings.TrimSpace(cfg.WorkDir)
@@ -221,6 +230,9 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	}
 
 	r := defaultPentestRunner()
+	// A previous run that was killed can still own the AP address, port 80 or
+	// the NAT rules; clear it before setting up again.
+	cleanStaleTwin(r, dir, cfg, emit)
 	cleanups := make([]func(), 0, 8)
 	defer func() {
 		for i := len(cleanups) - 1; i >= 0; i-- {
@@ -292,8 +304,15 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	}
 
 	// dnsmasq: DHCP + catch-all DNS.
-	if cmd := emit.run(ctx, "dnsmasq", "-C", dnsmasqConf, "-d", "--log-facility=-"); cmd != nil {
-		cleanups = append(cleanups, func() { _ = cmd.cmd.Process.Kill(); _, _ = cmd.cmd.Process.Wait() })
+	dns := emit.run(ctx, "dnsmasq", "-C", dnsmasqConf, "-d", "--log-facility=-")
+	if dns != nil {
+		cleanups = append(cleanups, func() { _ = dns.cmd.Process.Kill(); _, _ = dns.cmd.Process.Wait() })
+		select {
+		case <-dns.done:
+			// Typically "Address already in use" from a leftover run.
+			return fmt.Errorf("dnsmasq failed: %s", dns.lastLine())
+		case <-time.After(900 * time.Millisecond):
+		}
 	}
 
 	// hostapd control socket directory must exist, otherwise hostapd bails out
@@ -367,6 +386,33 @@ func lastToolReason(raw []byte) string {
 		reason = "capture unavailable on this driver (needs nexmon/patched firmware)"
 	}
 	return reason
+}
+
+// cleanStaleTwin removes leftovers from an earlier twin run: helper processes
+// pointing at our config files, the NAT rules for this interface pair and the
+// AP address itself.
+func cleanStaleTwin(r pentestRunner, dir string, cfg EvilConfig, emit *evilStreamer) {
+	killed := false
+	for _, pat := range []string{filepath.Join(dir, "hostapd.conf"), filepath.Join(dir, "dnsmasq.conf")} {
+		if out, err := r.priv("pkill", "-f", pat); err == nil && strings.TrimSpace(out) == "" {
+			killed = true
+		}
+	}
+	for _, pat := range []string{"hostapd", "dnsmasq"} {
+		if _, err := r.priv("pkill", "-f", pat+" .*"+filepath.Base(dir)); err == nil {
+			killed = true
+		}
+	}
+	if killed {
+		emit.line("Cleared a previous twin run")
+	}
+	if cfg.NAT && strings.TrimSpace(cfg.UplinkIface) != "" {
+		up := cfg.UplinkIface
+		_, _ = r.priv("iptables", "-t", "nat", "-D", "POSTROUTING", "-o", up, "-j", "MASQUERADE")
+		_, _ = r.priv("iptables", "-D", "FORWARD", "-i", cfg.Iface, "-o", up, "-j", "ACCEPT")
+		_, _ = r.priv("iptables", "-D", "FORWARD", "-i", up, "-o", cfg.Iface, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	}
+	_, _ = r.priv("ip", "addr", "del", EvilGateway+"/24", "dev", cfg.Iface)
 }
 
 // ensureManaged makes sure the interface exists and is a managed, up link.

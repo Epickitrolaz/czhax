@@ -51,6 +51,7 @@ type WifiEvilView struct {
 	TargetBSSID string
 
 	Interfaces []wifi.Interface
+	APCapable  map[string]bool
 
 	Cursor int
 	Mode   WifiEvilMode
@@ -84,6 +85,27 @@ func (v WifiEvilView) EffectiveAP() string {
 	return v.Interfaces[clampIndex(v.APIdx, len(v.Interfaces))].Name
 }
 
+// apUsable reports whether the selected AP interface can actually host a
+// hotspot (its driver must advertise AP mode).
+func (v WifiEvilView) apUsable(name string) bool {
+	if v.APCapable == nil {
+		return true
+	}
+	ok, known := v.APCapable[name]
+	return !known || ok
+}
+
+// apIndexes lists the positions of interfaces that can host an AP.
+func (v WifiEvilView) apIndexes() []int {
+	var out []int
+	for i, inf := range v.Interfaces {
+		if v.apUsable(inf.Name) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // UplinkIface returns the selected uplink, excluding the AP interface.
 func (v WifiEvilView) UplinkIface() string {
 	if len(v.Interfaces) < 2 {
@@ -111,11 +133,22 @@ func (v *WifiEvilView) SyncInterfaces(ifaces []wifi.Interface) {
 		v.APIdx, v.UplinkIdx = 0, 0
 		return
 	}
-	for i, inf := range ifaces {
-		if inf.Name == prev {
-			v.APIdx = i
-			break
+	if v.APCapable == nil {
+		v.APCapable = make(map[string]bool, len(ifaces))
+	}
+	for _, inf := range ifaces {
+		v.APCapable[inf.Name] = wifi.APCapable(inf.Name)
+	}
+	// Prefer keeping the previous choice when it can still host an AP.
+	if v.apUsable(prev) {
+		for i, inf := range ifaces {
+			if inf.Name == prev {
+				v.APIdx = i
+				break
+			}
 		}
+	} else if idx := v.apIndexes(); len(idx) > 0 {
+		v.APIdx = idx[0]
 	}
 	v.APIdx = clampIndex(v.APIdx, len(ifaces))
 	v.UplinkIdx = clampIndex(v.UplinkIdx, max(1, len(ifaces)-1))
@@ -148,13 +181,21 @@ func (v *WifiEvilView) Adjust(delta int) {
 	f := v.fields()
 	switch f[clampIndex(v.Cursor, len(f))] {
 	case evilFieldChannel:
-		v.Channel = (v.Channel + delta + 14) % 14
+		v.Channel = (v.Channel + delta + 13) % 13
 		if v.Channel == 0 {
 			v.Channel = 1
 		}
 	case evilFieldAP:
-		if len(v.Interfaces) > 0 {
-			v.APIdx = (v.APIdx + delta + len(v.Interfaces)) % len(v.Interfaces)
+		// Only cycle through interfaces whose driver supports AP mode.
+		if idx := v.apIndexes(); len(idx) > 0 {
+			cur := 0
+			for i, pos := range idx {
+				if pos == v.APIdx {
+					cur = i
+				}
+			}
+			next := (cur + delta + len(idx)) % len(idx)
+			v.APIdx = idx[next]
 		}
 	case evilFieldUplink:
 		n := max(1, len(v.Interfaces)-1)
@@ -190,7 +231,7 @@ func (v *WifiEvilView) Config() wifi.EvilConfig {
 		Iface:       v.EffectiveAP(),
 		UplinkIface: v.UplinkIface(),
 		SSID:        strings.TrimSpace(v.SSID),
-		Channel:     clampInt(v.Channel, 1, 14),
+		Channel:     clampInt(v.Channel, 1, 13),
 		NAT:         v.NAT,
 		Portal:      v.Portal,
 		PMKID:       v.PMKID,
@@ -213,6 +254,10 @@ func (v *WifiEvilView) Start(workDir, captureDir string) (context.Context, int, 
 	if cfg.SSID == "" {
 		v.Err = "enter an SSID to clone"
 		return nil, 0, cfg, nil, fmt.Errorf("no SSID")
+	}
+	if !v.apUsable(cfg.Iface) {
+		v.Err = cfg.Iface + " cannot host an AP - pick another radio"
+		return nil, 0, cfg, nil, fmt.Errorf("%s has no AP mode", cfg.Iface)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	v.Seq++
@@ -319,7 +364,12 @@ func (v WifiEvilView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 		case evilFieldChannel:
 			lbl, val = "Channel", fmt.Sprintf("%d", v.Channel)
 		case evilFieldAP:
-			lbl, val = "AP", v.EffectiveAP()
+			lbl = "AP"
+			if name := v.EffectiveAP(); v.apUsable(name) {
+				val = name
+			} else {
+				val, style = name+" (no AP)", bad
+			}
 		case evilFieldUplink:
 			lbl = "Uplink"
 			if up := v.UplinkIface(); up != "" {
