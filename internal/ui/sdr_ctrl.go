@@ -60,15 +60,6 @@ type sdrSrvDoneMsg struct {
 
 type sdrTickMsg struct{}
 
-// sdrRepaintMsg drives a small live-refresh tick so the spectrum cursor and
-// readout follow the keyboard immediately instead of waiting for the next
-// 0.5s sweep frame.
-type sdrRepaintMsg struct{}
-
-func sdrRepaintCmd() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return sdrRepaintMsg{} })
-}
-
 func probeSDRCmd(skipRTLTest bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -219,7 +210,6 @@ func (m AppModel) startSDRSweep() (tea.Model, tea.Cmd) {
 		runSDRSweepCmd(ctx, seq, cfg, ch),
 		waitSDRSpecFrameCmd(seq, ch),
 		sdrTickCmd(),
-		sdrRepaintCmd(),
 	)
 }
 

@@ -685,42 +685,6 @@ func TestSDRRadioRunningHasSquelchNotMute(t *testing.T) {
 	assertFitsBounds(t, m.View(), 40, 10, "Radio/Squelch")
 }
 
-// TestSDRSpecLiveRepaintTick pins the 10fps refresh that keeps the cursor in
-// step with the keyboard, independent of the 0.5s sweep frames.
-func TestSDRSpecLiveRepaintTick(t *testing.T) {
-	m := newTestSDRApp(t, 53, 14)
-	m.ActiveView = ViewSDR
-	m.ActiveTabs[ViewSDR] = int(SDRTabSpec)
-	m.SDR.Tab = SDRTabSpec
-	m.Focus = FocusContent
-
-	// Not sweeping: the tick stops.
-	next, cmd := m.Update(sdrRepaintMsg{})
-	if cmd != nil {
-		t.Fatalf("repaint tick should stop when nothing is shown")
-	}
-	m = next.(AppModel)
-
-	// Sweeping: the tick keeps running so the cursor refreshes at ~10fps.
-	m.SDR.SpecSeq = 1
-	m.SDR.SpecActive = true
-	m.SDR.SpecStarted = time.Now().Add(-2 * time.Second)
-	next, cmd = m.Update(sdrRepaintMsg{})
-	if cmd == nil {
-		t.Fatalf("repaint tick should continue while sweeping")
-	}
-	m = next.(AppModel)
-	if m.SDR.SpecElapsed < 1500*time.Millisecond {
-		t.Fatalf("elapsed not refreshed: %v", m.SDR.SpecElapsed)
-	}
-
-	// Switching away from the Spec tab stops it.
-	m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
-	if _, cmd := m.Update(sdrRepaintMsg{}); cmd != nil {
-		t.Fatalf("repaint tick should stop off the Spec tab")
-	}
-}
-
 // TestSDRRunningGainSelector checks the gain row exists and adjusts while playing.
 func TestSDRRunningGainSelector(t *testing.T) {
 	m := newTestSDRApp(t, 40, 10)
