@@ -685,6 +685,70 @@ func TestSDRRadioRunningHasSquelchNotMute(t *testing.T) {
 	assertFitsBounds(t, m.View(), 40, 10, "Radio/Squelch")
 }
 
+// TestSDRSpecLiveRepaintTick pins the 10fps refresh that keeps the cursor in
+// step with the keyboard, independent of the 0.5s sweep frames.
+func TestSDRSpecLiveRepaintTick(t *testing.T) {
+	m := newTestSDRApp(t, 53, 14)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabSpec)
+	m.SDR.Tab = SDRTabSpec
+	m.Focus = FocusContent
+
+	// Not sweeping: the tick stops.
+	next, cmd := m.Update(sdrRepaintMsg{})
+	if cmd != nil {
+		t.Fatalf("repaint tick should stop when nothing is shown")
+	}
+	m = next.(AppModel)
+
+	// Sweeping: the tick keeps running so the cursor refreshes at ~10fps.
+	m.SDR.SpecSeq = 1
+	m.SDR.SpecActive = true
+	m.SDR.SpecStarted = time.Now().Add(-2 * time.Second)
+	next, cmd = m.Update(sdrRepaintMsg{})
+	if cmd == nil {
+		t.Fatalf("repaint tick should continue while sweeping")
+	}
+	m = next.(AppModel)
+	if m.SDR.SpecElapsed < 1500*time.Millisecond {
+		t.Fatalf("elapsed not refreshed: %v", m.SDR.SpecElapsed)
+	}
+
+	// Switching away from the Spec tab stops it.
+	m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
+	if _, cmd := m.Update(sdrRepaintMsg{}); cmd != nil {
+		t.Fatalf("repaint tick should stop off the Spec tab")
+	}
+}
+
+// TestSDRRunningGainSelector checks the gain row exists and adjusts while playing.
+func TestSDRRunningGainSelector(t *testing.T) {
+	m := newTestSDRApp(t, 40, 10)
+	m.ActiveView = ViewSDR
+	m.ActiveTabs[ViewSDR] = int(SDRTabRadio)
+	m.SDR.Tab = SDRTabRadio
+	m.SDR.RadioMode = sdrRadioRunning
+	m.SDR.RadioActive = true
+	m.Focus = FocusContent
+
+	if !strings.Contains(m.View(), "Gain") {
+		t.Fatalf("gain row missing while running:\n%s", m.View())
+	}
+	m.SDR.RunCursor = int(sdrRunGain)
+	before := m.SDR.CurrentGainDB()
+	m = sendKey(m, "right")
+	if m.SDR.CurrentGainDB() == before {
+		t.Fatalf("gain did not change from %d", before)
+	}
+	m.SDR.RunCursor = int(sdrRunGain)
+	m = sendKey(m, "left")
+	if m.SDR.CurrentGainDB() != before {
+		t.Fatalf("gain did not return to %d (got %d)", before, m.SDR.CurrentGainDB())
+	}
+	m.SDR.RadioActive = false
+	m.SDR.RadioMode = sdrRadioSetup
+}
+
 // TestSDRNoDongleAndDVBStatus runs the probe status paths.
 func TestSDRNoDongleAndDVBStatus(t *testing.T) {
 	m := newTestSDRApp(t, 40, 10)

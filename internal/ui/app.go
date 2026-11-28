@@ -1389,7 +1389,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.SDR.ApplySpecFrame(msg.seq, msg.frame)
-		return m, waitSDRSpecFrameCmd(msg.seq, m.SDR.SpecFrameCh)
+		return m, tea.Batch(waitSDRSpecFrameCmd(msg.seq, m.SDR.SpecFrameCh), sdrRepaintCmd())
+
+	case sdrRepaintMsg:
+		// Live refresh while the spectrum is on screen: keeps the cursor,
+		// readout and elapsed timer in step with the keyboard.
+		if m.ActiveView != ViewSDR || SDRTab(m.ActiveTabs[ViewSDR]) != SDRTabSpec {
+			return m, nil
+		}
+		if !m.SDR.SpecActive && !m.SDR.SpecHasFrame {
+			return m, nil
+		}
+		if m.SDR.SpecActive && !m.SDR.SpecStarted.IsZero() {
+			m.SDR.SpecElapsed = time.Since(m.SDR.SpecStarted)
+		}
+		return m, sdrRepaintCmd()
 
 	case sdrSpecDoneMsg:
 		m.SDR.FinishSpec(msg.seq, msg.frame, msg.hasFrame, msg.err)

@@ -54,6 +54,7 @@ const (
 	sdrRunFreq sdrRunField = iota
 	sdrRunStep
 	sdrRunBW
+	sdrRunGain
 	sdrRunSquelch
 	sdrRunRecord
 	sdrRunStop
@@ -479,7 +480,7 @@ func (v SDRView) radioFields() []sdrRadioField {
 }
 
 func (v SDRView) runFields() []sdrRunField {
-	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunBW, sdrRunSquelch, sdrRunRecord, sdrRunStop}
+	return []sdrRunField{sdrRunFreq, sdrRunStep, sdrRunBW, sdrRunGain, sdrRunSquelch, sdrRunRecord, sdrRunStop}
 }
 
 func (v *SDRView) MoveRadioCursor(delta int) {
@@ -510,6 +511,9 @@ func (v *SDRView) AdjustRadio(delta int) (retune bool) {
 			v.RadioStepIdx = (v.RadioStepIdx + delta + len(sdr.FreqSteps)) % len(sdr.FreqSteps)
 		case sdrRunBW:
 			v.setBandwidth(sdr.CycleBandwidth(v.RadioMod, v.RadioBwHz, delta))
+			return true
+		case sdrRunGain:
+			v.RadioGainIdx = (v.RadioGainIdx + delta + len(sdr.GainOptions)) % len(sdr.GainOptions)
 			return true
 		case sdrRunSquelch:
 			v.RadioSquelch = clampInt(v.RadioSquelch+delta*5, 0, 100)
@@ -1475,6 +1479,8 @@ func (v SDRView) renderRadio(w, h int, pal theme.Palette, focused bool) []string
 				lbl, val = "Step", sdr.FormatStep(v.CurrentStepHz())
 			case sdrRunBW:
 				lbl, val = "BW", sdr.FormatBandwidth(v.RadioBwHz)
+			case sdrRunGain:
+				lbl, val = "Gain", sdr.FormatGain(v.CurrentGainDB())
 			case sdrRunSquelch:
 				lbl, val = "Squelch", fmt.Sprintf("%d", v.RadioSquelch)
 			case sdrRunRecord:
@@ -1721,15 +1727,10 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 			ch := blocks[level]
 			switch {
 			case col == marker:
-				// Always draw something for the cursor column.
-				if level == 0 {
-					ch = curCh
-					style := cursorStyle
-					if focused {
-						style = sel
-					}
-					sb.WriteString(style.Render(ch))
-				} else if focused {
+				// Draw the cursor as a full-height line so it is obvious on any
+				// terminal (and in mono), even over the noise floor.
+				ch = curCh
+				if focused {
 					sb.WriteString(sel.Render(ch))
 				} else {
 					sb.WriteString(cursorStyle.Render(ch))
