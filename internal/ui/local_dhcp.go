@@ -107,6 +107,23 @@ func (v LocalDHCPView) EffectiveIface() string {
 	return v.Interfaces[clampIndex(v.IfaceIdx, len(v.Interfaces))].Name
 }
 
+// SelectedIface returns the highlighted interface (when one exists).
+func (v LocalDHCPView) SelectedIface() (localscan.Interface, bool) {
+	if len(v.Interfaces) == 0 {
+		return localscan.Interface{}, false
+	}
+	return v.Interfaces[clampIndex(v.IfaceIdx, len(v.Interfaces))], true
+}
+
+// wirelessSelected reports whether the chosen link is a WiFi client, where the
+// AP usually rewrites or drops spoofed source MACs.
+func (v LocalDHCPView) wirelessSelected() bool {
+	if inf, ok := v.SelectedIface(); ok {
+		return inf.Kind == localscan.KindWiFi || wifi.IsWirelessIface(inf.Name)
+	}
+	return false
+}
+
 func (v LocalDHCPView) ifaceLabel() string {
 	if len(v.Interfaces) == 0 {
 		return "none"
@@ -276,6 +293,8 @@ func (v LocalDHCPView) RenderLines(w, h int, pal theme.Palette, focused bool) []
 	lines := []string{hdr.Render(v.Marquee.FitLine(head, w))}
 	if v.Err != "" {
 		lines = append(lines, bad.Render(v.Marquee.FitLine(v.Err, w)))
+	} else if v.wirelessSelected() {
+		lines = append(lines, warn.Render(v.Marquee.FitLine("WiFi client: AP may drop spoofed MACs", w)))
 	}
 	return v.appendDHCPFields(lines, w, h, pal, focused, txt, sec, mut, sel, ok, warn)
 }

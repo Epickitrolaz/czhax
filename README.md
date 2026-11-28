@@ -127,7 +127,8 @@ czhax --cz45   # Ultra-compact 45x10 preview
   - Select any discovered host to view its details or press `s` to run a targeted `nmap` scan on that host alone.
 - **DHCP Starvation (`Local → DHCP`)**:
   - Exhausts a DHCP pool with raw `DHCPDISCOVER` frames, each using a fresh **random client MAC**, so the server hands out (and holds) a lease for every fake client until legitimate devices can no longer join. No external tool: the frame builder/parser is built into CZHax (`CGO_ENABLED=0`) and only needs root for `AF_PACKET`.
-  - **Probe** mode sends a fixed number of requests (10–20 000) and reports the outcome; **flood** mode keeps going until stopped. Rate is adjustable 1–250 req/s, wired/tethered interfaces are preferred (some WiFi client drivers reject raw Ethernet writes) and the tab shows live `sent / offers / unique` counters plus every address the server offered.
+  - **Probe** mode sends a fixed number of requests (10–20 000) and reports the outcome; **flood** mode keeps going until stopped. Rate is adjustable 1–250 req/s and the tab shows live `sent / offers / unique / drops` counters plus every address the server offered.
+  - **A full driver queue no longer aborts the run**: `EAGAIN`/`ENOBUFS` on a busy radio retries briefly, then throttles (drops are counted and reported). Wired/tethered links are preferred — a WiFi client is flagged up front because most APs/drivers rewrite or drop spoofed source MACs, which shows up as `offers=0` (the run also prints a hint when a flood gets no answers at all).
   - Requires root (`sudo` prompt) and an interface on the target segment; use it only on networks you are authorised to test. Headless: `sudo czhax local dhcp --iface eth0 --rate 25 --count 500 --random-mac`.
 - **Bluetooth Scan (`BT → Scan`)**:
   - Scans nearby Bluetooth peers on any `hci*` adapter, with `m` cycling **BLE+Classic**, **BLE**, and **Classic** discovery (`bluetoothctl`, falling back to `hcitool`).
