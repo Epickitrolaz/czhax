@@ -19,6 +19,10 @@ const (
 	evilModeSetup WifiEvilMode = iota
 	evilModeEditSSID
 	evilModeRunning
+	// evilModeDNS is the DNS redirect rule editor overlay.
+	evilModeDNS
+	// evilModeDNSEdit types a new "host=ip" rule.
+	evilModeDNSEdit
 )
 
 type wifiEvilField int
@@ -30,6 +34,7 @@ const (
 	evilFieldUplink
 	evilFieldNAT
 	evilFieldPortal
+	evilFieldDNS
 	evilFieldPMKID
 	evilFieldDeauth
 	evilFieldStart
@@ -38,7 +43,10 @@ const (
 // WifiEvilView is the WiFi -> Evil subtab: an evil twin with internet
 // pass-through, captive portal, PMKID harvest and deauth of the original.
 type WifiEvilView struct {
-	WorkDir    string
+	WorkDir string
+	// BaseDir is the CZHax working directory root (not the twin scratch dir);
+	// custom portal pages are resolved against it.
+	BaseDir    string
 	CaptureDir string
 
 	SSID        string
@@ -46,7 +54,10 @@ type WifiEvilView struct {
 	APIdx       int
 	UplinkIdx   int
 	NAT         bool
-	Portal      bool
+	PortalMode  wifi.PortalMode
+	PortalFile  string
+	DNSRules    []wifi.DNSRule
+	DNSFilter   string
 	PMKID       bool
 	Deauth      bool
 	TargetBSSID string
@@ -57,9 +68,10 @@ type WifiEvilView struct {
 	// wifi interfaces that are not used as the AP.
 	Uplinks []localscan.Interface
 
-	Cursor int
-	Mode   WifiEvilMode
-	Input  string
+	Cursor   int
+	Mode     WifiEvilMode
+	Input    string
+	InputErr string
 
 	Active  bool
 	Seq     int
@@ -75,11 +87,138 @@ type WifiEvilView struct {
 
 func NewWifiEvilView() WifiEvilView {
 	return WifiEvilView{
-		Channel: 6,
-		NAT:     true,
-		Portal:  true,
-		Mode:    evilModeSetup,
+		Channel:    6,
+		NAT:        true,
+		PortalMode: wifi.PortalLogin,
+		Mode:       evilModeSetup,
 	}
+}
+
+// PortalFileDefault is where a custom portal page is looked up inside the
+// working directory unless another path is configured.
+const PortalFileDefault = "user/portal.html"
+
+// PortalLabel describes the selected portal mode for the setup row.
+func (v WifiEvilView) PortalLabel() string {
+	switch v.PortalMode {
+	case wifi.PortalOff:
+		return "off"
+	case wifi.PortalCustom:
+		name := strings.TrimSpace(v.PortalFile)
+		if name == "" {
+			name = PortalFileDefault
+		}
+		if i := strings.LastIndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		}
+		return "custom · " + name
+	default:
+		return "login · logs creds"
+	}
+}
+
+// DNSLabel summarises the redirect rules for the setup row.
+func (v WifiEvilView) DNSLabel() string {
+	if len(v.DNSRules) == 0 {
+		return "all → " + wifi.EvilGateway
+	}
+	catchAll := wifi.EvilGateway
+	specific := 0
+	for _, r := range v.DNSRules {
+		if r.Host == "" || r.Host == "*" {
+			catchAll = r.IP
+			continue
+		}
+		specific++
+	}
+	label := fmt.Sprintf("%d rule", specific)
+	if specific != 1 {
+		label += "s"
+	}
+	return label + " · all → " + catchAll
+}
+
+// portalFile resolves the custom portal page path (relative to the working
+// directory when it is not absolute).
+func (v WifiEvilView) portalFile() string {
+	if v.PortalMode != wifi.PortalCustom {
+		return ""
+	}
+	path := strings.TrimSpace(v.PortalFile)
+	if path == "" {
+		path = PortalFileDefault
+	}
+	base := strings.TrimSpace(v.BaseDir)
+	if base == "" {
+		base = strings.TrimSuffix(strings.TrimSpace(v.WorkDir), "/eviltwin")
+	}
+	if strings.HasPrefix(path, "/") || base == "" {
+		return path
+	}
+	return strings.TrimSuffix(base, "/") + "/" + path
+}
+
+// FilteredDNSRules returns the rules matching the editor filter.
+func (v WifiEvilView) FilteredDNSRules() []int {
+	var out []int
+	f := strings.ToLower(strings.TrimSpace(v.DNSFilter))
+	for i, r := range v.DNSRules {
+		if f == "" || strings.Contains(strings.ToLower(r.Host+" "+r.IP), f) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// BeginDNS opens the rule editor.
+func (v *WifiEvilView) BeginDNS() {
+	v.Mode = evilModeDNS
+	v.DNSFilter = ""
+	v.Cursor = 0
+}
+
+// BeginDNSEdit opens the "new rule" input.
+func (v *WifiEvilView) BeginDNSEdit() {
+	v.Input = ""
+	v.InputErr = ""
+	v.Mode = evilModeDNSEdit
+}
+
+// CommitDNSEdit parses and appends a rule; returns false when invalid.
+func (v *WifiEvilView) CommitDNSEdit() bool {
+	rule, err := wifi.ParseDNSRule(v.Input)
+	if err != nil {
+		v.InputErr = err.Error()
+		return false
+	}
+	// Replace an existing rule for the same host.
+	for i, existing := range v.DNSRules {
+		if existing.Host == rule.Host {
+			v.DNSRules[i] = rule
+			v.Input = ""
+			v.InputErr = ""
+			v.Mode = evilModeDNS
+			return true
+		}
+	}
+	v.DNSRules = append(v.DNSRules, rule)
+	v.Input = ""
+	v.InputErr = ""
+	v.Mode = evilModeDNS
+	return true
+}
+
+// DeleteDNSRule removes the selected rule.
+func (v *WifiEvilView) DeleteDNSRule() bool {
+	idx := v.FilteredDNSRules()
+	if len(idx) == 0 {
+		return false
+	}
+	pos := clampIndex(v.Cursor, len(idx))
+	real := idx[pos]
+	v.DNSRules = append(v.DNSRules[:real], v.DNSRules[real+1:]...)
+	v.Cursor = clampIndex(pos, max(1, len(v.FilteredDNSRules())))
+	return true
 }
 
 func (v WifiEvilView) EffectiveAP() string {
@@ -188,7 +327,9 @@ func (v *WifiEvilView) SyncUplinks(ifaces []localscan.Interface) {
 	v.UplinkIdx = 0
 }
 
-func (v WifiEvilView) IsTextInput() bool { return v.Mode == evilModeEditSSID }
+func (v WifiEvilView) IsTextInput() bool {
+	return v.Mode == evilModeEditSSID || v.Mode == evilModeDNSEdit
+}
 
 func (v *WifiEvilView) SyncInterfaces(ifaces []wifi.Interface) {
 	prev := v.EffectiveAP()
@@ -232,7 +373,8 @@ func (v *WifiEvilView) Prefill(net wifi.Network) {
 func (v WifiEvilView) fields() []wifiEvilField {
 	return []wifiEvilField{
 		evilFieldSSID, evilFieldChannel, evilFieldAP, evilFieldUplink,
-		evilFieldNAT, evilFieldPortal, evilFieldPMKID, evilFieldDeauth, evilFieldStart,
+		evilFieldNAT, evilFieldPortal, evilFieldDNS, evilFieldPMKID,
+		evilFieldDeauth, evilFieldStart,
 	}
 }
 
@@ -268,7 +410,14 @@ func (v *WifiEvilView) Adjust(delta int) {
 	case evilFieldNAT:
 		v.NAT = !v.NAT
 	case evilFieldPortal:
-		v.Portal = !v.Portal
+		switch v.PortalMode {
+		case wifi.PortalOff:
+			v.PortalMode = wifi.PortalLogin
+		case wifi.PortalLogin:
+			v.PortalMode = wifi.PortalCustom
+		default:
+			v.PortalMode = wifi.PortalOff
+		}
 	case evilFieldPMKID:
 		v.PMKID = !v.PMKID
 	case evilFieldDeauth:
@@ -298,7 +447,10 @@ func (v *WifiEvilView) Config() wifi.EvilConfig {
 		SSID:        strings.TrimSpace(v.SSID),
 		Channel:     clampInt(v.Channel, 1, 13),
 		NAT:         v.NAT,
-		Portal:      v.Portal,
+		Portal:      v.PortalMode != wifi.PortalOff,
+		PortalMode:  string(v.PortalMode),
+		PortalFile:  v.portalFile(),
+		DNSRules:    append([]wifi.DNSRule(nil), v.DNSRules...),
 		PMKID:       v.PMKID,
 		WorkDir:     strings.TrimSpace(v.WorkDir) + "/eviltwin",
 		CaptureDir:  v.CaptureDir,
@@ -380,6 +532,10 @@ func (v WifiEvilView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 	warn := lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
 	bad := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
 
+	if v.Mode == evilModeDNS || v.Mode == evilModeDNSEdit {
+		return v.renderDNS(w, h, pal, focused)
+	}
+
 	if v.Mode == evilModeRunning {
 		title := fmt.Sprintf("Evil twin %q · %s", v.SSID, v.EffectiveAP())
 		lines := []string{
@@ -447,7 +603,20 @@ func (v WifiEvilView) RenderLines(w, h int, pal theme.Palette, focused bool) []s
 			val, style = toggle(v.NAT && v.UplinkIface() != "", "NAT via uplink", "[OFF]")
 		case evilFieldPortal:
 			lbl = "Portal"
-			val, style = toggle(v.Portal, "captive portal", "[OFF]")
+			switch v.PortalMode {
+			case wifi.PortalOff:
+				val, style = "[OFF]", mut
+			case wifi.PortalCustom:
+				val, style = v.PortalLabel(), warn
+			default:
+				val, style = v.PortalLabel(), ok
+			}
+		case evilFieldDNS:
+			lbl = "DNS"
+			val, style = v.DNSLabel(), ok
+			if len(v.DNSRules) == 0 {
+				style = mut
+			}
 		case evilFieldPMKID:
 			lbl = "PMKID"
 			val, style = toggle(v.PMKID, "hcxdumptool", "[OFF]")
@@ -490,7 +659,7 @@ func evilFlags(v WifiEvilView) string {
 	if v.NAT && v.UplinkIface() != "" {
 		flags = append(flags, "NAT")
 	}
-	if v.Portal {
+	if v.PortalMode != wifi.PortalOff {
 		flags = append(flags, "portal")
 	}
 	if v.PMKID {
@@ -503,4 +672,53 @@ func evilFlags(v WifiEvilView) string {
 		return "plain"
 	}
 	return strings.Join(flags, "+")
+}
+
+// renderDNS draws the DNS redirect editor: one line per rule plus an input box
+// while a new rule is being typed.
+func (v WifiEvilView) renderDNS(w, h int, pal theme.Palette, focused bool) []string {
+	hdr := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
+	mut := lipgloss.NewStyle().Foreground(pal.Muted)
+	sec := lipgloss.NewStyle().Foreground(pal.Secondary)
+	sel := lipgloss.NewStyle().Bold(true).Foreground(pal.SelectFg).Background(pal.SelectBg)
+	txt := lipgloss.NewStyle().Foreground(pal.Text)
+	ok := lipgloss.NewStyle().Bold(true).Foreground(pal.Success)
+	bad := lipgloss.NewStyle().Bold(true).Foreground(pal.Danger)
+
+	wild := wifi.EvilGateway
+	lines := []string{hdr.Render(v.Marquee.FitLine(fmt.Sprintf("DNS redirects (%d)", len(v.DNSRules)), w))}
+	lines = append(lines, mut.Render(v.Marquee.FitLine("catch-all → "+wild+" (portal)", w)))
+
+	idxs := v.FilteredDNSRules()
+	body := max(1, h-len(lines)-1)
+	if len(idxs) == 0 {
+		lines = append(lines, mut.Render(v.Marquee.FitLine("(no rules) a:add", w)))
+	} else {
+		cur := clampIndex(v.Cursor, len(idxs))
+		start, end := ScrollWindow(len(idxs), cur, body)
+		for i := start; i < end; i++ {
+			rule := v.DNSRules[idxs[i]]
+			row := " " + wifi.FormatDNSRule(rule)
+			if i == cur && focused {
+				lines = append(lines, sel.Width(w).Render(Truncate(row, w)))
+			} else {
+				lines = append(lines, sec.Render(v.Marquee.FitLine(row, w)))
+			}
+		}
+	}
+
+	if v.Mode == evilModeDNSEdit {
+		lines = append(lines, renderEmuInputBox(v.Input, w, pal, focused))
+		if v.InputErr != "" {
+			lines = append(lines, bad.Render(v.Marquee.FitLine(v.InputErr, w)))
+		}
+		lines = append(lines, mut.Render(v.Marquee.FitLine("host=ip · ⏎ save · Esc cancel", w)))
+	} else if v.Err != "" {
+		lines = append(lines, bad.Render(v.Marquee.FitLine(v.Err, w)))
+	} else {
+		lines = append(lines, mut.Render(v.Marquee.FitLine("a:add x:del Esc:back", w)))
+	}
+	_ = ok
+	_ = txt
+	return v.Marquee.SplitLinesPadded(lines, w, h)
 }

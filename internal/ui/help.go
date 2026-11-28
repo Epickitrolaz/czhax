@@ -42,6 +42,9 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("SDR Srv   ") + txt.Render(v.Marquee.Truncate("rtl_tcp IQ server for LAN clients", descW)),
 		" " + sec.Render("WiFi List ") + txt.Render(v.Marquee.Truncate("o:color ⏎:actions (WPS)", descW)),
 		" " + sec.Render("Local     ") + txt.Render(v.Marquee.Truncate("pick if → nmap scan → hosts", descW)),
+		" " + sec.Render("Local DHCP") + txt.Render(v.Marquee.Truncate("m:probe/flood ⏎:exhaust the pool", descW)),
+		" " + sec.Render("Evil DNS  ") + txt.Render(v.Marquee.Truncate("⏎ on DNS: host=ip redirects", descW)),
+		" " + sec.Render("Evil Port ") + txt.Render(v.Marquee.Truncate("portal off/login/custom page", descW)),
 		" " + sec.Render("?         ") + txt.Render(v.Marquee.Truncate("Toggle help", descW)),
 		" " + sec.Render("q / ^C    ") + txt.Render(v.Marquee.Truncate("Quit CZHax", descW)),
 	}

@@ -256,6 +256,9 @@ func main() {
 			channel := fs.Int("channel", 6, "Channel")
 			nat := fs.Bool("nat", false, "NAT clients to the uplink")
 			portal := fs.Bool("portal", false, "Serve a captive portal")
+			portalMode := fs.String("portal-mode", "login", "Portal page: login|custom|off")
+			portalFile := fs.String("portal-file", "", "Custom portal HTML page")
+			dnsRules := fs.String("dns", "", "DNS redirects: \"host=ip,host2=ip\" (* = all)")
 			pmkid := fs.Bool("pmkid", false, "Harvest PMKIDs with hcxdumptool")
 			deauth := fs.String("deauth", "", "Original BSSID to deauth")
 			workDir := fs.String("work-dir", "", "Directory for generated configs")
@@ -264,13 +267,17 @@ func main() {
 			gid := fs.Int("gid", -1, "Owner GID for captures")
 			_ = fs.Parse(os.Args[3:])
 
+			mode := wifi.ParsePortalMode(*portalMode)
 			ecfg := wifi.EvilConfig{
 				Iface:       *iface,
 				UplinkIface: *uplink,
 				SSID:        *ssid,
 				Channel:     *channel,
 				NAT:         *nat,
-				Portal:      *portal,
+				Portal:      *portal || mode != wifi.PortalOff,
+				PortalMode:  string(mode),
+				PortalFile:  *portalFile,
+				DNSRules:    wifi.ParseDNSRules(*dnsRules),
 				PMKID:       *pmkid,
 				DeauthBSSID: *deauth,
 				WorkDir:     *workDir,
@@ -306,6 +313,36 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "local" {
+		if len(os.Args) > 2 && os.Args[2] == "dhcp" {
+			fs := flag.NewFlagSet("local dhcp", flag.ExitOnError)
+			iface := fs.String("iface", "", "Interface on the target segment")
+			rate := fs.Int("rate", 25, "DHCPDISCOVER packets per second")
+			count := fs.Int("count", 0, "Stop after this many requests (0 = flood)")
+			randomMAC := fs.Bool("random-mac", true, "New random client MAC per request")
+			_ = fs.Parse(os.Args[3:])
+			if strings.TrimSpace(*iface) == "" {
+				fmt.Fprintln(os.Stderr, wifi.DHCPStarvationUsage)
+				os.Exit(1)
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			cfg := wifi.DHCPStarvationConfig{
+				Iface:     *iface,
+				Rate:      *rate,
+				Count:     *count,
+				RandomMAC: *randomMAC,
+			}
+			if err := wifi.RunDHCPStarvation(ctx, cfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "local dhcp error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		fmt.Fprintln(os.Stderr, wifi.DHCPStarvationUsage)
+		os.Exit(1)
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "sdr" {
