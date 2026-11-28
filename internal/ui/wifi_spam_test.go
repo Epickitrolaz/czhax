@@ -237,7 +237,7 @@ func TestEvilFromScanPrefillsWithoutStarting(t *testing.T) {
 	if m.WifiEvil.Deauth {
 		t.Fatal("deauth must stay off by default")
 	}
-	if !m.WifiEvil.Portal || !m.WifiEvil.NAT {
+	if m.WifiEvil.PortalMode == wifi.PortalOff || !m.WifiEvil.NAT {
 		t.Fatal("the remaining options must keep their defaults")
 	}
 }

