@@ -1,10 +1,16 @@
 package wifi
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestBuildDHCPDiscover(t *testing.T) {
@@ -201,5 +207,131 @@ func TestDHCPDiscoverChecksumGolden(t *testing.T) {
 	cp[6], cp[7] = 0, 0
 	if got := udpChecksum(ip[12:16], ip[16:20], cp); got != 0xf236 {
 		t.Fatalf("udpChecksum = %#04x, want 0xf236", got)
+	}
+}
+
+// fakeDHCPLink feeds synthetic frames and can simulate a full driver queue.
+type fakeDHCPLink struct {
+	writes   int
+	failFrom int // first write number that returns EAGAIN (0 = never)
+	failTo   int // last write number that returns EAGAIN
+	replies  [][]byte
+	closed   bool
+}
+
+func (f *fakeDHCPLink) writeWait(frame []byte, _ time.Duration) error {
+	f.writes++
+	if f.failFrom > 0 && f.writes >= f.failFrom && f.writes <= f.failTo {
+		return unix.EAGAIN
+	}
+	return nil
+}
+
+func (f *fakeDHCPLink) read(buf []byte, _ time.Duration) (int, error) {
+	if len(f.replies) == 0 {
+		return 0, errPacketTimeout
+	}
+	n := copy(buf, f.replies[0])
+	f.replies = f.replies[1:]
+	return n, nil
+}
+
+func (f *fakeDHCPLink) close() { f.closed = true }
+
+func offerFrame(mac net.HardwareAddr, ip [4]byte) []byte {
+	frame := make([]byte, 14+20+8+240+16)
+	copy(frame[0:6], mac)
+	frame[12], frame[13] = 0x08, 0x00
+	ipH := frame[14:]
+	ipH[0] = 0x45
+	binary.BigEndian.PutUint16(ipH[2:4], 20+8+240+16)
+	ipH[8], ipH[9] = 64, 17
+	binary.BigEndian.PutUint16(ipH[10:12], ipChecksum(ipH[:20]))
+	udp := ipH[20:]
+	binary.BigEndian.PutUint16(udp[0:2], 67)
+	binary.BigEndian.PutUint16(udp[2:4], 68)
+	binary.BigEndian.PutUint16(udp[4:6], 8+240+16)
+	bootp := udp[8:]
+	bootp[0] = 2
+	copy(bootp[16:20], ip[:])
+	copy(bootp[28:34], mac)
+	copy(bootp[236:240], []byte{99, 130, 83, 99})
+	opts := bootp[240:]
+	opts[0], opts[1], opts[2] = 53, 1, dhcpOffer
+	opts[3], opts[4], opts[5], opts[6], opts[7], opts[8] = 54, 4, 10, 0, 0, 1
+	opts[9] = 255
+	return frame
+}
+
+// TestDHCPStarvationSurvivesBusyLink is the "send: resource temporarily
+// unavailable" fix: a full driver queue must throttle the flood, not abort it.
+func TestDHCPStarvationSurvivesBusyLink(t *testing.T) {
+	mac, _ := net.ParseMAC("02:aa:bb:cc:dd:ee")
+	// The probe (write 1) succeeds, then the driver queue is busy for a while.
+	link := &fakeDHCPLink{
+		failFrom: 2,
+		failTo:   6,
+		replies: [][]byte{
+			offerFrame(mac, [4]byte{10, 0, 0, 7}),
+			offerFrame(mac, [4]byte{10, 0, 0, 8}),
+			offerFrame(mac, [4]byte{10, 0, 0, 7}), // duplicate address
+		},
+	}
+
+	inf := &net.Interface{Name: "test0", Flags: net.FlagUp, HardwareAddr: mac}
+	cfg := DHCPStarvationConfig{Iface: "test0", Rate: 200, Count: 12, RandomMAC: true}
+
+	var lines []string
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runDHCPStarvation(ctx, inf, cfg, link, func(f string, a ...any) {
+			lines = append(lines, fmt.Sprintf(f, a...))
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run aborted: %v (lines: %v)", err, lines)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("run did not finish")
+	}
+
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "dropped") {
+		t.Fatalf("busy-queue drops were not reported:\n%s", joined)
+	}
+	if !strings.Contains(joined, "finished 12 requests") {
+		t.Fatalf("run did not complete its quota:\n%s", joined)
+	}
+	if !strings.Contains(joined, "drops=") {
+		t.Fatalf("stats line missing drops:\n%s", joined)
+	}
+	_ = link.closed
+}
+
+// TestDHCPStarvationReportsNoOffers checks the hint when a server never answers.
+func TestDHCPStarvationReportsNoOffers(t *testing.T) {
+	link := &fakeDHCPLink{}
+	inf := &net.Interface{Name: "test0", Flags: net.FlagUp}
+	cfg := DHCPStarvationConfig{Iface: "test0", Rate: 250, Count: 60}
+
+	var mu sync.Mutex
+	var lines []string
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runDHCPStarvation(ctx, inf, cfg, link, func(f string, a ...any) {
+		mu.Lock()
+		lines = append(lines, fmt.Sprintf(f, a...))
+		mu.Unlock()
+	}); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "no offers seen") {
+		t.Fatalf("missing no-offer hint:\n%s", joined)
 	}
 }
