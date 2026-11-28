@@ -532,34 +532,51 @@ func runNarrowFFTSweep(ctx context.Context, devIdx int, startHz, endHz, rate int
 		}
 	}()
 
-	iqChunk := make([]byte, fftSize*2*16)
-	// Buffer the last ~64 chunks of IQ (≈65 KB) so each frame averages a few
-	// hundred FFTs while staying cheap on the CM0.
+	chunkSize := fftSize * 2 * 16
+	// Accumulate the newest ~64 chunks of IQ (≈65 KB) so each frame averages a
+	// few hundred FFTs without allocating: at 2 MS/s the buffer fills in ~32 ms,
+	// so old samples are dropped in place instead of allocating a copy every
+	// read (that allocation storm alone kept the CM0's GC busy).
 	maxAcc := fftSize * 2 * 64
 	acc := make([]byte, 0, maxAcc)
 	fullStart := center - rate/2
 	fullEnd := center + rate/2
-	lastEmit := time.Time{}
+	// Emit the first frame as soon as a chunk is in (fast first paint), then
+	// once per interval.
+	lastEmit := time.Now().Add(-interval)
+
+	emit := func() {
+		if len(acc) < fftSize*2 {
+			return
+		}
+		full := computeFullSpectrumDB(acc, fftSize)
+		hiBins := cropBins(full, fullStart, fullEnd, startHz, endHz)
+		disp := poolBinsMax(hiBins, outBins)
+		frame := BuildSpectrumFrameHiRes(startHz, endHz, disp, hiBins)
+		acc = acc[:0]
+		lastEmit = time.Now()
+		if onFrame != nil {
+			onFrame(frame)
+		}
+	}
 
 	for {
-		if _, err := io.ReadFull(stdout, iqChunk); err != nil {
+		if len(acc)+chunkSize > cap(acc) {
+			// Keep the newest samples, drop the oldest in place.
+			keep := cap(acc) - chunkSize
+			copy(acc[:keep], acc[len(acc)-keep:])
+			acc = acc[:keep]
+		}
+		start := len(acc)
+		acc = acc[:start+chunkSize]
+		n, err := io.ReadFull(stdout, acc[start:])
+		if err != nil {
+			acc = acc[:start+n]
+			emit()
 			break
 		}
-		acc = append(acc, iqChunk...)
-		if len(acc) > maxAcc {
-			keep := append([]byte(nil), acc[len(acc)-maxAcc:]...)
-			acc = keep
-		}
-		now := time.Now()
-		if lastEmit.IsZero() || now.Sub(lastEmit) >= interval {
-			full := computeFullSpectrumDB(acc, fftSize)
-			hiBins := cropBins(full, fullStart, fullEnd, startHz, endHz)
-			disp := poolBinsMax(hiBins, outBins)
-			frame := BuildSpectrumFrameHiRes(startHz, endHz, disp, hiBins)
-			if onFrame != nil {
-				onFrame(frame)
-			}
-			lastEmit = now
+		if time.Since(lastEmit) >= interval {
+			emit()
 		}
 		if ctx.Err() != nil {
 			break

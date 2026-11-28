@@ -1712,12 +1712,25 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 	}
 	cursorStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Accent)
 
+	// Styling is applied to whole runs of identical cells instead of one
+	// lipgloss.Render per cell: on the CM0 the per-cell path cost more than the
+	// whole rest of the frame and made the spectrum feel frozen.
+	rowStyles := [3]lipgloss.Style{ok, warn, cursorStyle}
+	if focused {
+		rowStyles[2] = sel
+	}
 	for row := barH - 1; row >= 0; row-- {
-		var sb strings.Builder
+		var out strings.Builder
+		var run strings.Builder
+		curStyle := -1
+		flush := func() {
+			if run.Len() > 0 && curStyle >= 0 {
+				out.WriteString(rowStyles[curStyle].Render(run.String()))
+				run.Reset()
+			}
+		}
 		for col := 0; col < w; col++ {
-			totalSteps := levelFor(bins[col]) * float64(barH*8)
-			rowStart := float64(row * 8)
-			level := int(totalSteps - rowStart + 0.5)
+			level := int(levelFor(bins[col])*float64(barH*8) - float64(row*8) + 0.5)
 			if level < 0 {
 				level = 0
 			}
@@ -1725,23 +1738,23 @@ func (v SDRView) renderSpec(w, h int, pal theme.Palette, focused bool) []string 
 				level = 8
 			}
 			ch := blocks[level]
+			style := 0
 			switch {
 			case col == marker:
-				// Draw the cursor as a full-height line so it is obvious on any
-				// terminal (and in mono), even over the noise floor.
+				// Full-height cursor line: obvious on any terminal and in mono.
 				ch = curCh
-				if focused {
-					sb.WriteString(sel.Render(ch))
-				} else {
-					sb.WriteString(cursorStyle.Render(ch))
-				}
+				style = 2
 			case col == peakCol:
-				sb.WriteString(warn.Render(ch))
-			default:
-				sb.WriteString(ok.Render(ch))
+				style = 1
 			}
+			if style != curStyle {
+				flush()
+				curStyle = style
+			}
+			run.WriteString(ch)
 		}
-		lines = append(lines, sb.String())
+		flush()
+		lines = append(lines, out.String())
 	}
 
 	markChar := "▲"
