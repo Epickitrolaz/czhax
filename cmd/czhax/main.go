@@ -18,6 +18,7 @@ import (
 	"github.com/czhax/czhax/internal/boot"
 	"github.com/czhax/czhax/internal/config"
 	"github.com/czhax/czhax/internal/console"
+	"github.com/czhax/czhax/internal/ethtap"
 	"github.com/czhax/czhax/internal/ir"
 	"github.com/czhax/czhax/internal/oneshot"
 	"github.com/czhax/czhax/internal/power"
@@ -25,6 +26,7 @@ import (
 	"github.com/czhax/czhax/internal/ui"
 	"github.com/czhax/czhax/internal/updater"
 	"github.com/czhax/czhax/internal/wifi"
+	"github.com/czhax/czhax/internal/workdir"
 )
 
 var version = "0.2.0"
@@ -337,6 +339,51 @@ func main() {
 			}
 			if err := wifi.RunDHCPStarvation(ctx, cfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "local dhcp error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "tap" {
+			fs := flag.NewFlagSet("local tap", flag.ExitOnError)
+			portA := fs.String("port-a", "", "Device-side Ethernet port")
+			portB := fs.String("port-b", "", "Uplink-side Ethernet port")
+			bridge := fs.String("bridge", ethtap.DefaultBridge, "Bridge interface to create")
+			record := fs.Bool("record", false, "Record every frame to a pcap file")
+			spoof := fs.Bool("spoof", false, "Answer DNS with the portal address")
+			portal := fs.String("portal", "login", "Portal page: off|login|custom")
+			portalIP := fs.String("portal-ip", "", "Portal IPv4 (default: pick a free address)")
+			subnet := fs.String("subnet", "", "Tapped subnet CIDR, used to pick the portal IP")
+			portalFile := fs.String("portal-file", "", "Custom portal HTML page")
+			captures := fs.String("captures", "", "Capture directory (default ~/czhax/captures)")
+			uid := fs.Int("uid", 0, "Chown captures to this uid")
+			gid := fs.Int("gid", 0, "Chown captures to this gid")
+			_ = fs.Parse(os.Args[3:])
+			if strings.TrimSpace(*portA) == "" || strings.TrimSpace(*portB) == "" {
+				fmt.Fprintln(os.Stderr, ethtap.Usage)
+				os.Exit(1)
+			}
+			capDir := strings.TrimSpace(*captures)
+			if capDir == "" {
+				capDir = workdir.Captures(workdir.Resolve(""))
+			}
+			cfg := ethtap.Config{
+				PortA:      *portA,
+				PortB:      *portB,
+				Bridge:     *bridge,
+				Record:     *record,
+				CaptureDir: capDir,
+				Spoof:      *spoof,
+				PortalIP:   *portalIP,
+				Subnet:     *subnet,
+				Portal:     *portal,
+				PortalDoc:  *portalFile,
+				UID:        *uid,
+				GID:        *gid,
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			if err := ethtap.Run(ctx, cfg, func(line string) { fmt.Println(line) }); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "local tap error: %v\n", err)
 				os.Exit(1)
 			}
 			return
