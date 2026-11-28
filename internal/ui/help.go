@@ -43,6 +43,7 @@ func (v HelpView) RenderLines(w, h int, pal theme.Palette) []string {
 		" " + sec.Render("WiFi List ") + txt.Render(v.Marquee.Truncate("o:color ⏎:actions (WPS)", descW)),
 		" " + sec.Render("Local     ") + txt.Render(v.Marquee.Truncate("pick if → nmap scan → hosts", descW)),
 		" " + sec.Render("Local DHCP") + txt.Render(v.Marquee.Truncate("m:probe/flood ⏎:exhaust the pool", descW)),
+		" " + sec.Render("Local Tap ") + txt.Render(v.Marquee.Truncate("bridge 2 eth ports, record + DNS spoof", descW)),
 		" " + sec.Render("Evil DNS  ") + txt.Render(v.Marquee.Truncate("⏎ on DNS: host=ip redirects", descW)),
 		" " + sec.Render("Evil Port ") + txt.Render(v.Marquee.Truncate("portal off/login/custom page", descW)),
 		" " + sec.Render("?         ") + txt.Render(v.Marquee.Truncate("Toggle help", descW)),

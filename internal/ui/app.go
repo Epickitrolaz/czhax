@@ -322,6 +322,7 @@ type AppModel struct {
 	WifiEvil      WifiEvilView
 	Local         LocalView
 	LocalDHCP     LocalDHCPView
+	LocalTap      LocalTapView
 	IR            IRView
 	SDR           SDRView
 	Bluetooth     BluetoothView
@@ -364,6 +365,7 @@ func NewAppModel(cfg config.Config, cfgPath, version string) AppModel {
 		WifiEvil:      NewWifiEvilView(),
 		Local:         NewLocalView(),
 		LocalDHCP:     NewLocalDHCPView(),
+		LocalTap:      NewLocalTapView(),
 		IR:            NewIRView(cfgPath),
 		SDR:           NewSDRView(root, workdir.Captures(root), sdr.DefaultBookmarksPath()),
 		Bluetooth:     NewBluetoothView(),
@@ -1328,7 +1330,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.WifiEvil.Active {
 			m.WifiEvil.Elapsed = time.Since(m.WifiEvil.Started)
 		}
-		if m.WifiSpam.Active || m.WifiEvil.Active {
+		if m.LocalTap.Active {
+			m.LocalTap.Elapsed = time.Since(m.LocalTap.Started)
+		}
+		if m.WifiSpam.Active || m.WifiEvil.Active || m.LocalTap.Active {
 			return m, wifiHelperTickCmd()
 		}
 		return m, nil
@@ -1336,6 +1341,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case localIfacesMsg:
 		m.Local.SyncInterfaces(msg.ifaces)
 		m.LocalDHCP.SyncInterfaces(msg.ifaces)
+		m.LocalTap.SyncInterfaces(msg.ifaces)
 		m.WifiEvil.SyncUplinks(msg.ifaces)
 		return m, nil
 
@@ -1378,6 +1384,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setStatus("DHCP run stopped")
 		default:
 			return m, m.setStatus("DHCP failed")
+		}
+
+	case localTapLineMsg:
+		if !m.LocalTap.Active || msg.seq != m.LocalTap.Seq {
+			return m, nil
+		}
+		m.LocalTap.AppendLine(msg.seq, msg.line)
+		return m, waitLocalTapLineCmd(msg.seq, m.LocalTap.Ch)
+
+	case localTapDoneMsg:
+		m.LocalTap.Finish(msg.seq, msg.err)
+		switch {
+		case msg.err == nil:
+			return m, m.setStatus("Tap stopped")
+		case strings.Contains(strings.ToLower(msg.err.Error()), "canceled"):
+			return m, m.setStatus("Tap stopped")
+		default:
+			return m, m.setStatus("Tap failed")
 		}
 
 	case localDHCPTickMsg:
@@ -1682,6 +1706,10 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.LocalDHCP.Stop()
 		return m, m.setStatus("Stopping DHCP run...")
 	}
+	if m.LocalTap.Active && (k == "ctrl+c" || k == "q") {
+		m.LocalTap.Stop()
+		return m, m.setStatus("Stopping tap...")
+	}
 	if m.BluetoothScan.RunActive && (k == "ctrl+c" || k == "q") {
 		m.BluetoothScan.StopAttack()
 		return m, m.setStatus("Stopping Bluetooth action...")
@@ -1931,6 +1959,7 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.Local.LoadingIfaces = true
 				}
 				m.LocalDHCP.SyncInterfaces(m.Local.Interfaces)
+				m.LocalTap.SyncInterfaces(m.Local.Interfaces)
 				return m, collectLocalIfacesCmd()
 			} else if m.ActiveView == ViewBluetooth {
 				if m.ActiveTabs[ViewBluetooth] == BTTabEmu {
@@ -2313,6 +2342,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 		if m.ActiveView == ViewLocal && m.ActiveTabs[ViewLocal] == LocalTabDHCP && m.LocalDHCP.HandleEsc() {
 			return m, nil
 		}
+		if m.ActiveView == ViewLocal && m.ActiveTabs[ViewLocal] == LocalTabTap && m.LocalTap.HandleEsc() {
+			return m, nil
+		}
 		if m.ActiveView == ViewLocal && m.ActiveTabs[ViewLocal] == LocalTabScan && m.Local.HandleEsc() {
 			return m, nil
 		}
@@ -2518,6 +2550,9 @@ func (m AppModel) handleContentKey(k string) (tea.Model, tea.Cmd) {
 	case ViewLocal:
 		if m.ActiveTabs[ViewLocal] == LocalTabDHCP {
 			return m.handleLocalDHCPKey(k)
+		}
+		if m.ActiveTabs[ViewLocal] == LocalTabTap {
+			return m.handleLocalTapKey(k)
 		}
 		_, mainW, bodyH := m.dimensions()
 		pal := theme.Resolve(m.Cfg.Theme, false)
@@ -3447,6 +3482,10 @@ func (m AppModel) renderScreen(marqueeStep int) (string, bool) {
 			dhcpView := m.LocalDHCP
 			dhcpView.Marquee = mq
 			mainLines = dhcpView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
+		} else if m.ActiveTabs[ViewLocal] == LocalTabTap {
+			tapView := m.LocalTap
+			tapView.Marquee = mq
+			mainLines = tapView.RenderLines(mainW, bodyH, pal, m.Focus == FocusContent)
 		} else {
 			localView := m.Local
 			localView.Marquee = mq
@@ -3669,6 +3708,9 @@ func (m AppModel) currentHints() []Hint {
 	if m.ActiveView == ViewLocal {
 		if m.ActiveTabs[ViewLocal] == LocalTabDHCP {
 			return m.localDHCPHints()
+		}
+		if m.ActiveTabs[ViewLocal] == LocalTabTap {
+			return m.localTapHints()
 		}
 		switch m.Local.Mode {
 		case localModeOptions:

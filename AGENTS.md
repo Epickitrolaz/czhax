@@ -48,6 +48,9 @@ internal/
   bluetooth/attack.go      # Carwhisperer / WhisperPair / l2ping flood action dispatch
   bluetooth/carwhisperer.go # Native RFCOMM + SCO audio injection/recording (WAV)
   bluetooth/exec.go        # Privileged streaming command helper (sudo -n)
+  ethtap/tap.go            # Transparent two-port Ethernet bridge (inline tap): setup/teardown, DNS spoof, portal
+  ethtap/capture.go        # AF_PACKET capture, protocol dissector, native pcap writer, live stats
+  ethtap/dns.go            # DNS spoof reply builder, ARP probe frames, checksums
   audio/audio.go           # Mic recording (arecord/parecord), SCO conversion, media players
   files/files.go           # Working-directory browser, text/image/audio/video helpers
   workdir/workdir.go       # ~/czhax working directory + captures/temp/user paths
@@ -69,6 +72,7 @@ internal/
     wifi_evil.go           # WiFi -> Evil: twin setup (AP/uplink/NAT/portal/PMKID/deauth) + log
     wifi_extra.go          # Spam/Evil key handling, privileged helper streaming
     local.go               # Local -> Scan interface picker, nmap options, live run, host details
+    local_tap.go           # Local -> Tap: bridge two eth ports, record, DNS spoof portal
     bluetooth.go           # Status -> Bluetooth view
     bluetooth_scan.go      # BT -> Scan list/actions/detail/live attack output (Carwhisperer, WhisperPair, l2ping)
     files.go               # Files -> working-directory browser, text editor, image viewer, mic recorder
